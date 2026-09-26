@@ -64,3 +64,13 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    (DISC-004) remain open and must be escalated, not self-authorized. The owner-approved CUDA
    baseline is pinned (tests/pinned/gpu_envelope.json; listened case bitwise). New optimizations
    must not regress it or widen thresholds; any new/worse discrepancy is escalated.
+4. BOUNDED VARIATION (Misha, 1553392534095527999; supersedes the bitwise/zero-slack pin rule in #3):
+   bit identity is not required; small bounded numerical differences are allowed; approved audio
+   is comparison evidence, not a byte-lock. Regression policy RB-1 (docs/conformance/REGRESSION_POLICY.md):
+   explicit nonzero per-case drift bounds = min(reference arithmetic sensitivity, owner-accepted
+   listened divergence), fixed before judging further levers; exact discrete invariants, complete
+   seams/coverage/spectral/negative controls kept; escalate materially larger or audible differences
+   with raw paired samples. Historical original-gate failures are never re-labelled as passes.
+5. INTERIM CHECKPOINT (Misha, 1553392892624511017): pause new optimization; run and report an interim
+   Rust CUDA vs production-pinned Python Kokoro CUDA comparison (docs/PERFORMANCE_REPORT.md,
+   evidence/interim-comparison/), then stop for review.

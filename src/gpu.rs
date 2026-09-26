@@ -35,7 +35,7 @@ kernels!(
     fill_channels, fill_rows, leaky_relu, add_inplace, div_inplace, residual_scale, chan_stats, adain_apply,
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
-    sine_har_source, stft20, istft_frames, istft_ola, gen_noise,
+    sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq,
 );
 
 macro_rules! launch {
@@ -478,6 +478,22 @@ impl GLstm {
         let _p = crate::prof::scope("gpu/lstm");
         let gf = self.wih[0].fwd(g, x, t)?;
         let gbk = self.wih[1].fwd(g, x, t)?;
+        if std::env::var("KOKORO_LSTM_PERSISTENT").map(|v| v != "0").unwrap_or(true) {
+            // LEVER PL-002 (kill switch KOKORO_LSTM_PERSISTENT=0): whole sequence, one launch.
+            let mut hbuf = g.stream.alloc_zeros::<f32>(4 * self.h)?;
+            let mut c = g.stream.alloc_zeros::<f32>(2 * self.h)?;
+            let mut out = g.alloc(t * 2 * self.h)?;
+            let cfg = LaunchConfig { grid_dim: (self.h as u32, 2, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+            let (ti, hi) = (t as i32, self.h as i32);
+            let mut b = g.stream.launch_builder(&g.k.lstm_seq);
+            b.arg(&gf).arg(&gbk).arg(&self.whh[0]).arg(&self.whh[1]).arg(&self.bhh[0]).arg(&self.bhh[1]);
+            b.arg(&mut hbuf).arg(&mut c).arg(&mut out).arg(&ti).arg(&hi);
+            // SAFETY: arguments match lstm_seq; grid (H,2)x128 must be co-resident (cooperative
+            // launch fails loudly otherwise); buffers sized 4H / 2H / T*2H as indexed.
+            unsafe { b.launch_cooperative(cfg) }.context("lstm_seq cooperative launch")?;
+            g.prof_sync();
+            return Ok(out);
+        }
         let mut ha = g.stream.alloc_zeros::<f32>(2 * self.h)?;
         let mut hb = g.stream.alloc_zeros::<f32>(2 * self.h)?;
         let mut c = g.stream.alloc_zeros::<f32>(2 * self.h)?;

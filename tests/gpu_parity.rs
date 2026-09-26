@@ -289,70 +289,104 @@ fn read_f32_wav(p: &std::path::Path) -> Vec<f32> {
     b[44..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
-/// Owner-approved baseline (DISC-003): the listened case must stay BITWISE equal to the accepted
-/// WAV, and no case may get worse than the pinned envelope (tests/pinned/gpu_envelope.json) on
-/// any metric. No tolerance: a worse value is an escalation, not a pass.
-/// Pin once: KOKORO_PIN_ENVELOPE=1 (refuses to overwrite an existing pin).
+/// Bounded-variation regression policy RB-1 (owner clarification 1553392534095527999; bounds
+/// fixed 2026-09-26 BEFORE judging any further optimization; docs/conformance/REGRESSION_POLICY.md).
+/// Per case, a candidate CUDA output may drift from the approved baseline output by at most
+///   min(reference arithmetic sensitivity of that case, owner-accepted listened divergence)
+/// on rel-L2, max|Δ| and spectral mean|ΔdB|; discrete outputs exact; the set of cases failing the
+/// binding original gates (v1 / G-SPEC) may not grow. Bit identity is reported, never required.
+/// One-time setup: KOKORO_PIN_BOUNDS=1 (refuses to overwrite).
 #[test]
-fn gpu_regression_pinned() {
+fn gpu_regression_bounded() {
     use sha2::{Digest, Sha256};
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pinned");
+    let (pin_path, bounds_path) = (root.join("gpu_envelope.json"), root.join("regression_bounds.json"));
+    let base_dir = data_root().join("evidence/pinned-baseline");
     let snap = data_root().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987");
     let w = Weights::load_pth(&snap.join("kokoro-v1_0.pth")).unwrap();
     let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(snap.join("config.json")).unwrap()).unwrap();
     let m = Kokoro::from_weights(&w, &cfg).unwrap();
     let gm = GpuKokoro::new(&m, 0).unwrap();
-    let pin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pinned/gpu_envelope.json");
-    let pinning = std::env::var("KOKORO_PIN_ENVELOPE").map(|v| v == "1").unwrap_or(false);
-    let mut cur = serde_json::Map::new();
-    let mut listened_bitwise = false;
+    let pin: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pin_path).unwrap()).unwrap();
+    let setup = std::env::var("KOKORO_PIN_BOUNDS").map(|v| v == "1").unwrap_or(false);
+    let listened_ref = read_f32_wav(&data_root().join("evidence/listening/worst-peak-reference.wav"));
+    let listened_rust = read_f32_wav(&data_root().join("evidence/listening/worst-peak-rust-cuda.wav"));
+    let (l_rel, l_max, _) = rel(&listened_rust, &listened_ref);
+    let l_spec = common_gates::spec_mean_abs_db(&listened_rust, &listened_ref);
+    let spec_gate = {
+        let c = common_gates::FLOOR_CASE;
+        let t1 = st::load(&data_root().join(format!("fixtures/cpu-t1/{c}/fixture.safetensors"))).unwrap()["audio"].f32().unwrap().to_vec();
+        let t8 = st::load(&data_root().join(format!("fixtures/f64/{c}/f64.safetensors"))).unwrap()["audio_f32_t8"].f32().unwrap().to_vec();
+        2.0 * common_gates::spec_mean_abs_db(&t1, &t8)
+    };
+    let binding_fail = |r: f64, mx: f64, co: f64, sp: f64| !(r <= 0.019 && mx <= 0.033 && co >= 0.9995) || sp > spec_gate;
+    if setup {
+        assert!(!bounds_path.exists(), "refusing to overwrite {}", bounds_path.display());
+        std::fs::create_dir_all(&base_dir).unwrap();
+    }
+    let bounds: serde_json::Value = if setup { serde_json::json!({}) } else { serde_json::from_str(&std::fs::read_to_string(&bounds_path).expect("no bounds; run setup")).unwrap() };
+    let floors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(data_root().join("fixtures/floor_per_case.json")).unwrap()).unwrap();
+    let mut new_bounds = serde_json::Map::new();
+    let (mut violations, mut new_binding_fails, mut bitwise) = (vec![], vec![], 0usize);
+    let mut n = 0usize;
     for fx in fixtures() {
-        let c = fx.name.as_str();
+        let c = fx.name.clone();
         let (ids, _) = m.phonemes_to_ids(fx.meta["phonemes"].as_str().unwrap());
         let rand_ini: [f32; HARMONICS] = fx.f("noise.rand_ini").try_into().unwrap();
         let speed = fx.meta["speed"].as_f64().unwrap() as f32;
         let out = gm.forward_ids(&m, &ids, &fx.f("ref_s"), speed, &mut FixedNoise { rand_ini, sine_noise: fx.f("noise.sine") }).unwrap();
-        assert_eq!(out.pred_dur, fx.i("pred_dur"), "{c}: durations");
+        assert_eq!(out.pred_dur, fx.i("pred_dur"), "{c}: durations (exact invariant)");
         let want = fx.f("audio");
-        let (r, mx, co) = rel(&out.audio, &want);
-        let sp = common_gates::spec_mean_abs_db(&out.audio, &want);
+        assert_eq!(out.audio.len(), want.len(), "{c}: sample count (exact invariant)");
         let bytes: Vec<u8> = out.audio.iter().flat_map(|v| v.to_le_bytes()).collect();
         let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-        if c == "s02_fox__am_adam__s1.0" {
-            let acc = read_f32_wav(&data_root().join("evidence/listening/worst-peak-rust-cuda.wav"));
-            listened_bitwise = acc.len() == out.audio.len() && acc.iter().zip(&out.audio).all(|(a, b)| a.to_bits() == b.to_bits());
+        let base_file = base_dir.join(format!("{c}.f32le"));
+        if setup {
+            assert_eq!(sha, pin["cases"][&c]["audio_f32le_sha256"].as_str().unwrap(), "{c}: current output is not the approved baseline; cannot dump");
+            std::fs::write(&base_file, &bytes).unwrap();
+            // reference arithmetic sensitivity: pinned torch f32 at 2/4/8 threads vs 1 thread
+            let f64fx = st::load(&data_root().join(format!("fixtures/f64/{c}/f64.safetensors"))).unwrap();
+            let sens_spec = [2, 4, 8].iter().map(|t| common_gates::spec_mean_abs_db(f64fx[&format!("audio_f32_t{t}")].f32().unwrap(), &want)).fold(0.0f64, f64::max);
+            let fl = &floors["cases"][&c];
+            let (sr, sm) = (fl["floor_rel"].as_f64().unwrap(), fl["floor_max"].as_f64().unwrap());
+            new_bounds.insert(c.clone(), serde_json::json!({
+                "rel_l2": sr.min(l_rel), "max_abs": sm.min(l_max), "spec_db": sens_spec.min(l_spec),
+                "ref_sensitivity": {"rel_l2": sr, "max_abs": sm, "spec_db": sens_spec}}));
+            n += 1;
+            continue;
         }
-        cur.insert(c.into(), serde_json::json!({"rel_l2": r, "max_abs": mx, "corr": co, "spec_db": sp, "audio_f32le_sha256": sha}));
-    }
-    assert_eq!(cur.len(), 15, "envelope must cover all 15 cases");
-    if pinning {
-        assert!(!pin_path.exists(), "refusing to overwrite existing pin {}", pin_path.display());
-        assert!(listened_bitwise, "cannot pin: listened case not bitwise equal to the owner-accepted WAV");
-        std::fs::write(&pin_path, serde_json::to_string_pretty(&serde_json::json!({
-            "pinned": "2026-09-26 owner-approved CUDA baseline (DISC-003); fixtures cpu-t1; FixedNoise",
-            "cases": cur}))
-        .unwrap())
-        .unwrap();
-        println!("pinned {}", pin_path.display());
-        return;
-    }
-    let pin: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pin_path).expect("no pinned envelope")).unwrap();
-    assert!(listened_bitwise, "REGRESSION: owner-accepted case s02_fox/am_adam/s1.0 no longer bitwise equal to the listened WAV — escalate");
-    let mut worse = vec![];
-    let mut identical = 0;
-    for (c, v) in &cur {
-        let p = &pin["cases"][c];
-        if v["audio_f32le_sha256"] == p["audio_f32le_sha256"] {
-            identical += 1;
+        let base: Vec<f32> = std::fs::read(&base_file).unwrap().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        if base == out.audio {
+            bitwise += 1;
         }
-        for k in ["rel_l2", "max_abs", "spec_db"] {
-            if v[k].as_f64().unwrap() > p[k].as_f64().unwrap() {
-                worse.push(format!("{c}.{k}: {} > pinned {}", v[k], p[k]));
+        let (dr, dm, _) = rel(&out.audio, &base);
+        let ds = common_gates::spec_mean_abs_db(&out.audio, &base);
+        let b = &bounds["cases"][&c];
+        for (k, v) in [("rel_l2", dr), ("max_abs", dm), ("spec_db", ds)] {
+            if v > b[k].as_f64().unwrap() {
+                violations.push(format!("{c}.{k}: drift {v:.5} > bound {:.5}", b[k].as_f64().unwrap()));
             }
         }
-        if v["corr"].as_f64().unwrap() < p["corr"].as_f64().unwrap() {
-            worse.push(format!("{c}.corr: {} < pinned {}", v["corr"], p["corr"]));
+        let (r, mx, co) = rel(&out.audio, &want);
+        let sp = common_gates::spec_mean_abs_db(&out.audio, &want);
+        let p = &pin["cases"][&c];
+        let was_fail = binding_fail(p["rel_l2"].as_f64().unwrap(), p["max_abs"].as_f64().unwrap(), p["corr"].as_f64().unwrap(), p["spec_db"].as_f64().unwrap());
+        if binding_fail(r, mx, co, sp) && !was_fail {
+            new_binding_fails.push(c.clone());
         }
+        println!("{c:<32} drift rel {dr:.2e} max {dm:.2e} spec {ds:.4} dB | vs ref max {mx:.4} (base {:.4})", p["max_abs"].as_f64().unwrap());
+        n += 1;
     }
-    println!("pinned envelope: {identical}/15 cases bitwise identical; {} metric regressions", worse.len());
-    assert!(worse.is_empty(), "REGRESSION vs owner-approved envelope (escalate, do not widen): {worse:#?}");
+    assert_eq!(n, 15, "all 15 cases required");
+    if setup {
+        std::fs::write(&bounds_path, serde_json::to_string_pretty(&serde_json::json!({
+            "policy": "RB-1: per case min(reference arithmetic sensitivity [pinned torch CPU f32 t2/t4/t8 vs t1], owner-accepted listened divergence); fixed 2026-09-26 before judging further levers",
+            "listened_divergence": {"rel_l2": l_rel, "max_abs": l_max, "spec_db": l_spec},
+            "baseline_audio_dir": base_dir, "cases": new_bounds})).unwrap()).unwrap();
+        println!("wrote {} and baseline audio to {}", bounds_path.display(), base_dir.display());
+        return;
+    }
+    println!("RB-1: {bitwise}/15 bitwise identical to baseline (optional evidence); {} drift violations; new binding-gate failures: {new_binding_fails:?}", violations.len());
+    assert!(violations.is_empty(), "drift beyond RB-1 bounds — escalate with paired audio: {violations:#?}");
+    assert!(new_binding_fails.is_empty(), "cases newly failing the binding original gates — escalate: {new_binding_fails:?}");
 }

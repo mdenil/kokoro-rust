@@ -57,3 +57,11 @@ the frozen baseline is not.
   path device-vs-host noise rel 1.5e-6. Noise mean 0.0002 var 0.9999.
 - A/B (quiet host, ABBA n=5, whole-process wall, bench --reps 2, 69 chunks): A 16.877 s (cv 4.99%)
   → B 12.153 s (cv 2.75%), 1.389×, B faster 5/5. Keep, default on.
+
+### PL-002 — BiLSTM as one cooperative persistent kernel per sequence   [2026-09-26 | WIN (local, small)]
+- Lever: `lstm_seq` (grid (H,2)×128, grid.sync per step) replaces T per-step launches; identical
+  per-step arithmetic. Kill switch `KOKORO_LSTM_PERSISTENT=0`.
+- Correctness: pinned envelope 15/15 BITWISE identical (optional evidence; bit identity is not the
+  acceptance requirement per owner clarification 1553392534095527999).
+- A/B (quiet host, ABBA n=5, whole process, bench --reps 3): 14.102 s → 13.818 s (1.021×, B faster
+  4/5, cv 2.2%/2.0%); inference receipts 2.541 s → 2.477 s (evidence/rust/cuda-lstmpersist{0,1}-*.json). Keep.

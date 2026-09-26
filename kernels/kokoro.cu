@@ -3,6 +3,8 @@
 // where the CPU path itself uses mul_add (torch interpolation semantics).
 // Matrix products are done by cuBLAS in src/gpu.rs, not here.
 
+#include <cooperative_groups.h>
+
 #define PI_F 3.14159274101257324f  // (float)M_PI, as std::f32::consts::PI
 
 extern "C" __global__ void fill_channels(float* y, const float* bias, int C, int T) {
@@ -468,4 +470,42 @@ extern "C" __global__ void gen_noise(unsigned long long seed, float* out, long n
     float th = 6.2831855f * u2;
     out[2 * i] = r * cosf(th);
     if (2 * i + 1 < n) out[2 * i + 1] = r * sinf(th);
+}
+
+// Whole-sequence BiLSTM in ONE cooperative launch: identical per-step arithmetic to lstm_step
+// (same warp dot order, same gate math); grid-wide sync between steps. grid (H, 2), 128 threads.
+extern "C" __global__ void lstm_seq(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
+                                    const float* bhh_f, const float* bhh_b, float* hbuf, float* c_state,
+                                    float* out, int T, int H) {
+    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
+    int j = blockIdx.x, dir = blockIdx.y;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const float* gx = dir == 0 ? gx_f : gx_b;
+    const float* whh = dir == 0 ? whh_f : whh_b;
+    const float* bhh = dir == 0 ? bhh_f : bhh_b;
+    __shared__ float gates[4];
+    int r = warp * H + j;
+    const float* w = whh + (long)r * H;
+    for (int step = 0; step < T; step++) {
+        int t = dir == 0 ? step : T - 1 - step;
+        const float* h = hbuf + (step & 1) * 2 * H + dir * H;
+        float* h_nxt = hbuf + ((step + 1) & 1) * 2 * H;
+        float acc = 0.0f;
+        for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
+        for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
+        if (lane == 0) gates[warp] = gx[(long)t * 4 * H + r] + (acc + bhh[r]);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float ig = 1.0f / (1.0f + expf(-gates[0]));
+            float fg = 1.0f / (1.0f + expf(-gates[1]));
+            float gg = tanhf(gates[2]);
+            float og = 1.0f / (1.0f + expf(-gates[3]));
+            float c = fg * c_state[dir * H + j] + ig * gg;
+            c_state[dir * H + j] = c;
+            float hn = og * tanhf(c);
+            h_nxt[dir * H + j] = hn;
+            out[(long)t * 2 * H + dir * H + j] = hn;
+        }
+        grid.sync();
+    }
 }

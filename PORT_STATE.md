@@ -9,10 +9,12 @@
   - 7 others: OPEN, unaccepted (DISC-004) — escalate to owner; do not self-authorize.
   - Attainability evidence: exact-f64 reference passes v1 on 6/15; production torch CUDA 3/15
     (docs/conformance/TOLERANCE_HISTORY.md #9).
-- Performance: hold lifted by owner listening decision; CUDA optimization RESUMED under the
-  pinned owner-approved envelope (`tests/pinned/gpu_envelope.json`; any regression escalates).
-- Next single action: re-run the device-noise lever A/B on a quiet host (earlier run was contended
-  → invalid), then profile the CUDA forward and continue the one-lever ritual; then the report.
+- Performance: levers PL-001 (device noise, 1.39× process wall) and PL-002 (persistent LSTM, bit-identical,
+  −2.5% inference) KEPT; NE-003 (im2col) reverted. Regression policy RB-1 (bounded variation, owner
+  clarification) in force: `gpu_regression_bounded`; bounds fixed in tests/pinned/regression_bounds.json.
+- **Optimization PAUSED** for the owner-requested interim comparison (HERMES_BRIEF owner log #5).
+- Next single action: run the interim Rust-CUDA vs production torch CUDA comparison, write
+  docs/PERFORMANCE_REPORT.md CURRENT CHECKPOINT, then STOP for review.
 
 ## Environment (ALWAYS `source scripts/env.sh` first)
 - Data root: /data/mdenil/code/kokoro-rust (relocated; docs/RELOCATION_2026-09-26.md).
