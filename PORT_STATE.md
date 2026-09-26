@@ -89,6 +89,7 @@
   passes (owner #9). Stage first, so new files are audited.
 - Shell `grep` is a ugrep wrapper that honors .gitignore; use `command grep`.
 - serde_json needs `float_roundtrip`.
+- Fresh shells may lack cargo on PATH: `export PATH=$HOME/.cargo/bin:$PATH`.
 
 ## Pins
 - Model: hexgrad/Kokoro-82M @ f3ff357…; weights sha256 496dba11…; loaded natively from .pth (bitwise = reference load).
@@ -106,6 +107,9 @@
 - bench/interim_compare.py still contains the retired python-bridge row (historical driver).
 
 ## Process lessons
+- compute-sanitizer: `--kernel-name` filters do NOT match our PTX-JIT kernels (they silently check
+  nothing). `--racecheck-trace-sync` floods output (lstm_seq warp syncs, ~40 lines each). The
+  informative racecheck is `--kernel-name-exclude kns=sgemm` on a short input: minutes, not hours.
 - Never wait with `pgrep -f <pattern>` from a shell whose own command line contains the pattern; wait
   on the tracked background task instead.
 - Run the leak audit AFTER `git add` (a pre-add audit misses new files; happened once, re-audited clean).
