@@ -246,3 +246,32 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    - Escalate only new meaningful quality loss or real blockers.
    - Do not disturb unrelated host workloads to get quiet measurements: record contention and
      adapt bounded runs.
+23. TWO-PHASE SPEED PLAN (Misha, 1553523595337015369 + 1553524046136746120; full scope in
+   HERMES_PRECISION_EXPLORATION_BRIEF.md):
+   PHASE 1 = APPROXIMATELY LOSSLESS optimization on main.
+   - Scope: current f32/FMA precision, within the existing accepted numerical/audio variation
+     (NOT bit identity).
+   - Runs until severely diminishing returns (#22).
+   PHASE 2 = LOSSY optimization.
+   - TRIGGER: only after phase 1 stops.
+   - Setup: record the best phase-1 commit and its binary/config/asset/corpus identities, quality
+     evidence and timings; preserve a runnable baseline binary artifact; commit clean; create a
+     separate branch (e.g. experiment/reduced-precision; check for collisions).
+   - Rules: no reduced-precision work on main; no merge or default replacement without approval.
+   - Precision ladder:
+     1. f32/FMA control;
+     2. conservative mixed FP16/BF16 with f32 accumulation and f32 islands for sensitive paths;
+     3. materially more aggressive mixed/low precision;
+     4. quantized (INT8 weights and/or activations with documented calibration; INT4 only if
+        feasible/useful; label weight-only/dequantized honestly).
+     Record failures, unsupported paths and slower variants.
+   - Policy: experimental waveform/gate deviations are DIAGNOSTICS (existing thresholds untouched),
+     every candidate is UNREVIEWED until Misha listens, and there are no per-candidate listening
+     holds. Functional checks still fail hard: finite, non-empty, correct line mapping, no
+     dropped/duplicated input, explicit failures, safe resume identity. Broken/NaN candidates are
+     isolated, recorded and skipped.
+   - Deliverables: a precision/speed matrix (whole-chapter cold/resident vs incumbent Python and
+     best f32; raw replicates, commands, hashes, dtype/quant details, calibration identity, peak
+     memory, drift) plus a RAW listening pack (public passages, both voices, f32 control + Python
+     reference, worst cases + held-out) with a manifest. No acceptance claims from metrics, no fake
+     low-bit speed claims, private chapter never published.

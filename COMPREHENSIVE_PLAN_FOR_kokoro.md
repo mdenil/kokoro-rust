@@ -162,3 +162,15 @@ Batching/FMA defaults chosen then on measured speed. Tier A/B kernel levers only
    Report it to the owner before the campaign.
 2. Perf ritual on the measured bottleneck: one lever, regression + negative controls, ABBA,
    keep/revert. Representative subsets while iterating, full chapter at milestones.
+
+### TWO-PHASE DEFINITION (owner #23)
+- PHASE 1 — approximately lossless (main): f32/FMA precision within the accepted variation, until
+  severely diminishing returns (#22).
+- PHASE 2 — lossy (branch experiment/reduced-precision, created from the verified phase-1
+  checkpoint with a preserved baseline binary). Precision ladder:
+  1. f32/FMA control;
+  2. conservative mixed FP16/BF16 with f32 islands;
+  3. aggressive mixed;
+  4. INT8 (INT4 if feasible).
+  Deliverables: the whole-chapter speed matrix and a raw listening pack for morning judgement
+  (HERMES_PRECISION_EXPLORATION_BRIEF.md). No merge without the owner.

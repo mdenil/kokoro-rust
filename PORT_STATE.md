@@ -1,6 +1,6 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## CURRENT PRIORITY (owner #21, 2026-09-26): SPEED PHASE
+## CURRENT PRIORITY (owner #21-#23, 2026-09-26): SPEED — PHASE 1 (approximately lossless, main) then PHASE 2 (lossy, separate branch)
 - Step 1 (in progress): whole-system baseline of the CURRENT native binary vs the ORIGINAL production
   Python as used. Private chapter primary, Alice public. Cold and warm-resident measured separately,
   with overlap-aware stage attribution and raw per-replicate evidence.
@@ -11,6 +11,11 @@
 - Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
   RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
   must be escalated.
+- PHASE 2 (owner #23, HERMES_PRECISION_EXPLORATION_BRIEF.md): LOSSY reduced-precision/quantization
+  ladder. It starts ONLY after phase 1 reaches the #22 stopping point, on a separate branch from a
+  verified phase-1 checkpoint (with a preserved baseline binary). Candidates are UNREVIEWED; there
+  are no per-candidate listening holds; functional checks still fail hard. Deliverables: the matrix
+  and a raw listening pack.
 - libespeak-ng 1.52 accepted (#19); ffmpeg approved (#18). The private corpus stays under /data only.
 
 ## Milestone closeout (2026-09-26, documentation only; awaiting owner direction)
