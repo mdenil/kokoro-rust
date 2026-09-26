@@ -130,6 +130,8 @@ def main():
     phon_lines.write_text("\n".join(json.loads(l)["phonemes"] for l in CHUNKS.read_text(encoding="utf-8").splitlines() if l.strip()) + "\n", encoding="utf-8")
     cold = {
         "cold/ref": lambda k: [PY, str(HERE / "bench_reference.py"), "--cold-child", "--device", "cuda", "--threads", "8", "--voice", "af_heart", "--speed", "1.0", "--corpus", str(CORPUS), "--wav-dir", str(out / f"cold-ref-wavs-r{k}")],
+        # historical checkpoint row: --frontend python-bridge was removed from the binary (2026-09-26);
+        # the whole-system phase (owner #16) measures the native text path instead.
         "cold/rust-text(py-bridge)": lambda k: [str(RUST), "synth", "--device", "cuda", "--threads", "8", "--model-dir", str(SNAP), "--input", str(CORPUS), "--frontend", "python-bridge", "--bridge-python", PY, "--voice", "af_heart", "--out-dir", str(out / f"cold-rust-text-r{k}"), "--force"],
         "cold/rust-phonemes(native)": lambda k: [str(RUST), "synth", "--device", "cuda", "--threads", "8", "--model-dir", str(SNAP), "--input", str(phon_lines), "--input-format", "phonemes", "--voice", "af_heart", "--out-dir", str(out / f"cold-rust-phon-r{k}"), "--force"],
     }

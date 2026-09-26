@@ -1,4 +1,7 @@
-"""DEV-ONLY text frontend bridge: misaki 0.9.4 G2P + KPipeline chunking, as a resident process.
+"""RETIRED 2026-09-26: the `kokoro` binary no longer has a python-bridge frontend (the native
+frontend is exact vs the pinned reference; tests/frontend_pipeline.rs). Kept only as a debugging aid.
+
+DEV-ONLY text frontend bridge: misaki 0.9.4 G2P + KPipeline chunking, as a resident process.
 
 This is NOT part of the native product. The Rust CLI can spawn it (`--frontend python-bridge`)
 until a native G2P exists; every sidecar produced this way records the bridge explicitly.

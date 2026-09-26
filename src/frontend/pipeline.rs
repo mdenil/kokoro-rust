@@ -29,8 +29,9 @@ pub struct FrontendPaths {
 }
 
 impl FrontendPaths {
-    pub fn under(data_root: &Path) -> Self {
-        let f = data_root.join("frontend");
+    /// Standard layout under one frontend data directory.
+    pub fn under(frontend_dir: &Path) -> Self {
+        let f = frontend_dir;
         let es = f.join("espeak-ng-1.52.0");
         Self {
             lexicon_dir: f.join("misaki-0.9.4"),

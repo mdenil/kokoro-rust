@@ -6,9 +6,9 @@ use crate::wav::{self, Format};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use crate::frontend::pipeline::{EnglishFrontend, FrontendPaths};
+use std::process::Command;
 use std::time::Instant;
 
 pub const ENGINE_VERSION: &str = concat!("kokoro-rust ", env!("CARGO_PKG_VERSION"));
@@ -30,10 +30,10 @@ enum InputFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 enum Frontend {
+    /// Native English frontend (misaki 0.9.4 G2P + spaCy tokenizer/tagger + espeak-ng fallback).
+    Native,
     /// No text frontend: only --input-format phonemes is accepted.
     None,
-    /// DEV-ONLY bridge to the pinned Python misaki G2P (oracle/frontend_bridge.py).
-    PythonBridge,
 }
 
 #[derive(clap::Args)]
@@ -49,13 +49,14 @@ struct Common {
     /// Worker threads for the math kernels (0 = library default).
     #[arg(long, default_value_t = 0)]
     threads: usize,
-    #[arg(long, value_enum, default_value = "cpu")]
+    #[cfg_attr(feature = "cuda", arg(long, value_enum, default_value = "cuda"))]
+    #[cfg_attr(not(feature = "cuda"), arg(long, value_enum, default_value = "cpu"))]
     device: crate::engine::Device,
     /// CUDA device index (after CUDA_VISIBLE_DEVICES).
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
     /// Batched synthesis budget: max phoneme chars per microbatch (0 = one chunk at a time).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 8000)]
     batch_phonemes: usize,
     /// Max chunks per microbatch.
     #[arg(long, default_value_t = 64)]
@@ -76,15 +77,15 @@ enum Cmd {
         input: PathBuf,
         #[arg(long, value_enum, default_value = "text")]
         input_format: InputFormat,
-        #[arg(long, value_enum, default_value = "none")]
+        #[arg(long, value_enum, default_value = "native")]
         frontend: Frontend,
-        /// Language code for the frontend bridge (a = American English, b = British English).
-        #[arg(long, default_value = "a")]
-        lang: String,
-        #[arg(long, env = "KOKORO_BRIDGE_PYTHON")]
-        bridge_python: Option<PathBuf>,
+        /// Directory with the pinned frontend data (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/,
+        /// espeak-ng-1.52.0/) [env: KOKORO_FRONTEND_DIR]
+        #[arg(long, env = "KOKORO_FRONTEND_DIR")]
+        frontend_dir: Option<PathBuf>,
+        /// libespeak-ng 1.52.0 shared library (default: <frontend-dir>/espeak-ng-1.52.0/libespeak-ng.so.1.52.0)
         #[arg(long)]
-        bridge_script: Option<PathBuf>,
+        espeak_lib: Option<PathBuf>,
         #[arg(long)]
         out_dir: PathBuf,
         #[arg(long, value_enum, default_value = "pcm16")]
@@ -92,7 +93,8 @@ enum Cmd {
         /// Base seed for the excitation noise (per item: splitmix(seed, index)).
         #[arg(long, default_value_t = 0)]
         seed: u64,
-        /// Also encode each WAV with ffmpeg to this extension (e.g. flac, mp3, opus).
+        /// OPTIONAL, off by default: also encode each WAV by running the EXTERNAL `ffmpeg` executable
+        /// (a helper subprocess) to this extension (e.g. flac, mp3, opus).
         #[arg(long)]
         encode: Option<String>,
         /// Re-synthesize even if a matching completed output exists.
@@ -123,51 +125,6 @@ fn set_threads(n: usize) {
     }
 }
 
-struct Bridge {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    ident: String,
-}
-
-impl Bridge {
-    fn spawn(python: &Path, script: &Path, lang: &str) -> Result<Self> {
-        let mut child = Command::new(python)
-            .arg(script)
-            .arg(lang)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("spawning frontend bridge {} {}", python.display(), script.display()))?;
-        let stdin = child.stdin.take().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        stdout.read_line(&mut line)?;
-        let v: serde_json::Value = serde_json::from_str(&line).context("frontend bridge did not start")?;
-        let ident = v["frontend"].as_str().unwrap_or("unknown").to_string();
-        Ok(Self { child, stdin, stdout, ident: format!("{ident} [python bridge, DEV-ONLY]") })
-    }
-
-    fn phonemize(&mut self, text: &str) -> Result<Vec<String>> {
-        writeln!(self.stdin, "{}", serde_json::json!({ "text": text }))?;
-        self.stdin.flush()?;
-        let mut line = String::new();
-        self.stdout.read_line(&mut line)?;
-        let v: serde_json::Value = serde_json::from_str(&line).context("bad bridge response")?;
-        if let Some(e) = v["error"].as_str() {
-            bail!("frontend error: {e}");
-        }
-        Ok(v["chunks"].as_array().context("bridge: no chunks")?.iter().map(|c| c["phonemes"].as_str().unwrap_or("").to_string()).collect())
-    }
-}
-
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
-}
-
 #[derive(Serialize, serde::Deserialize, Clone, PartialEq)]
 struct Config {
     engine: String,
@@ -193,6 +150,9 @@ struct Sidecar {
     text_sha256: String,
     status: String, // ok | blank | oversize | invalid | error
     error: Option<String>,
+    /// grapheme text of each synthesized chunk (native frontend), aligned with `phonemes`
+    #[serde(default)]
+    graphemes: Vec<String>,
     phonemes: Vec<String>,
     dropped_phoneme_chars: Vec<String>,
     config: Config,
@@ -297,9 +257,8 @@ fn synth(
     input: PathBuf,
     input_format: InputFormat,
     frontend: Frontend,
-    lang: String,
-    bridge_python: Option<PathBuf>,
-    bridge_script: Option<PathBuf>,
+    frontend_dir: Option<PathBuf>,
+    espeak_lib: Option<PathBuf>,
     out_dir: PathBuf,
     format: Format,
     seed: u64,
@@ -308,7 +267,7 @@ fn synth(
     blank_lines: BlankLines,
 ) -> Result<i32> {
     if input_format == InputFormat::Text && frontend == Frontend::None {
-        bail!("--input-format text needs a frontend: no native G2P yet. Use --input-format phonemes, or the DEV-ONLY --frontend python-bridge");
+        bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
     set_threads(common.threads);
     let inp = read_input(&input)?;
@@ -318,14 +277,22 @@ fn synth(
     let voice_sha = engine.voice(&common.voice)?.sha256.clone();
     let load_s = t_load.elapsed().as_secs_f64();
     eprintln!("loaded model + voice in {load_s:.2}s");
-    let mut bridge = match (input_format, frontend) {
-        (InputFormat::Text, Frontend::PythonBridge) => {
-            let py = bridge_python.context("--bridge-python (or KOKORO_BRIDGE_PYTHON) required for the python bridge")?;
-            let script = bridge_script.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("oracle/frontend_bridge.py"));
-            Some(Bridge::spawn(&py, &script, &lang)?)
+    let t_fe = Instant::now();
+    let fe = match (input_format, frontend) {
+        (InputFormat::Text, Frontend::Native) => {
+            let dir = frontend_dir.context("--frontend-dir (or KOKORO_FRONTEND_DIR) is required for text input")?;
+            let mut paths = FrontendPaths::under(&dir);
+            if let Some(lib) = espeak_lib {
+                paths.espeak_lib = lib;
+            }
+            Some(EnglishFrontend::load(&paths).context("loading the native text frontend")?)
         }
         _ => None,
     };
+    let frontend_load_s = t_fe.elapsed().as_secs_f64();
+    if fe.is_some() {
+        eprintln!("loaded native frontend in {frontend_load_s:.2}s");
+    }
     let cfg = Config {
         engine: format!("{ENGINE_VERSION} [{}]", engine.identity()),
         model_sha256: engine.model_sha256.clone(),
@@ -336,7 +303,7 @@ fn synth(
         seed,
         format: format!("{format:?}"),
         input_format: format!("{input_format:?}"),
-        frontend: bridge.as_ref().map(|b| b.ident.clone()).unwrap_or_else(|| "none (phoneme input)".into()),
+        frontend: fe.as_ref().map(|f| f.ident().to_string()).unwrap_or_else(|| "none (phoneme input)".into()),
         sample_rate: SAMPLE_RATE,
     };
     let width = inp.lines.len().max(1).to_string().len().max(5);
@@ -349,6 +316,7 @@ fn synth(
         text_sha256: text_sha,
         status: "ok".into(),
         error: None,
+        graphemes: vec![],
         phonemes: vec![],
         dropped_phoneme_chars: vec![],
         config: cfg.clone(),
@@ -380,7 +348,7 @@ fn synth(
     let (manifest_lines, n_ok, n_skip, n_bad, audio_total) = std::thread::scope(|sc_scope| -> Result<_> {
         let (prep_tx, prep_rx) = std::sync::mpsc::sync_channel::<Job>(depth);
         let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<Out>(depth);
-        let bridge_ref = &mut bridge;
+        let fe_ref = fe.as_ref();
         let prep = sc_scope.spawn(move || -> Result<()> {
             for (i, text) in inp_r.lines.iter().enumerate() {
                 let line = i + 1;
@@ -409,8 +377,12 @@ fn synth(
                         sc.status = "invalid".into();
                         bail!("control character U+{:04X} at character {col}", c as u32);
                     }
-                    let chunks = match bridge_ref.as_mut() {
-                        Some(b) => b.phonemize(text)?,
+                    let chunks = match fe_ref {
+                        Some(f) => {
+                            let ch = f.line_chunks(text)?;
+                            sc.graphemes = ch.iter().map(|c| c.graphemes.clone()).collect();
+                            ch.into_iter().map(|c| c.phonemes).collect()
+                        }
                         None => vec![text.clone()],
                     };
                     sc.phonemes = chunks.clone();
@@ -605,7 +577,7 @@ fn synth(
         "bom_stripped": inp.bom_stripped, "crlf_lines": inp.crlf_lines, "blank_lines_policy": format!("{blank_lines:?}"),
         "naming": format!("{}_<1-based line, width {width}>.wav / .json", inp.stem),
         "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
-        "audio_s": audio_total, "load_s": load_s, "synth_wall_s": wall, "lines": manifest_lines,
+        "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
     });
     wav::write_atomic(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes())?;
     eprintln!(
@@ -706,8 +678,8 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
 /// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
 pub fn cli_main() -> Result<i32> {
     match Cli::parse().cmd {
-        Cmd::Synth { common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force, blank_lines } => {
-            synth(common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force, blank_lines)
+        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines } => {
+            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines)
         }
         Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out).map(|_| 0),
     }
