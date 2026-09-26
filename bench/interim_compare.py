@@ -30,6 +30,35 @@ CHUNKS = HERE / "corpus_alice_ch1.chunks.jsonl"
 RUST = ROOT / "target/release/kokoro"
 
 
+def parse_args():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--corpus", default=str(CORPUS), help="line file (one utterance per line)")
+    ap.add_argument("--chunks", default=str(CHUNKS), help="phoneme chunk JSONL, or 'auto' = derive with the reference frontend into the evidence dir")
+    ap.add_argument("--out-root", default=str(DATA / "evidence/interim-comparison"))
+    ap.add_argument("--core-reps", default="af_heart:5,am_adam:3")
+    ap.add_argument("--cold-reps", type=int, default=3)
+    ap.add_argument("--private", action="store_true", help="private workload: evidence must live outside the repo")
+    return ap.parse_args()
+
+
+def derive_chunks(corpus, out):
+    """Reference frontend (pinned misaki via KPipeline, model=False) -> chunk JSONL (line-tagged)."""
+    code = f"""
+import json, sys
+sys.path.insert(0, {str(ROOT / 'oracle')!r}); import common; common.assert_pins()
+from kokoro.pipeline import KPipeline
+q = KPipeline(lang_code='a', repo_id='hexgrad/Kokoro-82M', model=False)
+lines = [l for l in open({str(corpus)!r}, encoding='utf-8').read().split('\\n') if l.strip()]
+with open({str(out)!r}, 'w', encoding='utf-8') as f:
+    for i, l in enumerate(lines, 1):
+        for r in q(l):
+            if r.phonemes:
+                f.write(json.dumps({{'line': i, 'phonemes': r.phonemes}}, ensure_ascii=False) + '\\n')
+"""
+    subprocess.run([PY, "-c", code], check=True, capture_output=True, cwd=ROOT)
+
+
 def sha(p):
     return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
@@ -44,8 +73,18 @@ def host():
 
 
 def main():
-    out = DATA / "evidence/interim-comparison" / time.strftime("%Y%m%d-%H%M%S")
+    global CORPUS, CHUNKS
+    args = parse_args()
+    CORPUS = pathlib.Path(args.corpus).resolve()
+    out = pathlib.Path(args.out_root) / time.strftime("%Y%m%d-%H%M%S")
+    if args.private:
+        assert not str(out.resolve()).startswith(str(ROOT)), "private evidence must stay outside the repository"
     out.mkdir(parents=True)
+    if args.chunks == "auto":
+        CHUNKS = out / "chunks.jsonl"
+        derive_chunks(CORPUS, CHUNKS)
+    else:
+        CHUNKS = pathlib.Path(args.chunks).resolve()
     raw = open(out / "raw.jsonl", "w")
     pins = {
         "git_head": sh(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
@@ -74,7 +113,7 @@ def main():
         return rec
 
     # ---- core scope
-    for voice, reps in (("af_heart", 5), ("am_adam", 3)):
+    for voice, reps in ((v, int(r)) for v, r in (x.split(":") for x in args.core_reps.split(","))):
         engines = {
             "core/ref-prod": lambda k, v=voice: [PY, str(HERE / "bench_reference.py"), "--device", "cuda", "--threads", "8", "--reps", "3", "--scopes", "inference", "--chunks", str(CHUNKS), "--voice", v, "--out", str(out / f"core-ref-prod-{v}-r{k}")],
             "core/ref-f32": lambda k, v=voice: [PY, str(HERE / "bench_reference.py"), "--device", "cuda", "--threads", "8", "--reps", "3", "--scopes", "inference", "--chunks", str(CHUNKS), "--voice", v, "--no-tf32", "--out", str(out / f"core-ref-f32-{v}-r{k}")],
@@ -95,14 +134,14 @@ def main():
         "cold/rust-phonemes(native)": lambda k: [str(RUST), "synth", "--device", "cuda", "--threads", "8", "--model-dir", str(SNAP), "--input", str(phon_lines), "--input-format", "phonemes", "--voice", "af_heart", "--out-dir", str(out / f"cold-rust-phon-r{k}"), "--force"],
     }
     names = list(cold)
-    for k in range(3):
+    for k in range(args.cold_reps):
         order = names[k % 3:] + names[:k % 3]
         for n in order:
             run(n, cold[n](k), k, voice="af_heart")
 
     # ---- frontend bridge alone
     lines = [l for l in CORPUS.read_text(encoding="utf-8").split("\n") if l.strip()]
-    for k in range(3):
+    for k in range(args.cold_reps):
         t0 = time.perf_counter()
         p = subprocess.Popen([PY, str(ROOT / "oracle/frontend_bridge.py"), "a"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         p.stdout.readline()
