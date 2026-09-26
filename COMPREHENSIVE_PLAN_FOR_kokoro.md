@@ -75,3 +75,31 @@ sine-source generation, STFT/iSTFT (FFT), interpolation/alignment matmul, plus A
 - Python allowed ONLY for oracle/fixtures/comparison. No LibTorch/ONNX in the product.
 - Voices conversion: oracle env exports voices .pt → .safetensors fixture for Rust dev; a
   self-contained acquisition story (native reader or converter tool) decided at M5, documented.
+
+
+## Roadmap update (2026-09-26): native English frontend (owner scope #6) + CUDA + publish
+
+Production English frontend = misaki 0.9.4 `en.G2P(trf=False, fallback=EspeakFallback, unk='')`
++ KPipeline `en_tokenize`/waterfall chunking. Components and native plan:
+| component | reference | native plan | license note |
+|---|---|---|---|
+| text preprocess, tokenization | misaki regex preprocessing + spaCy 3.8 tokenizer (en_core_web_sm 3.8.0) | port spaCy English tokenizer rules (prefix/suffix/infix/exceptions from the pinned model) | spaCy/model MIT |
+| POS tags (drive heteronyms, e.g. read/live/used) | en_core_web_sm tok2vec + tagger (thinc CNN) | port the tagger inference (hash embed + maxout CNN + softmax) from the pinned weights; measure tag agreement; tags only matter where lexicon entries are POS-keyed | MIT |
+| lexicon | us_gold/us_silver (gb_*) JSON | load natively (embed or data file) | misaki Apache-2.0; provenance of lexicon data to verify |
+| numbers, currency, ordinals, years, decimals | num2words 0.5.14 (English) | reimplement English behaviour natively from differential tests (no code copy) | num2words LGPL — avoided by reimplementation |
+| OOV words | espeak-ng via phonemizer-fork (GPL-3) + misaki post-mapping | **OWNER DECISION NEEDED**: (a) optional runtime-loaded libespeak-ng (GPL-3, user-installed), (b) link espeak-ng (product becomes GPL-3), (c) native non-GPL OOV G2P with measured divergence | phonemizer-fork + libespeak-ng GPL-3 |
+| chunking | KPipeline.en_tokenize / waterfall_last (510) | port exactly (small) | Apache-2.0 |
+
+Sequence (sole coder; CUDA work interleaved at natural boundaries):
+- F0 frontend truth pack: pin/hash lexicons, spaCy model, espeak-ng lib/data; frontend OQ register;
+  frontend oracle dumping misaki tokens (text, whitespace, tag, phonemes, rating, source path) and
+  KPipeline chunks for a large corpus (full Alice + curated edge-case suite); immutable fixtures.
+- F1 native lexicon + preprocessing + number normalization + chunking, with differential tests;
+  first measure how often POS and the espeak fallback actually decide the output on the corpus.
+- F2 spaCy tokenizer + tagger port (bit/label agreement tests).
+- F3 OOV fallback per owner decision.
+- F4 wire into CLI (`--frontend native` default), remove the bridge from the shipped path, verify
+  with no Python on PATH (strace execve audit), both voices, durations/coverage; benchmarks.
+- CUDA Tier A levers (conv_direct tiling, chan_stats, LSTM step, fusions) interleaved; Tier B later.
+- Then publish/install phase (brief #8): reproducible build, pinned model acquisition incl. frontend
+  data, release binaries + checksums, clean-install smoke — deferred until review.

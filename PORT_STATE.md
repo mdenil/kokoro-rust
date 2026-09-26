@@ -16,7 +16,10 @@
   /data/mdenil/code/kokoro-rust/evidence/interim-comparison/20260926-141335/, sealed SHA256SUMS):
   warm core Rust 2.462 s vs production torch 6.986 s (2.84×, af_heart; 3.09× am_adam; reference cv
   7–11% → PROVISIONAL); cold text→WAV 25.10 s vs 14.84 s (Rust uses DEV-ONLY Python bridge).
-- Optimization continues (owner follow-up): next = Tier A levers under RB-1 — tiled conv_direct,
+- NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
+  COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
+  Next single action: F0 frontend truth pack + oracle token/chunk dump.
+- Optimization continues (owner follow-up), interleaved with F0–F4: Tier A levers under RB-1 — tiled conv_direct,
   multi-block chan_stats, cheaper LSTM step, elementwise fusions; then Tier B implicit-GEMM conv.
 - Process lesson: never wait with `pgrep -f <pattern>` from a shell whose own command line contains
   the pattern (self-match hung a waiter); wait on the tracked background task instead.

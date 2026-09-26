@@ -74,3 +74,15 @@ Load the named skill. Inspect available toolchains/storage and public reference.
 5. INTERIM CHECKPOINT (Misha, 1553392892624511017): pause new optimization; run and report an interim
    Rust CUDA vs production-pinned Python Kokoro CUDA comparison (docs/PERFORMANCE_REPORT.md,
    evidence/interim-comparison/), then stop for review.
+6. NATIVE TEXT FRONTEND (Misha, 1553400013273563147; full text in HERMES_FRONTEND_BRIEF.md):
+   plain text -> normalization/pronunciation/phonemes -> Kokoro chunking -> Rust/CUDA audio/WAV with
+   NO Python interpreter, subprocess bridge or Python package on the shipped path (Python stays
+   allowed for oracles/fixtures). Port the production English path (misaki 0.9.4 en.G2P as used by
+   KPipeline('a'); British 'b' where applicable); document other languages as not covered.
+   Differential tests vs the pinned frontend (phonemes, stress, punctuation, boundaries, chunk order;
+   narration, numbers/currency/dates, abbreviations, names/OOV, contractions, hyphens, Unicode/quotes,
+   empty, long paragraphs, chunk limits). Audio variation policy does NOT permit pronunciation
+   differences or dropped/truncated text. License/provenance check before packaging. Verify the
+   plain-text CLI with Python unavailable; benchmark cold text->WAV and warm resident text->audio vs
+   reference and the existing bridge, separating load / frontend / model costs. CUDA optimization
+   stays in scope.
