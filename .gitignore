@@ -23,3 +23,7 @@ venv/
 # Editor/OS noise
 .DS_Store
 *.swp
+
+# Private/copyrighted benchmark fixtures and any text-bearing derivatives never enter Git
+bench/private/
+**/private/

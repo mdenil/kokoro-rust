@@ -19,6 +19,9 @@
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
+- NEW SCOPE (owner #8): chapter throughput + RTX 4090 batching; primary workload = private chapter
+  (316 lines, sha256 8129112a…, under /data/mdenil/code/kokoro-rust/bench/private/ — NEVER in Git).
+  Work order: I0 -> chapter baselines -> B1 batching -> (frontend F0–F4 interleaved) -> kernel levers.
 - NEW SCOPE (owner #7): audiobook line-file interface on `kokoro synth` (I0 now, I1 with F4) —
   HERMES_AUDIOBOOK_INTERFACE_BRIEF.md; open question to Hermes: exact audio_chunks filename convention.
 - Optimization continues (owner follow-up), interleaved with F0–F4: Tier A levers under RB-1 — tiled conv_direct,

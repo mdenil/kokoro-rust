@@ -98,3 +98,19 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    assembly/M4B stay downstream. Acceptance: native CLI with Python unavailable on public-domain /
    synthetic fixtures, both voices, restart + invalidation, long-line completeness, cold + resident
    benchmarks; outputs usable under audiobook/audio_chunks/.
+8. THROUGHPUT / BATCHING (Misha, 1553401985879904370 + 1553402264377368728; full text
+   HERMES_BATCHING_BRIEF.md): unit = prepared line file in, many WAVs out; optimize whole-file
+   throughput on the RTX 4090; true batching, length bucketing, reordering, pipelining encouraged
+   with exact original line mapping restored. PRIMARY workload: private approved chapter
+   /data/mdenil/code/kokoro-rust/bench/private/in-over-our-heads-ch01/
+   002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt (316 lines, 46,498 bytes, sha256
+   8129112a801ffb67d8974dddaa1de492232ea896f84bd121d45f8cf115b7aaad; copyrighted — chapter text,
+   sidecar, phoneme dumps, audio and text-bearing logs NEVER in Git/GitHub; only aggregate
+   statistics/hashes and generic tools may be committed). Public Alice stays secondary. Batching must
+   not cause padding contamination, state leakage, missing suffixes, pronunciation changes or
+   cross-item noise coupling; validate short/long/tail batches, reordering, batch sizes, negative
+   controls vs reference and batch-1 under stated bounds (RB-1 style, fixed before judging). Report
+   file->WAVs wall time and audio-s per wall-s; cold vs resident; frontend/inference/output costs;
+   vs production Python/CUDA on the same file/voice/speed/precision, vs Rust batch-1. Reference-
+   derived phonemes may support labelled core-batching experiments; the headline needs true native
+   text-file -> audio-files. Reassess headroom under batching (single-item ceilings do not carry over).

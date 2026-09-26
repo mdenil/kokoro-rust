@@ -113,3 +113,17 @@ Sequence (sole coder; CUDA work interleaved at natural boundaries):
   text/settings/model/frontend, long-line (multi-chunk) completeness.
 - I1 (with F4): default `--frontend native`; Python-free acceptance run (no python on PATH, execve
   audit), both voices; cold + resident benchmarks of the same line-file interface.
+
+### Work order after owner #8 (throughput/batching), natural-boundary sequencing
+1. I0 line-file interface on `synth` (1-based line ids, manifest, blank/malformed policy, resume/
+   invalidation tests) — prerequisite for the primary file->WAVs benchmark.
+2. Primary-workload baselines on the private chapter (private evidence under /data only):
+   production Python/CUDA per-line WAVs; Rust batch-1 (dev bridge, labelled); measured phoneme /
+   frame / chunk length distributions (aggregate stats only in Git).
+3. B1 batched CUDA forward: masked padded batches (per-item lengths through ALBERT attention, LSTMs,
+   AdaIN/instance-norm statistics, convs with re-zeroed padding, per-item SineGen/noise streams),
+   length-bucketed scheduler with VRAM-aware batch sizing + single-item/OOM fallback, pipelined
+   host work (frontend, WAV/hash writes). Correctness: batch-vs-single bounds fixed in advance,
+   padding-contamination and cross-item negative controls, reorder invariance, tail batches.
+4. Native frontend F0–F4 continues interleaved (required for the headline number).
+5. CUDA kernel levers re-profiled under batching (Tier A/B reassessed).
