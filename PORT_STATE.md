@@ -34,19 +34,60 @@
 - Determinism: repeated identical runs are bit-identical (batch-1 and batched; checked in isolation
   and while other GPU tests ran). compute-sanitizer initcheck: 0 errors (batched).
 
-## Correctness status of the neural engine (unchanged; original gates binding, owner #2)
-- CUDA ladder: all 135 stage-seam rows pass; ids, durations and sample counts exact.
-  8 enforced E2E rows FAIL (v1 max ×5, G-SPEC ×3). Latest ladder-gpu-1790439506 has the identical
-  fail set.
-  - s02_fox/am_adam/s1.0: OWNER-ACCEPTED by listening (DISC-003).
-  - 7 others OPEN (DISC-004; not self-authorized).
-- CPU f32 ladder: 7 enforced E2E rows FAIL. ladder-cpu-t1-1790439695 has the identical fail set.
-- Attainability: exact f64 reference passes v1 on 6/15; production torch CUDA 3/15 (TOLERANCE_HISTORY #9).
-- `gpu_batch::batched_matches_single_item_within_rb1` FAILS by design: batch drift beyond RB-1,
-  owner-accepted as PL-003 (#14). Raw results are preserved.
+## Milestone closeout (2026-09-26, documentation only; awaiting owner direction)
+- Execution logs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/ (README + SHA256SUMS).
+  - strict + FMA integrated runs, before the fuzz fixes (a296b58) and after (dbe5bba);
+  - sanitizer summary lines.
+  These are grep-filtered captures of stdout; the full cargo test stdout was not retained.
+  Sanitizer logs: evidence/sanitizer/20260926/.
+- Concrete in-scope implementation defects known: NONE open. The two fuzz-found frontend bugs are
+  fixed and have regression tests.
+- Not defects, but open items:
+  - DISC-004: owner decision on original-gate diagnostics (see below).
+  - Scope: American English only (British not requested or ported).
+  - Coverage: finite corpora (7 pinned + exploratory); real-world text can reach untested paths.
+  - Evidence: raw inner benchmark samples were not retained; historical chapter ratios are
+    provisional (docs/PERFORMANCE_REPORT.md).
+  - Release: misaki lexicon provenance; GPL-3 obligations of libespeak-ng if distributed (#19);
+    no project license chosen.
+
+## Correctness status of the neural engine (policy layers kept distinct)
+Policy history, in order (HERMES_BRIEF owner log):
+- #2: the original precommitted gates are binding.
+- #4: bounded variation. Bit identity is not required; regression is judged by RB-1 with fixed
+  nonzero bounds against the owner-accepted strict baseline.
+- #11: speed plus a close match that sounds good. Exact waveform identity is not an acceptance
+  criterion.
+- #3 / #14: listening acceptances of the specific pairs presented.
+
+Neither #4 nor #11 explicitly waived the rows below. Whether they still block acceptance is an owner
+decision not yet made. Until then they are reported as original-gate DIAGNOSTICS with their raw
+values preserved. They are neither silently waived nor treated as new defects.
+- Original-gate diagnostics (historical, unchanged since first measured):
+  - CUDA ladder: all 135 stage-seam rows pass; ids, durations and sample counts exact. 8 E2E rows
+    FAIL the original v1 / G-SPEC gates vs the cpu-t1 fixture (v1 max ×5, G-SPEC ×3).
+    - s02_fox/am_adam/s1.0 is owner-accepted by listening (DISC-003).
+    - 7 are un-adjudicated (DISC-004).
+  - CPU f32 ladder: 7 E2E rows FAIL the original gates.
+  - Latest runs ladder-gpu-1790439506 and ladder-cpu-t1-1790439695 have fail sets IDENTICAL to the
+    first measurements. There is no new degradation.
+  - Attainability context: the exact f64 reference passes v1 on 6/15; production torch CUDA passes
+    3/15 (TOLERANCE_HISTORY #9).
+- Regression under the current policy (RB-1 vs the strict baseline): the strict default build is
+  unchanged since the baseline was pinned.
+  - FMA and batching exceed RB-1 bounds in the recorded ways (PL-005: 9 drift rows + one G-SPEC
+    set change; PL-003: batch-vs-single drift). That variation was presented for listening and
+    owner-ACCEPTED (#14).
+  - The failing `gpu_batch::batched_matches_single_item_within_rb1` and the FMA RB-1 diagnostics
+    are that accepted variation, with raw values preserved.
+- NEW degradation would be different: a change in any fail set, new seam failures, or new
+  pronunciation, duration or structure differences. That is not covered by any acceptance and
+  must be flagged. None has been observed.
 
 ## Open correctness gaps (concrete)
-1. DISC-004: 7 enforced E2E rows unaccepted. Owner decision or evidence needed; not self-authorized.
+1. DISC-004 (owner decision, not an implementation defect I can fix within the gates): 7 E2E rows fail
+   the original gates, historically and unchanged. Whether policy #4/#11 supersedes them for these rows
+   is for the owner to decide; I do not self-authorize it.
 2. British English (lang b) is not ported. The binary is American English only (voices af_*/am_*).
 3. CLOSED 2026-09-26: the Python str semantics (isalpha/isdigit/isspace/isupper/lower/upper/capitalize/
    strip) were approximations on Rust's Unicode 16 tables and diverged on thousands of code points.

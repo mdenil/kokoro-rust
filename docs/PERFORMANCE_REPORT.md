@@ -5,6 +5,19 @@
 > all stage seams pass on 15/15 fixture cases; 8 enforced end-to-end original-gate rows fail on the
 > CUDA path (1 owner-accepted by listening, DISC-003; 7 open, DISC-004).
 
+> **Historical vs current (reconciled at the single-binary milestone, owner #15).** Every timing in
+> this report was measured BEFORE that milestone, on earlier trees, and is historical. At those
+> times the Rust text path used the DEV-ONLY Python misaki bridge, batching was opt-in and the
+> default Rust run was batch-1.
+> The CURRENT binary is different:
+> - native frontend, Python-free, with the bridge removed from the binary;
+> - `synth` batches by default (`--batch-phonemes 8000`; `0` = batch-1);
+> - CUDA is the default device;
+> - the strict build is the default, and FMA is an accepted opt-in build.
+> That current binary has NOT been benchmarked. Speed work is paused (owner #15/#20), and the next
+> performance phase is whole-system file→WAVs (owner #16). The numbers below are kept as receipts;
+> none of them is a headline for the current binary.
+
 ## Benchmark policy (owner #13)
 Headline = the ORIGINAL pinned production Python usage (kokoro 0.9.4 KPipeline, one line at a time,
 production defaults incl. cuDNN TF32) vs the FASTEST Rust configuration (batching, host parallelism,
@@ -47,8 +60,10 @@ independent of length); the Rust replicates are flat. Conservative min-vs-min: 6
 | Rust CUDA CLI, native, **pre-phonemized chunks (NOT text→WAV)** | 7.45 | 7.67 7.45 7.19 | load 4.03; synth loop 3.27 | 69 WAVs (one per chunk), 656.2 s |
 
 Python frontend bridge alone (the part the Rust product still borrows from Python): interpreter +
-misaki/spaCy startup 7.26 s, G2P of all 65 lines 0.38 s (median of 3; 69 chunks). The Rust text path
-is therefore **not Python-free**; the native phoneme path is Python-free but skips G2P.
+misaki/spaCy startup 7.26 s, G2P of all 65 lines 0.38 s (median of 3; 69 chunks). At the time, the Rust
+text path was therefore **not Python-free**; the native phoneme path was Python-free but skipped G2P.
+(Historical: the bridge has since been removed. The current binary's text path is native and
+Python-free, and it has not been benchmarked.)
 Resident batch (model already loaded): Rust text-mode synth loop 4.03 s (from a cold process, incl.
 first-call GPU warm-up, bridge G2P, WAV + sidecar writes) vs the earlier reference resident KPipeline
 batch 7.41 s (in-memory, no WAV writes; 13:09 run) — different harnesses, indicative only (~1.8×).
@@ -89,11 +104,13 @@ Practical range, tied to concrete untried optimizations (each must pass RB-1 bou
 | B | custom f32 implicit-GEMM convolution for the generator (no per-tap C traffic), assuming 45–65% of f32 peak | a further 0.65–0.9 s | ~1.1–1.4 s | ~1.75–2.2× | ~5–6.3× | moderate–low (significant kernel engineering; bounded-variation numerics) |
 | out of scope now | FP16/BF16 tensor cores (TF32 has no dense-rate advantage over FP32 on the 4090) | unknown | — | — | — | precision change not authorized by the owner rules |
 
-End-to-end headroom: in the Rust text→WAV cold path (14.84 s) the DEV-ONLY Python bridge startup is
+End-to-end headroom (HISTORICAL, bridge-era; superseded by the native frontend and not re-measured):
+in the Rust text→WAV cold path (14.84 s) the DEV-ONLY Python bridge startup is
 ≈ 7.3 s and the Rust model load ≈ 4.0 s (checkpoint parse, weight-norm, upload, CUDA context/PTX JIT,
 plus a full sha256 of the 327 MB weights for the sidecars). Practical: load 4.0 → ~1–1.5 s (cache
 hydrated weights / skip or cache hashing), which would put native-phoneme cold runs at ~4.5–5 s; the
-text path stays bridge-bound (~7 s) until a native G2P exists, a large separate task (misaki parity).
+text path stayed bridge-bound (~7 s) until a native G2P existed. It now exists; its cold-start and
+throughput costs are unmeasured.
 Warm-core gains above translate to end-to-end only through the synth-loop share (≈ 3–4 s here).
 
 
@@ -102,14 +119,27 @@ Warm-core gains above translate to end-to-end only through the synth-loop share 
 Workload: the approved private chapter (316 lines, sha256 8129112a…; text never in Git), 317 chunks,
 phoneme lengths min 14 / median 134 / p90 280 / max 501, one line split into 2 chunks. Evidence:
 /data/mdenil/code/kokoro-rust/evidence/private/chapter-baseline/20260926-145712/ (private).
-Rust = strict (-fmad=false) build, batch-1, pre-PL-004 — i.e. BEFORE the later levers.
+Rust = strict (-fmad=false) build, batch-1, pre-PL-004 — i.e. BEFORE the later levers, with the
+DEV-ONLY Python bridge for text.
+
+**All ratios in this table are HISTORICAL and PROVISIONAL.** Variability disqualifies several rows
+under the 5% cv rule:
+- Cold Rust replicates are bimodal: text path with the bridge 60.29 / 29.45 / 30.28 s (cv 43.9%);
+  pre-phonemized path 41.99 / 20.02 / 21.12 s (cv 44.7%). The first replicate of each was about
+  2× slower, which is unexplained.
+- Production cold is 70.56 / 65.66 / 63.38 s (cv 5.5%).
+- Warm-core production: the af_heart replicate medians have cv 4.7%, but the inner repeat cv
+  inside each replicate reaches 8.1% (am_adam: 11.0%, with only n=2 replicates).
+- The raw inner per-pass samples were NOT retained: the receipts keep only n / median / cv per
+  replicate, so the inner spread cannot be re-analysed.
+Receipts are unchanged in the evidence directory (summary.json, raw.jsonl, per-replicate JSONs).
 
 | scope | production Python (unchanged, TF32) | torch full-f32 (diag) | Rust CUDA | production / Rust |
 |---|---|---|---|---|
-| warm core, af_heart (2915 s audio) | 50.17 s (cv 4.7%, n=3) | 46.89 s | 10.95 s (cv 1.0%) | 4.58× |
+| warm core, af_heart (2915 s audio) | 50.17 s (cv 4.7% across replicates, n=3; inner cv up to 8.1%) | 46.89 s | 10.95 s (cv 1.0%) | 4.58× (provisional) |
 | warm core, am_adam (2837 s) | 49.01 s (cv 10.5%, n=2 → provisional) | 46.75 s | 10.71 s (cv 0.5%) | 4.58× (provisional) |
-| cold file → 316 WAVs, af_heart | 65.66 s (import 5.82 + load 3.16 + synth/write 55.40) | — | 30.28 s with the DEV-ONLY Python G2P bridge (bridge startup ≈6.3 s, G2P 1.3 s) | 2.17× |
-| cold, pre-phonemized chunks (NOT text→WAV) | — | — | 21.12 s (317 WAVs) | — |
+| cold file → 316 WAVs, af_heart | 65.66 s, cv 5.5% (import 5.82 + load 3.16 + synth/write 55.40) | — | 30.28 s, **cv 43.9%**, with the DEV-ONLY Python G2P bridge (bridge startup ≈6.3 s, G2P 1.3 s) | 2.17× (**provisional**; Rust cv fails the gate) |
+| cold, pre-phonemized chunks (NOT text→WAV) | — | — | 21.12 s, **cv 44.7%** (317 WAVs) | — |
 
 Scope: "production Python" = pinned kokoro 0.9.4 KPipeline through bench/bench_reference.py (the
 library path production uses), NOT the deployed openclaw wrapper. Rust's total audio (2915.025 s)
@@ -122,7 +152,10 @@ The ABBA script wrote no files at the time. scripts/ab.sh now tees raw output fo
 In-process pass receipts (bench --out JSON) are retained under evidence/rust/. In-process pass (bench --reps 3):
 batch-1 strict 2.465 s → +PL-004 tiled conv 2.426 s → batched(8000)+PL-004 2.298 s → +FMA (opt-in,
 provisional) 2.285 s. Batching and FMA quality: OWNER-ACCEPTED by listening (owner #14, 2026-09-26);
-both still opt-in until defaults are chosen after the single-binary milestone.
+at the time both were opt-in. Since the F4 change (commit 169c9e9), batching (`--batch-phonemes 8000`)
+is the DEFAULT for `synth` and `bench`, which share the option. The historical `bench` receipts above
+were batch-1 by default; reproducing them now needs `--batch-phonemes 0`. FMA remains an opt-in build
+(`KOKORO_FMA=1`); the default build is strict.
 
 **Headroom status (owner question 1553429320150810717, then PAUSED by owner priority change #15).** The
 headroom section above predates batching and is STALE: its Tier A (1.95–2.05 s) and Tier B (1.1–1.4 s)

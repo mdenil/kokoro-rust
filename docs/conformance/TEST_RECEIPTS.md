@@ -30,6 +30,13 @@ only, and their outputs stay under /data/.../evidence/private.
   is rejected. The private run applies the expectation-side controls to its real outputs.
 
 ## Commands and results
+Execution logs of the integrated strict/FMA runs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/
+- `strict+fma_tree-a296b58-prefuzz.log`, sha256 b73da6e5…
+- `strict+fma_tree-dbe5bba-postfuzz.log`, sha256 3fef44d1…
+- `sanitizers-7line.log`, sha256 b107cffd…
+
+These are grep-filtered stdout captures; the full unfiltered cargo test stdout was not retained.
+
 | command | result |
 |---|---|
 | `cargo test --release --test frontend_spacy -- --include-ignored` | tokenizer edge 65/65, Alice 1402/1402, private 316/316 lines. Tagger: tags 0 mismatches over 822 + 34,473 + 9,137 tokens; feature ids exact; tok2vec tensor max\|Δ\| ≤ 3.22e-6; tagger logits max\|Δ\| ≤ 1.34e-5 (seam newly compared; gate 1e-4 fixed before judging). Negative controls: symbols 12, lexeme_norm 3, pad 46 Alice lines change. PASS (5 tests) |
