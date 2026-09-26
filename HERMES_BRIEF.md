@@ -129,3 +129,9 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    8-thread setting is NOT a product cap: use bounded, configurable worker pools tuned to the host,
    avoid nested oversubscription, and record CPU budgets / load / affinity in comparisons (label
    unmatched budgets). Line mapping, correctness and resume semantics are preserved.
+11. SPEED + CLOSE-MATCH-THAT-SOUNDS-GOOD (Misha): not chasing bit-identical output. Optimize for speed
+   and a close match that sounds good. CPU-rounding constraints may be relaxed (e.g. drop -fmad=false,
+   normal FMA contraction); strict rounding remains an optional diagnostic baseline, not a production
+   requirement. Exact waveform identity is not an acceptance criterion; evaluate speed and audio quality.
+   Keep functional correctness, text coverage, ordering, line identity/resume and negative controls.
+   Document numerical/perceptual trade-offs honestly; never silently widen tolerances to pass.

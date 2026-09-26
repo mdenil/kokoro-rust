@@ -19,6 +19,7 @@
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
+- Owner #11: speed + close match that sounds good; FMA contraction allowed (strict -fmad=false = optional diagnostic build).
 - Owner #10: host-side parallelism allowed/encouraged for GPU chapter throughput (bounded pools, record CPU budgets).
 - NEW SCOPE (owner #8): chapter throughput + RTX 4090 batching; primary workload = private chapter
   (316 lines, sha256 8129112a…, under /data/mdenil/code/kokoro-rust/bench/private/ — NEVER in Git).
