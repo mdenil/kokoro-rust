@@ -123,3 +123,9 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    (tracked + staged, worktree + index); ignore rules alone are not an audit. Generic stats / hashes /
    names are fine; no passages. Public corpus + generic reproduction commands must suffice for
    open-source users; the private chapter benchmark stays optional.
+10. HOST PARALLELISM (Misha, 1553408435029147720): Rust CPU-side multithreading is explicitly permitted
+   whenever it improves GPU-backed chapter throughput (parallel native G2P, batch preparation, staging/
+   transfers, overlapped output writes/hashing). The neural model stays on the RTX 4090. The earlier
+   8-thread setting is NOT a product cap: use bounded, configurable worker pools tuned to the host,
+   avoid nested oversubscription, and record CPU budgets / load / affinity in comparisons (label
+   unmatched budgets). Line mapping, correctness and resume semantics are preserved.
