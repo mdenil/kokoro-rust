@@ -103,3 +103,13 @@ Sequence (sole coder; CUDA work interleaved at natural boundaries):
 - CUDA Tier A levers (conv_direct tiling, chan_stats, LSTM step, fusions) interleaved; Tier B later.
 - Then publish/install phase (brief #8): reproducible build, pinned model acquisition incl. frontend
   data, release binaries + checksums, clean-install smoke — deferred until review.
+
+### Audiobook line-file interface (owner #7) — placement
+- I0 (now, small, no frontend dependency): extend `synth` — 1-based line identity + input-file
+  provenance in sidecars, run manifest (manifest.json), `--blank-lines error|skip` (default error:
+  canonical files have none; never shifts numbering), whole-file UTF-8 validation with exact
+  line/byte of any invalid sequence, duplicate lines kept by identity, filename scheme confirmed with
+  Hermes against audiobook/audio_chunks/ conventions; tests for restart, invalidation on changed
+  text/settings/model/frontend, long-line (multi-chunk) completeness.
+- I1 (with F4): default `--frontend native`; Python-free acceptance run (no python on PATH, execve
+  audit), both voices; cold + resident benchmarks of the same line-file interface.

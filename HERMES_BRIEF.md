@@ -86,3 +86,15 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    plain-text CLI with Python unavailable; benchmark cold text->WAV and warm resident text->audio vs
    reference and the existing bridge, separating load / frontend / model costs. CUDA optimization
    stays in scope.
+7. AUDIOBOOK FILE INTERFACE (Misha, 1553400752284770372; full text in HERMES_AUDIOBOOK_INTERFACE_BRIEF.md
+   "Audiobook file interface"): input = audiobook/normalized/<section>.txt (UTF-8, one prepared
+   utterance per line, no blanks in canonical files). Extend `kokoro synth`: text file + out dir +
+   voice/speed/device -> exactly one deterministically numbered WAV per input line in source order,
+   manifest + sidecars (input file, 1-based line, text hash, settings/model/frontend identity, audio
+   hash, duration, status, errors); load once per invocation; no Python runtime; no cleanup,
+   re-sentencing, dedup or reordering; long lines chunked internally and joined to one output
+   (never truncated); unsafe lines fail explicitly by line number; defined blank/malformed-input
+   behaviour; resume only verified outputs; atomic promotion; nonzero exit if incomplete. Chapter
+   assembly/M4B stay downstream. Acceptance: native CLI with Python unavailable on public-domain /
+   synthetic fixtures, both voices, restart + invalidation, long-line completeness, cold + resident
+   benchmarks; outputs usable under audiobook/audio_chunks/.

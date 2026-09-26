@@ -19,6 +19,8 @@
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
+- NEW SCOPE (owner #7): audiobook line-file interface on `kokoro synth` (I0 now, I1 with F4) —
+  HERMES_AUDIOBOOK_INTERFACE_BRIEF.md; open question to Hermes: exact audio_chunks filename convention.
 - Optimization continues (owner follow-up), interleaved with F0–F4: Tier A levers under RB-1 — tiled conv_direct,
   multi-block chan_stats, cheaper LSTM step, elementwise fusions; then Tier B implicit-GEMM conv.
 - Process lesson: never wait with `pgrep -f <pattern>` from a shell whose own command line contains
