@@ -85,3 +85,22 @@ Sequential A/B arms drift ~28% (35.8→46 ms) on unchanged code on heat-soaking 
 oversubscribed reference benches
 (torch@64) fake wins; wall totals under load invert real results (0.52× for a true win);
 cv%>5 rows are noise. Interleaved same-window stage pairs only.
+
+---
+
+## Local evidence (this model)
+
+### NE-001 — SineGen `rand_ini` initial-phase draw is dead code  [2026-09-26 | VOID-for-parity]
+- `torch.rand(1, 9)` is added to `rad_values[:, 0, :]` only (`istftnet.py:150-152`); the
+  following ×1/300 linear downsample samples indices 300d+149/150 and never reads sample 0.
+- Proof: `tests/parity.rs::perturbation_detected` asserts bit-identical output after perturbing
+  rand_ini. Consequence: only the [S,9] Gaussian draw affects audio; harness keeps recording
+  rand_ini anyway (cheap, and future model revisions might read it).
+- Do-not-retry unless: upsample_scale or interpolation mode changes.
+
+### NE-002 — End-to-end waveform comparison has low power  [2026-09-26 | limitation]
+- A 1.5× scale of harmonic-0 excitation noise moves the waveform only 2.27% rel on
+  s02_fox/af_heart — inside that case's own torch reorder envelope (2·1.29e-2), so G-E2E-v2
+  PASSES it. The stage-isolated `har_source` seam (gate 1e-4) catches it (rel 1.44e-2).
+- Rule: correctness claims rest on the seam ladder + exact discrete gates; the E2E waveform
+  gate is a coarse backstop, never sufficient on its own. F0 ×1.001 is caught by E2E (rel 1.3).

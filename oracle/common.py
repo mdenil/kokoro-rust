@@ -111,9 +111,10 @@ class SeamRecorder:
     """Forward hooks on named modules + method wraps for stft.transform/inverse.
     Captures cpu float32 numpy copies keyed by seam name."""
 
-    def __init__(self, model, full_internals=False):
+    def __init__(self, model, full_internals=False, keep_dtype=False):
         self.model = model
         self.full = full_internals
+        self.keep_dtype = keep_dtype
         self.data = {}
         self.handles = []
         self._unwraps = []
@@ -121,7 +122,8 @@ class SeamRecorder:
     def _save(self, key, tensor):
         import torch
         if isinstance(tensor, torch.Tensor):
-            self.data[key] = tensor.detach().to("cpu").float().numpy().copy()
+            t = tensor.detach().to("cpu")
+            self.data[key] = (t if self.keep_dtype else t.float()).numpy().copy()
 
     def _hook(self, key, io="out"):
         def fn(mod, args, output):

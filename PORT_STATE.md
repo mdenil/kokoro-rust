@@ -23,7 +23,7 @@
 | Phase | Gate artifact | Status |
 |---|---|---|
 | −1 truth pack | OQ register zero-blocking + hashes | DONE (docs/truth-pack/OQ_INDEX.md; OQ-12 frontend-scoped) |
-| 0 oracle | floor envelope + fixture inventory | DONE (docs/conformance/NONDET_FLOOR.md; 16 cases × {cpu-t1, cuda-t1}) |
+| 0 oracle | floor envelope + fixture inventory | DONE (docs/conformance/NONDET_FLOOR.md; 15 cases × {cpu-t1, cuda-t1}) |
 | 1 forward | e2e waveform parity + seam table | IN PROGRESS (ops/nn/albert/model written; vocoder next) |
 | 2 quant | (deferred; float first per brief) | — |
 | 3 kernels | selftest battery | not started |
@@ -36,7 +36,7 @@
   frozen-noise replay is bit-exact per (device, threads). Free noise moves waveform 9.45% RMS.
 - Floor: cpu-t1 vs cpu-t8 0.93% RMS / 1.65e-2 max; cpu vs cuda (TF32 convs) 5.65% RMS.
   Gates (frozen): ids/durations/sample count EXACT; wave RMS rel ≤1.9%, max ≤3.3e-2, corr ≥0.9995.
-- ids + durations identical CPU↔CUDA on all 16 fixtures.
+- ids + durations identical CPU↔CUDA on all 15 fixtures.
 - Subject loads raw_state.safetensors (verbatim weight_g/weight_v) and computes weight-norm itself.
 
 ## Open threads

@@ -1,5 +1,5 @@
 //! Minimal safetensors reader: u64-LE header length, JSON directory, raw LE payload.
-//! Only the dtypes this project uses (F32, I64) are accepted; anything else is refused.
+//! Only the dtypes this project uses (F32, F64, I64) are accepted; anything else is refused.
 
 use anyhow::{bail, ensure, Context, Result};
 use std::collections::BTreeMap;
@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub enum Data {
     F32(Vec<f32>),
+    F64(Vec<f64>),
     I64(Vec<i64>),
 }
 
@@ -26,6 +27,13 @@ impl Tensor {
         match &self.data {
             Data::F32(v) => Ok(v),
             _ => bail!("tensor is not f32"),
+        }
+    }
+
+    pub fn f64(&self) -> Result<&[f64]> {
+        match &self.data {
+            Data::F64(v) => Ok(v),
+            _ => bail!("tensor is not f64"),
         }
     }
 
@@ -79,6 +87,14 @@ pub fn parse(bytes: &[u8]) -> Result<TensorMap> {
                 Data::F32(
                     raw.chunks_exact(4)
                         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                        .collect(),
+                )
+            }
+            "F64" => {
+                ensure!(raw.len() == numel * 8, "size mismatch for {name}");
+                Data::F64(
+                    raw.chunks_exact(8)
+                        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
                         .collect(),
                 )
             }

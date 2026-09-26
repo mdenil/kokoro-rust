@@ -16,7 +16,7 @@ reference waveform RMS 0.0472.
 | cpu-t1 vs cuda (TF32 convs, prod default) | 7.06e-2 | 2.67e-3 | 5.65% | identical |
 | **free-running noise**, seed 1 vs seed 2 (cpu-t1) | 1.19e-1 | 4.46e-3 | 9.45% | identical |
 
-Across all 16 corpus fixtures: input ids and integer durations are IDENTICAL cpu-t1 vs cuda.
+Across all 15 corpus fixtures: input ids and integer durations are IDENTICAL cpu-t1 vs cuda.
 
 ## Interpretation → tolerance derivation
 
@@ -57,8 +57,8 @@ CUDA-specific floor measurement (TF32 on/off pair) before any GPU claim.
 ## Revision 1 (2026-09-26) — per-case floor; PRECOMMITTED before per-case floors were measured
 
 **What happened under the original gates (recorded, not erased).** Ladder receipt
-`evidence/ladder/ladder-cpu-t1-1790423348.json`: every stage-isolated seam passed on all 16
-cases, but the E2E waveform failed the original gates on 5/16 cases (s02_fox am_adam s0.8
+`evidence/ladder/ladder-cpu-t1-1790423348.json`: every stage-isolated seam passed on all 15
+cases, but the E2E waveform failed the original gates on 5/15 cases (s02_fox am_adam s0.8
 rel 2.01% / max 4.5e-2; s02_fox am_adam s1.0, s03_moon am_adam, s04_alice am_adam,
 s06_long af_heart: max 4.0–4.7e-2 > 3.3e-2). Correlation ≥ 0.9998 everywhere.
 

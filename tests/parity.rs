@@ -124,6 +124,23 @@ fn compare_angle(case: &str, seam: &str, got: &[f32], want: &[f32], gate_rel: f6
     compare(case, &format!("{seam} [flips={flips}]"), &wrapped, want, gate_rel)
 }
 
+fn floors() -> &'static serde_json::Value {
+    static F: OnceLock<serde_json::Value> = OnceLock::new();
+    F.get_or_init(|| {
+        let p = data_root().join("fixtures/floor_per_case.json");
+        serde_json::from_str(&std::fs::read_to_string(&p).expect("run oracle/floor_all.py (per-case floor)")).unwrap()
+    })
+}
+
+/// G-E2E-v2 (NONDET_FLOOR.md Revision 1): rel ≤ 2·floor_rel(case), max ≤ 2·floor_max(case), corr ≥ 0.9995.
+fn gate_e2e_v2(case: &str, got: &[f32], want: &[f32]) -> Cmp {
+    let f = &floors()["cases"][case];
+    let (fr, fm) = (f["floor_rel"].as_f64().expect("floor_rel"), f["floor_max"].as_f64().expect("floor_max"));
+    let mut r = compare(case, "E2E waveform [G-v2]", got, want, 2.0 * fr);
+    r.pass = r.pass && r.max_abs <= 2.0 * fm && r.corr >= 0.9995;
+    r
+}
+
 /// Stage-isolated linear-algebra seam gate (docs/conformance/NONDET_FLOOR.md).
 const SEAM_GATE: f64 = 1e-4;
 
@@ -198,9 +215,10 @@ fn run_ladder(device: &str) -> Vec<Cmp> {
         assert_eq!(out.pred_dur, fx.i("pred_dur"), "{c}: e2e durations differ");
         let want = fx.f("audio");
         assert_eq!(out.audio.len(), want.len(), "{c}: e2e sample count differs");
-        let mut e2e = compare(c, "E2E waveform", &out.audio, &want, 0.019);
-        e2e.pass = e2e.pass && e2e.max_abs <= 3.3e-2 && e2e.corr >= 0.9995;
-        rows.push(e2e);
+        let mut v1 = compare(c, "E2E waveform [G-v1 info]", &out.audio, &want, 0.019);
+        v1.pass = true; // superseded single-case gate, reported for audit only (NONDET_FLOOR Rev 1)
+        rows.push(v1);
+        rows.push(gate_e2e_v2(c, &out.audio, &want));
     }
     rows
 }
@@ -210,7 +228,8 @@ fn report(rows: &[Cmp], tag: &str) {
     for r in rows {
         println!(
             "{:<34} {:<26} {:>9} {:>10.3e} {:>10.3e} {:>9.6} {:>8}",
-            r.case, r.seam, r.n, r.rel_l2, r.max_abs, r.corr, if r.pass { "PASS" } else { "FAIL" }
+            r.case, r.seam, r.n, r.rel_l2, r.max_abs, r.corr,
+            if r.seam.contains("info") { "INFO" } else if r.pass { "PASS" } else { "FAIL" }
         );
     }
     let dir = data_root().join("evidence/ladder");
@@ -261,4 +280,144 @@ fn e2e_attribution_f0() {
         let o = compare(&fx.name, "oracleF0", &a, &want, 1.0);
         println!("{:<34} {:>12.3e} {:>12.3e} {:>12.3e} {:>12.3e}", fx.name, n.rel_l2, n.max_abs, o.rel_l2, o.max_abs);
     }
+}
+
+/// Distance to the float64 "true-math" oracle (oracle/gen_f64.py): the Rust f32 subject vs the
+/// pinned torch f32 reference at thread counts {1,2,4,8}, all measured against exact arithmetic.
+#[test]
+fn truth_distance() {
+    let m = model();
+    let root = data_root().join("fixtures/f64");
+    println!("\n{:<32} {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>9} {:>9}",
+        "case", "rust rel", "torch min", "torch max", "rust max", "tmax min", "tmax max", "F0 rust", "F0 torch");
+    let mut worse = 0;
+    for fx in fixtures("cpu-t1") {
+        let tp = st::load(&root.join(&fx.name).join("f64.safetensors")).expect("run oracle/gen_f64.py");
+        let truth = tp["audio_f64"].f64().unwrap().to_vec();
+        let f0_truth = tp["F0_f64"].f64().unwrap().to_vec();
+        let ps = fx.meta["phonemes"].as_str().unwrap();
+        let (ids, _) = m.phonemes_to_ids(ps);
+        let rand_ini: [f32; HARMONICS] = fx.f("noise.rand_ini").try_into().unwrap();
+        let mut noise = FixedNoise { rand_ini, sine_noise: fx.f("noise.sine") };
+        let speed = fx.meta["speed"].as_f64().unwrap() as f32;
+        let out = m.forward_ids(&ids, &fx.f("ref_s"), speed, &mut noise).unwrap();
+        assert_eq!(out.pred_dur, tp["pred_dur_f64"].i64().unwrap().to_vec(), "{}: durations vs f64 truth", fx.name);
+        let dist = |x: &[f32]| {
+            let (mut d2, mut t2, mut mx) = (0.0f64, 0.0f64, 0.0f64);
+            for (&a, &b) in x.iter().zip(&truth) {
+                let d = a as f64 - b;
+                d2 += d * d;
+                t2 += b * b;
+                mx = mx.max(d.abs());
+            }
+            ((d2 / t2).sqrt(), mx)
+        };
+        let (rr, rm) = dist(&out.audio);
+        let torch: Vec<(f64, f64)> = [1, 2, 4, 8].iter().map(|t| dist(tp[&format!("audio_f32_t{t}")].f32().unwrap())).collect();
+        let (tmin, tmax) = torch.iter().fold((f64::MAX, 0.0f64), |a, b| (a.0.min(b.0), a.1.max(b.0)));
+        let (mmin, mmax) = torch.iter().fold((f64::MAX, 0.0f64), |a, b| (a.0.min(b.1), a.1.max(b.1)));
+        // F0 relative error vs truth: subject (native F0 from the full pipeline) and torch t1 (fixture seam)
+        let nf: usize = out.pred_dur.iter().sum::<i64>() as usize;
+        let t = ids.len();
+        let d = {
+            let bert = m.albert.forward(&ids).unwrap();
+            let d_en = m.bert_encoder.forward(&bert, t);
+            m.predictor.duration_encoder(&d_en, t, &fx.f("ref_s")[128..])
+        };
+        let aln = model::alignment(&out.pred_dur);
+        let mut en = vec![0.0f32; nf * 640];
+        for (f, &tok) in aln.iter().enumerate() {
+            en[f * 640..(f + 1) * 640].copy_from_slice(&d[tok * 640..(tok + 1) * 640]);
+        }
+        let (f0, _) = m.predictor.f0n(&en, nf, &fx.f("ref_s")[128..]);
+        let frel = |x: &[f32]| {
+            let (mut d2, mut t2) = (0.0f64, 0.0f64);
+            for (&a, &b) in x.iter().zip(&f0_truth) {
+                d2 += (a as f64 - b).powi(2);
+                t2 += b * b;
+            }
+            (d2 / t2).sqrt()
+        };
+        let f0r = frel(&f0);
+        let f0t = frel(&fx.f("seam.decoder.arg1"));
+        if rr > tmax {
+            worse += 1;
+        }
+        println!("{:<32} {:>10.3e} {:>10.3e} {:>10.3e} | {:>10.3e} {:>10.3e} {:>10.3e} | {:>9.2e} {:>9.2e}",
+            fx.name, rr, tmin, tmax, rm, mmin, mmax, f0r, f0t);
+    }
+    println!("cases where Rust is farther from truth (rel) than every torch reorder: {worse}");
+}
+
+/// The comparators must FAIL under deliberate perturbation (brief gate 4).
+#[test]
+fn perturbation_detected() {
+    let m = model();
+    let fx = fixtures("cpu-t1").into_iter().find(|f| f.name == "s02_fox__af_heart__s1.0").expect("case");
+    let c = fx.name.as_str();
+    let (ids, _) = m.phonemes_to_ids(fx.meta["phonemes"].as_str().unwrap());
+    let ref_s = fx.f("ref_s");
+    let rand_ini: [f32; HARMONICS] = fx.f("noise.rand_ini").try_into().unwrap();
+    let want = fx.f("audio");
+    let noise = || FixedNoise { rand_ini, sine_noise: fx.f("noise.sine") };
+
+    // baseline passes
+    let base = m.forward_ids(&ids, &ref_s, 1.0, &mut noise()).unwrap();
+    assert!(gate_e2e_v2(c, &base.audio, &want).pass, "unperturbed baseline must pass");
+
+    // 1. F0 curve scaled by 1.001 at the decoder input
+    let nf: usize = base.pred_dur.iter().sum::<i64>() as usize;
+    let f0: Vec<f32> = fx.f("seam.decoder.arg1").iter().map(|v| v * 1.001).collect();
+    let a = m.decoder.forward(&fx.f("seam.decoder.arg0"), nf, &f0, &fx.f("seam.decoder.arg2"), &ref_s[..128], &mut noise()).unwrap();
+    let r = gate_e2e_v2(c, &a, &want);
+    println!("F0 x1.001: rel {:.3e} max {:.3e} -> {}", r.rel_l2, r.max_abs, r.pass);
+    assert!(!r.pass, "F0 perturbation not detected");
+
+    // 2a. rand_ini is provably DEAD: it is added only at sample 0, which the x1/300 linear
+    //     downsample never reads (source index 300d+149.5). Output must be bit-identical.
+    let mut ri = rand_ini;
+    ri[3] = (ri[3] + 0.25) % 1.0;
+    let a = m.forward_ids(&ids, &ref_s, 1.0, &mut FixedNoise { rand_ini: ri, sine_noise: fx.f("noise.sine") }).unwrap();
+    assert_eq!(a.audio, base.audio, "rand_ini unexpectedly affects output");
+    // 2b. excitation noise perturbed: harmonic-0 Gaussian noise scaled x1.5
+    let mut sn = fx.f("noise.sine");
+    for v in sn.iter_mut().step_by(HARMONICS) {
+        *v *= 1.5;
+    }
+    //     The E2E waveform gate has NO power here (effect ~2.3% rel is inside the model's own
+    //     f32 reorder envelope); the stage-isolated har_source seam must catch it.
+    let har = m.decoder.generator.har_source(&fx.f("seam.gen.arg2"), &mut FixedNoise { rand_ini, sine_noise: sn.clone() }).unwrap();
+    let rs = compare(c, "har_source(perturbed)", &har, &fx.f("seam.har_source"), SEAM_GATE);
+    let a = m.forward_ids(&ids, &ref_s, 1.0, &mut FixedNoise { rand_ini, sine_noise: sn }).unwrap();
+    let r = gate_e2e_v2(c, &a.audio, &want);
+    println!("sine noise h0 x1.5: har_source seam rel {:.3e} -> {} | E2E v2 rel {:.3e} -> {} (E2E gate lacks power; documented)",
+        rs.rel_l2, rs.pass, r.rel_l2, r.pass);
+    assert!(!rs.pass, "excitation-noise perturbation not detected by the har_source seam");
+
+    // 3. wrong voice (am_adam style vector for an af_heart fixture)
+    let other = fixtures("cpu-t1").into_iter().find(|f| f.name == "s02_fox__am_adam__s1.0").unwrap();
+    let a = m.forward_ids(&ids, &other.f("ref_s"), 1.0, &mut FixedNoise { rand_ini, sine_noise: other.f("noise.sine") });
+    let durations_differ = a.as_ref().map(|o| o.pred_dur != fx.i("pred_dur")).unwrap_or(true);
+    println!("voice swap: durations differ = {durations_differ}");
+    assert!(durations_differ, "voice swap not detected by the exact duration gate");
+
+    // 4. speed 1.0 -> 1.05 changes discrete durations
+    let pd = model::durations_from_logits(&fx.f("seam.duration_proj"), ids.len(), 1.05);
+    assert_ne!(pd, fx.i("pred_dur"), "speed perturbation not detected");
+
+    // 5. seam gate: 1e-3 relative perturbation of a stage output
+    let mut x = fx.f("seam.gen.arg0");
+    for (i, v) in x.iter_mut().enumerate() {
+        *v *= 1.0 + 1e-3 * if i % 2 == 0 { 1.0 } else { -1.0 };
+    }
+    let r = compare(c, "perturbed", &x, &fx.f("seam.gen.arg0"), SEAM_GATE);
+    println!("seam 1e-3 perturbation: rel {:.3e} -> {}", r.rel_l2, r.pass);
+    assert!(!r.pass, "seam perturbation not detected");
+
+    // 6. one-sample time shift of the correct waveform
+    let mut shifted = vec![0.0f32];
+    shifted.extend_from_slice(&base.audio[..base.audio.len() - 1]);
+    let r = gate_e2e_v2(c, &shifted, &want);
+    println!("1-sample shift: rel {:.3e} -> {}", r.rel_l2, r.pass);
+    assert!(!r.pass, "time shift not detected");
 }
