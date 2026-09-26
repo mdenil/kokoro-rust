@@ -58,7 +58,7 @@ struct Common {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Synthesize one utterance per input line into <out-dir>/<index>.wav + <index>.json.
+    /// One WAV + JSON sidecar per input line (<stem>_<1-based line>.wav) plus <stem>.manifest.json.
     Synth {
         #[command(flatten)]
         common: Common,
@@ -89,6 +89,9 @@ enum Cmd {
         /// Re-synthesize even if a matching completed output exists.
         #[arg(long)]
         force: bool,
+        /// Blank-line policy (canonical audiobook files contain none).
+        #[arg(long, value_enum, default_value = "error")]
+        blank_lines: BlankLines,
     },
     /// Time pure inference over pre-computed phoneme chunks (JSONL with a "phonemes" field).
     Bench {
@@ -173,10 +176,13 @@ struct Config {
 
 #[derive(Serialize, serde::Deserialize)]
 struct Sidecar {
-    index: usize,
+    /// 1-based line number in the input file (the line's identity)
+    line: usize,
+    input_file: String,
+    input_sha256: String,
     text: String,
     text_sha256: String,
-    status: String, // ok | empty | oversize | error
+    status: String, // ok | blank | oversize | invalid | error
     error: Option<String>,
     phonemes: Vec<String>,
     dropped_phoneme_chars: Vec<String>,
@@ -191,34 +197,91 @@ struct Sidecar {
     elapsed_s: f64,
 }
 
-fn read_lines(input: &Path) -> Result<Vec<String>> {
-    let text = if input == Path::new("-") {
-        let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
-        s
-    } else {
-        std::fs::read_to_string(input).with_context(|| format!("reading {} (must be UTF-8)", input.display()))?
-    };
-    let mut lines: Vec<String> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect();
-    if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
-        lines.pop(); // trailing newline terminates the last line; it is not an extra utterance
-    }
-    Ok(lines)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
+enum BlankLines {
+    /// A blank (empty/whitespace-only) line is a per-line failure (canonical files have none).
+    Error,
+    /// A blank line is recorded with status "blank" and produces no audio; not a failure.
+    Skip,
 }
 
-fn resume_ok(json_path: &Path, wav_path: &Path, text_sha: &str, cfg: &Config) -> bool {
+/// Parsed input file. Line identity = 1-based line number; nothing is merged, reordered or dropped.
+struct InputFile {
+    display: String,
+    stem: String,
+    sha256: String,
+    lines: Vec<String>,
+    bom_stripped: bool,
+    crlf_lines: usize,
+}
+
+/// Reads the input as bytes. Invalid UTF-8 is a job-level error naming the exact 1-based line and
+/// byte offset (nothing is synthesized). A leading UTF-8 BOM and per-line trailing CR are removed
+/// (recorded in the manifest). A final newline terminates the last line (no phantom empty line).
+fn read_input(input: &Path) -> Result<InputFile> {
+    let bytes = if input == Path::new("-") {
+        let mut b = vec![];
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)?;
+        b
+    } else {
+        std::fs::read(input).with_context(|| format!("reading {}", input.display()))?
+    };
+    let sha256 = sha256_bytes(&bytes);
+    let (body, bom_stripped) = match bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        Some(rest) => (rest, true),
+        None => (&bytes[..], false),
+    };
+    let text = match std::str::from_utf8(body) {
+        Ok(t) => t,
+        Err(e) => {
+            let off = e.valid_up_to();
+            let line = body[..off].iter().filter(|&&b| b == b'\n').count() + 1;
+            let col = off - body[..off].iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+            bail!("input is not valid UTF-8: line {line}, byte {} of the line (file byte {}); nothing synthesized", col + 1, off + bom_stripped as usize * 3);
+        }
+    };
+    let mut crlf_lines = 0;
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|l| match l.strip_suffix('\r') {
+            Some(x) => {
+                crlf_lines += 1;
+                x.to_string()
+            }
+            None => l.to_string(),
+        })
+        .collect();
+    if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    let stem = if input == Path::new("-") {
+        "stdin".to_string()
+    } else {
+        input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "input".into())
+    };
+    Ok(InputFile { display: input.display().to_string(), stem, sha256, lines, bom_stripped, crlf_lines })
+}
+
+/// Control characters other than TAB make a line malformed (explicit per-line failure).
+fn control_char(text: &str) -> Option<(usize, char)> {
+    text.chars().enumerate().find(|(_, c)| c.is_control() && *c != '\t').map(|(i, c)| (i + 1, c))
+}
+
+/// Outputs are keyed by line identity + exact text + config (not the whole-file hash, so editing
+/// one line only invalidates that line).
+fn resume_ok(json_path: &Path, wav_path: &Path, line: usize, text_sha: &str, cfg: &Config) -> bool {
     let Ok(s) = std::fs::read_to_string(json_path) else { return false };
     let Ok(sc) = serde_json::from_str::<Sidecar>(&s) else { return false };
-    if sc.text_sha256 != text_sha || sc.config != *cfg {
+    if sc.line != line || sc.text_sha256 != text_sha || sc.config != *cfg {
         return false;
     }
     match sc.status.as_str() {
-        "empty" => true,
         "ok" => sc.audio_sha256.as_deref().map(|h| sha256_file(wav_path).map(|x| x == h).unwrap_or(false)).unwrap_or(false),
-        _ => false,
+        _ => false, // blank/failed lines are always re-evaluated (cheap, and never counted as done output)
     }
 }
 
+/// Exit status: 0 every line done, 1 some line failed/incomplete, 2 job-level error.
 #[allow(clippy::too_many_arguments)]
 fn synth(
     common: Common,
@@ -233,17 +296,19 @@ fn synth(
     seed: u64,
     encode: Option<String>,
     force: bool,
-) -> Result<()> {
+    blank_lines: BlankLines,
+) -> Result<i32> {
     if input_format == InputFormat::Text && frontend == Frontend::None {
         bail!("--input-format text needs a frontend: no native G2P yet. Use --input-format phonemes, or the DEV-ONLY --frontend python-bridge");
     }
     set_threads(common.threads);
-    let lines = read_lines(&input)?;
+    let inp = read_input(&input)?;
     std::fs::create_dir_all(&out_dir)?;
     let t_load = Instant::now();
     let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     let voice_sha = engine.voice(&common.voice)?.sha256.clone();
-    eprintln!("loaded model + voice in {:.2}s", t_load.elapsed().as_secs_f64());
+    let load_s = t_load.elapsed().as_secs_f64();
+    eprintln!("loaded model + voice in {load_s:.2}s");
     let mut bridge = match (input_format, frontend) {
         (InputFormat::Text, Frontend::PythonBridge) => {
             let py = bridge_python.context("--bridge-python (or KOKORO_BRIDGE_PYTHON) required for the python bridge")?;
@@ -265,20 +330,28 @@ fn synth(
         frontend: bridge.as_ref().map(|b| b.ident.clone()).unwrap_or_else(|| "none (phoneme input)".into()),
         sample_rate: SAMPLE_RATE,
     };
-    let width = lines.len().max(1).to_string().len().max(5);
+    let width = inp.lines.len().max(1).to_string().len().max(5);
+    let name = |line: usize, ext: &str| format!("{}_{line:0width$}.{ext}", inp.stem);
     let (mut n_ok, mut n_skip, mut n_bad, mut audio_total) = (0usize, 0usize, 0usize, 0.0f64);
+    let mut manifest_lines = Vec::with_capacity(inp.lines.len());
     let t_all = Instant::now();
-    for (i, text) in lines.iter().enumerate() {
-        let stem = format!("{i:0width$}");
-        let (wav_path, json_path) = (out_dir.join(format!("{stem}.wav")), out_dir.join(format!("{stem}.json")));
+    for (i, text) in inp.lines.iter().enumerate() {
+        let line = i + 1;
+        let (wav_path, json_path) = (out_dir.join(name(line, "wav")), out_dir.join(name(line, "json")));
         let text_sha = sha256_bytes(text.as_bytes());
-        if !force && resume_ok(&json_path, &wav_path, &text_sha, &cfg) {
+        if !force && resume_ok(&json_path, &wav_path, line, &text_sha, &cfg) {
             n_skip += 1;
+            let sc: Sidecar = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
+            audio_total += sc.duration_s;
+            manifest_lines.push(serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav, "sidecar": name(line, "json"),
+                "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s}));
             continue;
         }
         let t0 = Instant::now();
         let mut sc = Sidecar {
-            index: i,
+            line,
+            input_file: inp.display.clone(),
+            input_sha256: inp.sha256.clone(),
             text: text.clone(),
             text_sha256: text_sha,
             status: "ok".into(),
@@ -297,7 +370,15 @@ fn synth(
         };
         let result: Result<Option<Vec<f32>>> = (|| {
             if text.trim().is_empty() {
+                sc.status = "blank".into();
+                if blank_lines == BlankLines::Error {
+                    bail!("blank line (canonical input has none; use --blank-lines skip to allow)");
+                }
                 return Ok(None);
+            }
+            if let Some((col, c)) = control_char(text) {
+                sc.status = "invalid".into();
+                bail!("control character U+{:04X} at character {col}", c as u32);
             }
             let chunks = match &mut bridge {
                 Some(b) => b.phonemize(text)?,
@@ -305,7 +386,8 @@ fn synth(
             };
             sc.phonemes = chunks.clone();
             if chunks.is_empty() {
-                return Ok(None);
+                sc.status = "error".into();
+                bail!("frontend produced no phonemes for a non-blank line");
             }
             if let Some(c) = chunks.iter().find(|c| c.chars().count() > MAX_PHONEMES) {
                 sc.status = "oversize".into();
@@ -313,7 +395,7 @@ fn synth(
             }
             let mut audio = vec![];
             for (k, c) in chunks.iter().enumerate() {
-                let s = engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (i as u64) << 16 | k as u64))?;
+                let s = engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (line as u64) << 16 | k as u64))?;
                 sc.dropped_phoneme_chars.extend(s.dropped.iter().map(|ch| ch.to_string()));
                 audio.extend_from_slice(&s.audio);
             }
@@ -321,25 +403,24 @@ fn synth(
         })();
         match result {
             Ok(None) => {
-                sc.status = "empty".into();
                 let _ = std::fs::remove_file(&wav_path);
             }
             Ok(Some(audio)) => {
                 let enc = wav::encode(&audio, SAMPLE_RATE as u32, format);
                 wav::write_atomic(&wav_path, &enc.bytes)?;
-                sc.wav = Some(wav_path.file_name().unwrap().to_string_lossy().into());
+                sc.wav = Some(name(line, "wav"));
                 sc.audio_sha256 = Some(sha256_bytes(&enc.bytes));
                 sc.samples = audio.len();
                 sc.duration_s = audio.len() as f64 / SAMPLE_RATE as f64;
                 sc.clipped_samples = enc.clipped;
                 audio_total += sc.duration_s;
                 if let Some(ext) = &encode {
-                    let dst = out_dir.join(format!("{stem}.{ext}"));
+                    let dst = out_dir.join(name(line, ext));
                     let st = Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-i"]).arg(&wav_path).arg(&dst).status();
                     match st {
                         Ok(s) if s.success() => {
                             sc.encoded_sha256 = Some(sha256_file(&dst)?);
-                            sc.encoded = Some(dst.file_name().unwrap().to_string_lossy().into());
+                            sc.encoded = Some(name(line, ext));
                         }
                         other => {
                             sc.status = "error".into();
@@ -357,25 +438,37 @@ fn synth(
             }
         }
         sc.elapsed_s = t0.elapsed().as_secs_f64();
-        match sc.status.as_str() {
-            "ok" | "empty" => n_ok += 1,
-            _ => {
-                n_bad += 1;
-                eprintln!("line {i}: {} — {}", sc.status, sc.error.as_deref().unwrap_or(""));
-            }
+        let done = sc.status == "ok" || (sc.status == "blank" && blank_lines == BlankLines::Skip);
+        if done {
+            n_ok += 1;
+        } else {
+            n_bad += 1;
+            eprintln!("line {line}: {} — {}", sc.status, sc.error.as_deref().unwrap_or(""));
         }
         wav::write_atomic(&json_path, serde_json::to_string_pretty(&sc)?.as_bytes())?;
+        manifest_lines.push(serde_json::json!({"line": line, "status": sc.status, "resumed": false, "wav": sc.wav, "sidecar": name(line, "json"),
+            "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s, "error": sc.error}));
     }
     let wall = t_all.elapsed().as_secs_f64();
+    let complete = n_bad == 0;
+    let manifest = serde_json::json!({
+        "input_file": inp.display, "input_sha256": inp.sha256, "input_lines": inp.lines.len(),
+        "bom_stripped": inp.bom_stripped, "crlf_lines": inp.crlf_lines, "blank_lines_policy": format!("{blank_lines:?}"),
+        "naming": format!("{}_<1-based line, width {width}>.wav / .json", inp.stem),
+        "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
+        "audio_s": audio_total, "load_s": load_s, "synth_wall_s": wall, "lines": manifest_lines,
+    });
+    wav::write_atomic(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes())?;
     eprintln!(
         "{} lines: {n_ok} done, {n_skip} resumed/skipped, {n_bad} failed; {audio_total:.1}s audio in {wall:.2}s (RTF {:.4})",
-        lines.len(),
+        inp.lines.len(),
         if audio_total > 0.0 { wall / audio_total } else { 0.0 }
     );
-    if n_bad > 0 {
-        bail!("{n_bad} line(s) failed; see sidecars");
+    if !complete {
+        eprintln!("INCOMPLETE: {n_bad} line(s) failed; see {}.manifest.json and sidecars", inp.stem);
+        return Ok(1);
     }
-    Ok(())
+    Ok(0)
 }
 
 fn peak_rss_mb() -> f64 {
@@ -444,11 +537,12 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
     Ok(())
 }
 
-pub fn cli_main() -> Result<()> {
+/// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
+pub fn cli_main() -> Result<i32> {
     match Cli::parse().cmd {
-        Cmd::Synth { common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force } => {
-            synth(common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force)
+        Cmd::Synth { common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force, blank_lines } => {
+            synth(common, input, input_format, frontend, lang, bridge_python, bridge_script, out_dir, format, seed, encode, force, blank_lines)
         }
-        Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out),
+        Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out).map(|_| 0),
     }
 }

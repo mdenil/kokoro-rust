@@ -22,7 +22,12 @@
 - NEW SCOPE (owner #8): chapter throughput + RTX 4090 batching; primary workload = private chapter
   (316 lines, sha256 8129112a…, under /data/mdenil/code/kokoro-rust/bench/private/ — NEVER in Git).
   Work order: I0 -> chapter baselines -> B1 batching -> (frontend F0–F4 interleaved) -> kernel levers.
-- NEW SCOPE (owner #7): audiobook line-file interface on `kokoro synth` (I0 now, I1 with F4) —
+- I0 DONE (line-file interface): `<stem>_<1-based line>.wav/.json` + `<stem>.manifest.json`; UTF-8 validated
+  up front (exact line/byte), BOM/CRLF recorded, control chars / blank (default error) / oversize explicit,
+  resume = line identity + text + config + audio hash, exit 0/1/2; tests/cli_linefile.rs (5 tests, real
+  binary, no Python on PATH). Remaining for I1: text-path long-line multi-chunk completeness + Python-free
+  acceptance with the native frontend.
+- SCOPE (owner #7): audiobook line-file interface on `kokoro synth` (I0 done, I1 with F4) —
   HERMES_AUDIOBOOK_INTERFACE_BRIEF.md; open question to Hermes: exact audio_chunks filename convention.
 - Optimization continues (owner follow-up), interleaved with F0–F4: Tier A levers under RB-1 — tiled conv_direct,
   multi-block chan_stats, cheaper LSTM step, elementwise fusions; then Tier B implicit-GEMM conv.
