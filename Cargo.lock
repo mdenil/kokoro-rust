@@ -285,6 +285,7 @@ dependencies = [
  "clap",
  "cudarc",
  "fancy-regex",
+ "libloading",
  "matrixmultiply",
  "rayon",
  "serde",
