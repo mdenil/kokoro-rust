@@ -148,3 +148,35 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    replace the original baseline with optimized Python, and do not imply deployed-wrapper overhead is
    included when unmeasured. Consult the ai-model-into-rust-mega-fused-hyper-kernel skill for the
    remaining performance work.
+14. OWNER LISTENING ACCEPTANCE — BATCHING + FMA (Misha, Discord 1553428873020973171): Misha listened to all
+   six raw WAVs and said "All of these are fine." ACCEPTED (presented comparisons only):
+   - evidence/listening/batch-worst-s04_alice_am_adam: reference cpu-t1 ce9c3f12…d2e8, single control
+     3bc6224e…d7dd, batched15 CANDIDATE d90a653a977d5c17dd038b6ced4f14ce66a0c6f43efffc7a67d7dcfaa1f29d4f.
+   - evidence/listening/fma-worst-s03_moon_am_adam: reference cpu-t1 dfb2b530…e2ea, strict control
+     64159e11…9c99, FMA CANDIDATE c6a01bc2b7b61a76ea09c49cf0a19cd847f477a9648d9331e23347183f0e1c6e.
+   Both listening holds removed; batching (PL-003) and FMA (PL-005) are ACCEPTED optimization candidates;
+   defaults chosen on actual speed + remaining functional validation. Preserve raw numerical results and
+   regression evidence; no bit-identity / zero-slack requirements; do not re-escalate this accepted
+   variation. NOT proof that unreviewed cases/combinations/frontends pass: keep functional invariants,
+   negative controls and broader tests; flag meaningful NEW quality loss, not ordinary tiny arithmetic changes.
+15. PRIORITY CHANGE — SINGLE BINARY FIRST (Misha, 1553430052400660527; supersedes the interleaved speed plan
+   and the pending headroom refresh): completeness AND correctness first, THEN speed. PAUSED: new perf
+   levers, conv/fusion experiments, batch-size tuning, headroom analysis (accepted batching/FMA preserved).
+   Milestone: chunk-line text file -> per-line audio files via ONE Rust executable: native normalization/
+   G2P/tokenizer/tagger/fallback/chunking, GPU model, ordered outputs/metadata, safe resume; NO Python
+   interpreter/runtime/helper process or oracle replay at inference. Explicitly inventory external model/
+   language data and CUDA runtime deps (one executable != embedded assets != static zero-dependency
+   build); surface any native helper/dependency gap instead of calling it complete. Licensing/scope
+   decisions go to Misha only if genuinely blocking; never choose a project license. Prove: actual binary
+   path with Python unavailable and no hidden subprocess fallback; full input/output coverage;
+   pronunciation fidelity vs the pinned reference; long lines; both voices; failures/restart/config
+   invalidation. Agent cleanup + chapter assembly stay outside the binary. Representative tests for
+   iteration, complete-chapter acceptance once assembled. Owner-approved numeric/audio variation stays
+   accepted. Speed resumes AFTER this milestone.
+16. NEXT PERFORMANCE PHASE = FULL SYSTEM (Misha, 1553430273801195591; after milestone #15): same prepared
+   chapter file -> all verified audio files + metadata, original production system as used vs the
+   complete Rust binary. Cold process and warm resident throughput measured separately, with stage
+   attribution (startup/load, native text frontend, scheduling/transfers, GPU, output writes/hashes)
+   accounting for overlap (no summing of concurrent stages). Profiling establishes where savings are —
+   no assumed gains. Headline = whole-system wall time, not core-only. No optimization campaign before
+   the complete/correct milestone.

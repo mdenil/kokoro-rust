@@ -134,3 +134,20 @@ release: public corpus only (bench/CORPUS.md provenance + notices), dependency/d
 inventory (frontend: espeak-ng GPL-3 decision, num2words avoided, lexicon provenance), private
 fixtures and derivatives absent from tree AND history (scripts/check_private_leaks.py on every push;
 a history-wide scan before any publication).
+
+### PRIORITY ORDER after owner #15/#16 (2026-09-26) — supersedes the interleaved work order above
+Milestone SB (single binary, completeness + correctness):
+1. F2 native spaCy tokenizer + tok2vec/tagger (pinned en_core_web_sm 3.8.0 data): exact tokens/attrs/tags
+   vs oracle on edge + Alice (+ private chapter aggregates).
+2. F3 OOV fallback: interim = runtime-loaded libespeak-ng 1.52.0 + espeak-ng-data (the pinned reference's
+   copy), explicit path/version check, hard failure when missing (never a silent substitute). GPL-3
+   license decision for any distribution remains the owner's (options a/b/c above); local use now.
+3. F4 `synth` defaults to the native frontend; the Python bridge is removed from the shipped binary path.
+4. I1 acceptance: Python unavailable + execve audit (no subprocesses), both voices, long lines (multi-
+   chunk), blank/malformed/oversize failures, restart + invalidation, pronunciation fidelity (phoneme
+   strings vs the pinned reference over full corpora), full private chapter end to end.
+5. docs/DEPENDENCIES.md: external model/language data + native/CUDA runtime inventory with hashes.
+Then (owner #16): whole-system performance phase — same prepared chapter file -> all verified audio +
+metadata; production system as used vs the complete Rust binary; cold and resident separately; stage
+attribution (startup/load, frontend, scheduling/transfers, GPU, writes/hashes) accounting for overlap.
+Batching/FMA defaults chosen then on measured speed. Tier A/B kernel levers only after that profiling.

@@ -1,5 +1,17 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
+## CURRENT PRIORITY (owner #15, 2026-09-26): SINGLE-BINARY MILESTONE — completeness + correctness, speed PAUSED
+- One Rust executable: chunk-line text file -> per-line WAVs + metadata, native frontend (normalization,
+  spaCy tokenizer+tagger, misaki G2P, OOV fallback, chunking), GPU model, ordered outputs, safe resume.
+  No Python / helper process / oracle replay at inference. Inventory every external data/runtime dep.
+- Order: F2 spaCy tokenizer+tagger -> F3 OOV fallback (interim: runtime-loaded pinned libespeak-ng 1.52,
+  explicit dependency, license decision surfaced to owner) -> F4 CLI default native -> I1 acceptance
+  (no Python on PATH + execve audit, both voices, long lines, failures/restart/invalidation, pronunciation
+  fidelity vs pinned reference, complete private chapter) -> dependency inventory doc.
+- PAUSED until then: perf levers, conv/fusion experiments, batch tuning, headroom analysis.
+- NEXT PERF PHASE (owner #16): whole-system chapter file -> verified WAVs, production system as used vs the
+  complete Rust binary, cold and resident, overlap-aware stage attribution; headline = whole-system wall.
+
 ## Where we are (2026-09-26)
 - Deliverable: **native Rust + CUDA on RTX 4090 (GPU-first, owner decision)**. CPU path = oracle/debug baseline.
 - Correctness: **NOT ACCEPTED as a whole.** Binding original gates (HERMES_BRIEF owner log #2).
@@ -26,12 +38,11 @@
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
-- Levers since checkpoint: PL-004 tiled conv (bit-identical, KEEP); PL-003 batching (opt-in, ~5%,
-  quality PROVISIONAL, escalated: evidence/listening/batch-worst-s04_alice_am_adam); PL-005 FMA (opt-in
-  build KOKORO_FMA=1, +1.6%, authoritative RB-1 FAILS: 9 drift + new s03_moon/am_adam G-SPEC; escalated:
-  evidence/listening/fma-worst-s03_moon_am_adam). Default build = strict (owner-accepted baseline).
-  Authoritative regression test = gpu_regression_bounded vs the STRICT baseline; FMA snapshot is a
-  PROVISIONAL diagnostic only. ABBA receipts: evidence/ab/ (scripts/ab.sh tees raw output).
+- Levers since checkpoint: PL-004 tiled conv (bit-identical, KEEP); PL-003 batching (opt-in, ~5%) and
+  PL-005 FMA (opt-in build KOKORO_FMA=1, +1.6%): quality OWNER-ACCEPTED by listening (owner #14; receipts
+  evidence/listening/*/OWNER_ACCEPTANCE.json). Raw RB-1 failures of FMA stay recorded. Default build = strict
+  until defaults are chosen after the milestone. Authoritative regression test = gpu_regression_bounded vs
+  the STRICT baseline; FMA snapshot = diagnostic only. ABBA receipts: evidence/ab/.
 - Owner #13: headline = original production Python (unchanged) vs fastest Rust; no Python optimization.
 - Owner #12: representative subsets OK for fast iteration (label them); full-chapter runs for milestones.
 - Owner #11: speed + close match that sounds good; FMA contraction allowed (strict -fmad=false = optional diagnostic build).

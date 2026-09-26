@@ -118,7 +118,18 @@ equals full-f32 torch exactly; production TF32 is 0.05 s longer (duration differ
 ## Lever receipts after the checkpoint (Alice 69 chunks, public; exploratory subset per owner #12)
 Raw ABBA outputs: evidence/ab/ (see PERF_LEDGER PL-001..005). In-process pass (bench --reps 3):
 batch-1 strict 2.465 s → +PL-004 tiled conv 2.426 s → batched(8000)+PL-004 2.298 s → +FMA (opt-in,
-provisional) 2.285 s. Batching and FMA are opt-in pending owner listening (quality provisional).
+provisional) 2.285 s. Batching and FMA quality: OWNER-ACCEPTED by listening (owner #14, 2026-09-26);
+both still opt-in until defaults are chosen after the single-binary milestone.
+
+**Headroom status (owner question 1553429320150810717, then PAUSED by owner priority change #15).** The
+headroom section above predates batching and is STALE: its Tier A (1.95–2.05 s) and Tier B (1.1–1.4 s)
+figures were single-item analytic estimates, and the measured tiled-conv win (neutral batch-1; ~5% only
+when batched) was smaller than its −0.15 s forecast. Measured so far: batch-1+tiled 2.426 s → batched
+2.298 s (~5.6%) → batched+FMA 2.285 s (~7.9% vs 2.465 s). Nsys captures of the current tree (batch-1 and
+batched) were taken but are deliberately UNANALYSED (evidence/profiles/20260926-1640-paused/); the
+single-item roofline/traffic model is not a batched bound. The refresh is superseded by the next
+performance phase (owner #16): whole-system chapter file → verified WAVs, cold and resident, with
+overlap-aware stage attribution — after the complete/correct single-binary milestone.
 
 ## Method (applies to the checkpoint)
 

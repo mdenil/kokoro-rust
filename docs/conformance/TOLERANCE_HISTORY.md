@@ -30,6 +30,7 @@ G-E2E-v2 confers NO acceptance. The ladders enforce v1 + G-SPEC as assertions.
 
 | 13 | ~16:05 | `ladder-gpu-1790435169` (FMA build) | Owner #11 FMA exploration. | 135 stage seams PASS; binding-gate failure SET changed (8 → 8): s03_moon/am_adam G-SPEC NEW FAIL, s05_word/am_adam v1 resolved. Authoritative RB-1 (strict baseline): FAIL (9 drift + 1 new gate failure). Provisional; escalated for listening. Default build reverted to strict. |
 | 14 | ~15:50 | B1 batched forward | Batch vs single / vs reference. | Batch-vs-single RB-1 drift exceeded on several cases; batched peak s04_alice/am_adam 0.0706 vs single 0.0411 vs reference; provisional, escalated (listening triple). Batching opt-in. |
+| 15 | ~16:35 | owner listening verdict (1553428873020973171) | Misha auditioned all six WAVs of the batching (row 14) and FMA (row 13) listening triples: "All of these are fine." | Batched15 candidate d90a653a… and FMA candidate c6a01bc2… ACCEPTED (presented comparisons only). Listening holds removed. No bound widened; raw RB-1 results preserved. |
 
 ## Correction of wording
 The reference is **exactly repeatable** for a fixed (device, thread count, noise) configuration
