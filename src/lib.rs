@@ -4,6 +4,7 @@
 pub mod albert;
 pub mod cli;
 pub mod engine;
+pub mod frontend;
 #[cfg(feature = "cuda")]
 #[allow(unsafe_code)]
 pub mod gpu;
