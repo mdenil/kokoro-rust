@@ -57,6 +57,13 @@ def main():
                 rec.update(blank=True, chunks=[])
                 out.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 continue
+            try:
+                en.G2P.preprocess(line) and g2p(line)
+            except Exception as e:  # noqa: BLE001 — the reference fails this line; record how
+                rec.update(error=f"{type(e).__name__}", chunks=[])
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                continue
+            calls.clear()
             ptext, ptokens, features = en.G2P.preprocess(line)
             rec["preprocess"] = {"text": ptext, "tokens": ptokens, "features": {str(k): v for k, v in features.items()}}
             doc = g2p.nlp(ptext)

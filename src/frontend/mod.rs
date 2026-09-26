@@ -6,6 +6,7 @@ pub mod espeak;
 pub mod g2p;
 pub mod lexicon;
 pub mod num2words;
+pub mod pipeline;
 pub mod pystr;
 pub mod spacy_tag;
 pub mod spacy_tok;

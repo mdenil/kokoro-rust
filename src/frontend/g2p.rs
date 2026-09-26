@@ -243,6 +243,26 @@ pub fn g2p(lex: &Lexicon, spacy: &[SpacyToken], fallback: Option<&dyn Fallback>,
         .iter()
         .map(|t| MToken { text: t.text.clone(), tag: t.tag.clone(), whitespace: t.ws.clone(), is_head: true, ..Default::default() })
         .collect();
+    g2p_tokens(lex, toks, fallback, unk)
+}
+
+/// G2P.fold_left: a non-head token (from a multi-token /phoneme/ link feature) merges into its predecessor.
+pub fn fold_left(tokens: Vec<MToken>, unk: &str) -> Vec<MToken> {
+    let mut result: Vec<MToken> = vec![];
+    for tk in tokens {
+        if !result.is_empty() && !tk.is_head {
+            let prev = result.pop().unwrap();
+            result.push(merge_tokens(&[prev, tk], Some(unk)));
+        } else {
+            result.push(tk);
+        }
+    }
+    result
+}
+
+/// G2P.__call__ from the tokenize() output onwards (fold_left, retokenize, lexicon/fallback, merge).
+pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallback>, unk: &str) -> (String, Vec<MToken>) {
+    let toks = fold_left(toks, unk);
     let mut words = retokenize(&toks);
     let mut ctx = Ctx::default();
     for w in words.iter_mut().rev() {

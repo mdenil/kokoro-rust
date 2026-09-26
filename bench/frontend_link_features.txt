@@ -1,0 +1,20 @@
+[Kokoro](/kˈOkəɹO/) is an open-weight TTS model.
+I [read](/ɹˈɛd/) the book yesterday, and I will [read](/ɹˈid/) it again.
+Say [hello](-1) and [goodbye](+2) now.
+[New York](/nu jˈɔɹk/) is a big city.
+The [2024](#y#) season was long.
+[a](0.5) [b](-0.5) [c](1) [d](-2) [e](0)
+Tricky  [double  space](/dˈʌbᵊl spˈAs/) link.
+[St. John's](/sAnt ʤˈɑnz/) church is old.
+No feature [text](nothing) here.
+Unclosed [bracket](/abc and more text.
+He said [“hi”](/hˈI/) loudly.
+[U.S.](/jˌuˈɛs/) policy changed in [1999](#y#).
+Mixed [multi word link](/mˈʌlti/) then [one](+1) more.
+[İstanbul](/ɪstænbˈʊl/) is a city.
+Trailing link [end](/ˈɛnd/)
+  Leading spaces before [start](/stˈɑɹt/) link.
+[](/empty/) nothing and [x]() empty.
+Numbers [12](#n#) and [3.5](0.5) here.
+[Dr.](/dˈɑktəɹ/) Smith arrived.
+A [very-long-hyphenated-word](/lˈɔŋ/) test.
