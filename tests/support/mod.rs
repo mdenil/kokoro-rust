@@ -96,6 +96,18 @@ pub const FUZZ: Corpus = Corpus {
     private: false,
 };
 
+/// Character-soup corpus (bench/make_frontend_soup.py, seed 11; 3000 lines, 22 reference errors).
+pub const SOUP: Corpus = Corpus {
+    oracle: pin("fixtures/frontend/soup.oracle.jsonl", "9718e8c16945e77d95537d87f9d1ef2ee4202b53f81c238ad83e6e08c2093674", 3000, true, true),
+    spacy_tokens: None,
+    spacy_seams: None,
+    lines: 3000,
+    chunks: 3457,
+    tokens: 31843,
+    distinct_fallback: 13086,
+    private: false,
+};
+
 /// The prepared private chapter line file (primary workload; owner #8).
 pub const CHAPTER_INPUT: Pin = pin(
     "bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt",

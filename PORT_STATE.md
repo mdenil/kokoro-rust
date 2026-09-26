@@ -60,7 +60,14 @@
        (`: (` became the emoticon `:(`; 7/4000 lines);
    (b) the reference misaki raises TypeError on `ord('İ'.lower())` in punctuation-tagged tokens;
        native silently succeeded, and now fails that line explicitly like production.
-   Result: 4000/4000 exact, plus unit regressions for both. Remaining: coverage is still finite
+   Result: 4000/4000 exact, plus unit regressions for both.
+   Afterwards:
+   - a second grammar seed (7; exploratory, unpinned) was 4000/4000 exact, so the generator
+     looks saturated;
+   - a pinned character-soup corpus (bench/make_frontend_soup.py; 3000 lines, 13,086 distinct
+     fallback calls, 22 reference TypeError lines) was 3000/3000 exact. Every reference error is
+     reproduced with the same exception class.
+   Remaining: coverage is still finite
    (generated vocabulary, 5 corpora); arbitrary real-world text can still reach untested paths.
 5. Production behaviours deliberately NOT replicated (explicit instead):
    - production truncates chunks over 510 characters; we refuse them (status oversize);

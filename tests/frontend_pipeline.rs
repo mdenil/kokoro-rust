@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS};
+use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS, SOUP};
 
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
@@ -30,9 +30,11 @@ fn check(c: &Corpus) {
         let line = r["line"].as_u64().unwrap();
         let t = r["text"].as_str().unwrap();
         let mut why = vec![];
-        if r.get("error").is_some() {
-            if fe().line_chunks(t).is_ok() {
-                why.push("reference fails this line; native did not".to_string());
+        if let Some(cls) = r.get("error").and_then(|e| e.as_str()) {
+            match fe().line_chunks(t) {
+                Ok(_) => why.push("reference fails this line; native did not".to_string()),
+                Err(e) if !format!("{e:#}").contains(cls) => why.push(format!("reference raises {cls}; native fails differently")),
+                Err(_) => {}
             }
         } else {
             let want: Vec<Chunk> = r["chunks"].as_array().unwrap().iter().map(|c| Chunk { graphemes: c["graphemes"].as_str().unwrap().into(), phonemes: c["phonemes"].as_str().unwrap().into() }).collect();
@@ -74,6 +76,14 @@ fn native_frontend_matches_reference_public() {
 #[test]
 fn native_frontend_matches_reference_fuzz() {
     check(&FUZZ);
+}
+
+/// Character-level soup (regex / Unicode / reference-crash edges): 3000 lines, 22 reference errors.
+#[test]
+fn native_frontend_matches_reference_soup() {
+    let recs = support::load_corpus(&SOUP).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(recs.iter().filter(|r| r.get("error").is_some()).count(), 22, "pinned reference error lines");
+    check(&SOUP);
 }
 
 #[test]
