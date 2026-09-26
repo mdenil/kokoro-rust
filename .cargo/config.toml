@@ -1,0 +1,5 @@
+[build]
+# Build outputs live in the gitignored project-local ./target (owner decision 2026-09-26).
+# NOTE: an inherited CARGO_TARGET_DIR env var overrides this file; build scripts in this
+# repo pin CARGO_TARGET_DIR explicitly to the project target.
+jobs = 8

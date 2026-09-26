@@ -32,3 +32,4 @@
 
 ## Session log
 - 2026-09-26 claude: scaffold + truth pack pins/hashes; plan written; HF snapshot fetched+hashed; env install started.
+- 2026-09-26 claude: OWNER CORRECTION applied — cargo builds in project-local gitignored ./target (CARGO_TARGET_DIR pinned via .claude/settings.local.json env + explicit command env; verified via cargo metadata + git check-ignore). /data keeps weights/fixtures/reference env only.
