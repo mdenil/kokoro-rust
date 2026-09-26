@@ -43,7 +43,7 @@ impl NoiseSource for FixedNoise {
 /// Native generator: xoshiro256** uniform + Box-Muller normal. Distributionally equivalent to
 /// torch's draws, not bit-identical (the reference itself is unseeded in production).
 pub struct RngNoise {
-    s: [u64; 4],
+    pub(crate) s: [u64; 4],
 }
 
 impl RngNoise {
@@ -301,13 +301,13 @@ pub fn istft(mag: &[f32], phase: &[f32], frames: usize) -> Vec<f32> {
 }
 
 pub struct Generator {
-    l_w: Vec<f32>,
-    l_b: f32,
-    noise_convs: Vec<Conv1d>,
-    noise_res: Vec<AdaInResBlock1>,
-    ups: Vec<ConvTranspose1d>,
-    resblocks: Vec<AdaInResBlock1>,
-    conv_post: Conv1d,
+    pub(crate) l_w: Vec<f32>,
+    pub(crate) l_b: f32,
+    pub(crate) noise_convs: Vec<Conv1d>,
+    pub(crate) noise_res: Vec<AdaInResBlock1>,
+    pub(crate) ups: Vec<ConvTranspose1d>,
+    pub(crate) resblocks: Vec<AdaInResBlock1>,
+    pub(crate) conv_post: Conv1d,
 }
 
 impl Generator {
@@ -358,8 +358,11 @@ impl Generator {
 
     /// x [512, t] (t = 2N), s [128], f0_curve [2N] -> waveform [600 N]
     pub fn forward(&self, x: &[f32], t: usize, s: &[f32], f0_curve: &[f32], noise: &mut dyn NoiseSource) -> Result<Vec<f32>> {
-        let har_source = self.har_source(f0_curve, noise)?;
-        let (har, frames) = self.source_spec(&har_source);
+        let (har, frames) = {
+            let _p = crate::prof::scope("gen.source+stft");
+            let har_source = self.har_source(f0_curve, noise)?;
+            self.source_spec(&har_source)
+        };
         self.forward_from_har(x, t, s, &har, frames)
     }
 
@@ -367,10 +370,17 @@ impl Generator {
         let mut x = x.to_vec();
         let mut t = t;
         for i in 0..2 {
+            let _p = crate::prof::scope(if i == 0 { "gen.stage0" } else { "gen.stage1" });
             ops::leaky_relu(&mut x, 0.1);
-            let (xs, ts) = self.noise_convs[i].forward(har, frames);
-            let xs = self.noise_res[i].forward(&xs, ts, s);
-            let (mut y, mut ty) = self.ups[i].forward(&x, t);
+            let (xs, ts) = {
+                let _q = crate::prof::scope("gen/noise_branch");
+                let (xs, ts) = self.noise_convs[i].forward(har, frames);
+                (self.noise_res[i].forward(&xs, ts, s), ts)
+            };
+            let (mut y, mut ty) = {
+                let _q = crate::prof::scope("gen/ups");
+                self.ups[i].forward(&x, t)
+            };
             let c = self.ups[i].cout;
             if i == 1 {
                 let mut padded = vec![0.0f32; c * (ty + 1)];
@@ -387,6 +397,7 @@ impl Generator {
             for (a, b) in y.iter_mut().zip(&xs) {
                 *a += *b;
             }
+            let _q = crate::prof::scope("gen/resblocks");
             let mut acc = self.resblocks[i * 3].forward(&y, ty, s);
             for j in 1..3 {
                 let r = self.resblocks[i * 3 + j].forward(&y, ty, s);
@@ -400,6 +411,7 @@ impl Generator {
             x = acc;
             t = ty;
         }
+        let _p = crate::prof::scope("gen.post+istft");
         ops::leaky_relu(&mut x, 0.01);
         let (post, tp) = self.conv_post.forward(&x, t);
         let mut mag = post[..N_BINS * tp].to_vec();
@@ -415,11 +427,11 @@ impl Generator {
 }
 
 pub struct Decoder {
-    encode: AdainResBlk1d,
-    decode: Vec<AdainResBlk1d>,
-    f0_conv: Conv1d,
-    n_conv: Conv1d,
-    asr_res: Conv1d,
+    pub(crate) encode: AdainResBlk1d,
+    pub(crate) decode: Vec<AdainResBlk1d>,
+    pub(crate) f0_conv: Conv1d,
+    pub(crate) n_conv: Conv1d,
+    pub(crate) asr_res: Conv1d,
     pub generator: Generator,
 }
 
@@ -476,7 +488,10 @@ impl Decoder {
     }
 
     pub fn forward(&self, asr: &[f32], nf: usize, f0_curve: &[f32], n_curve: &[f32], s: &[f32], noise: &mut dyn NoiseSource) -> Result<Vec<f32>> {
-        let (x, t) = self.pre_generator(asr, nf, f0_curve, n_curve, s)?;
+        let (x, t) = {
+            let _p = crate::prof::scope("decoder.pre");
+            self.pre_generator(asr, nf, f0_curve, n_curve, s)?
+        };
         self.generator.forward(&x, t, s, f0_curve, noise)
     }
 }

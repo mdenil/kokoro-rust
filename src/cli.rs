@@ -418,6 +418,10 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
     };
     let audio_total: f64 = audio_s.iter().sum();
     let tot = stats(&totals);
+    let prof = crate::prof::report();
+    if !prof.is_empty() {
+        println!("stage profile (warmup + {reps} reps):\n{prof}");
+    }
     let rec = serde_json::json!({
         "engine": ENGINE_VERSION, "device": "cpu", "threads": common.threads, "voice": common.voice, "speed": common.speed,
         "reps": reps, "chunks_file": chunks, "chunks_sha256": sha256_file(&chunks)?, "n_chunks": items.len(),

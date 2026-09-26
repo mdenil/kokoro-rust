@@ -19,10 +19,10 @@ pub const SAMPLES_PER_FRAME: usize = 600;
 pub const CONTEXT_LEN: usize = 512;
 
 pub struct TextEncoder {
-    embedding: Vec<f32>,
-    cnn: Vec<(Conv1d, Vec<f32>, Vec<f32>)>,
-    lstm: BiLstm,
-    n_token: usize,
+    pub(crate) embedding: Vec<f32>,
+    pub(crate) cnn: Vec<(Conv1d, Vec<f32>, Vec<f32>)>,
+    pub(crate) lstm: BiLstm,
+    pub(crate) n_token: usize,
 }
 
 impl TextEncoder {
@@ -66,15 +66,15 @@ impl TextEncoder {
 }
 
 pub struct Predictor {
-    dur_lstms: Vec<BiLstm>,
-    dur_norms: Vec<Linear>,
-    lstm: BiLstm,
-    duration_proj: Linear,
-    shared: BiLstm,
-    f0: Vec<AdainResBlk1d>,
-    n: Vec<AdainResBlk1d>,
-    f0_proj: Conv1d,
-    n_proj: Conv1d,
+    pub(crate) dur_lstms: Vec<BiLstm>,
+    pub(crate) dur_norms: Vec<Linear>,
+    pub(crate) lstm: BiLstm,
+    pub(crate) duration_proj: Linear,
+    pub(crate) shared: BiLstm,
+    pub(crate) f0: Vec<AdainResBlk1d>,
+    pub(crate) n: Vec<AdainResBlk1d>,
+    pub(crate) f0_proj: Conv1d,
+    pub(crate) n_proj: Conv1d,
 }
 
 fn cat_style(x: &[f32], t: usize, d: usize, s: &[f32]) -> Vec<f32> {
@@ -250,7 +250,11 @@ impl Kokoro {
         let s_dec = &ref_s[..STYLE_DIM];
         let s = &ref_s[STYLE_DIM..];
 
-        let bert = self.albert.forward(ids)?;
+        let bert = {
+            let _p = crate::prof::scope("albert");
+            self.albert.forward(ids)?
+        };
+        let _p = crate::prof::scope("prosody.duration");
         let d_en = self.bert_encoder.forward(&bert, t);
         let d = self.predictor.duration_encoder(&d_en, t, s);
         let x = self.predictor.dur_lstm(&d, t);
@@ -264,9 +268,16 @@ impl Kokoro {
         for (f, &tok) in aln.iter().enumerate() {
             en[f * dd..(f + 1) * dd].copy_from_slice(&d[tok * dd..(tok + 1) * dd]);
         }
-        let (f0, n) = self.predictor.f0n(&en, nf, s);
+        drop(_p);
+        let (f0, n) = {
+            let _p = crate::prof::scope("prosody.f0n");
+            self.predictor.f0n(&en, nf, s)
+        };
 
-        let t_en = self.text_encoder.forward(ids)?;
+        let t_en = {
+            let _p = crate::prof::scope("text_encoder");
+            self.text_encoder.forward(ids)?
+        };
         let mut asr = vec![0.0f32; HIDDEN * nf];
         for c in 0..HIDDEN {
             for (f, &tok) in aln.iter().enumerate() {

@@ -15,20 +15,20 @@ pub const MAX_POS: usize = 512;
 const LN_EPS: f32 = 1e-12;
 
 pub struct Albert {
-    word: Vec<f32>,
-    pos: Vec<f32>,
-    tok_type0: Vec<f32>,
-    emb_ln: (Vec<f32>, Vec<f32>),
-    map_in: Linear,
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    dense: Linear,
-    attn_ln: (Vec<f32>, Vec<f32>),
-    ffn: Linear,
-    ffn_out: Linear,
-    full_ln: (Vec<f32>, Vec<f32>),
-    n_token: usize,
+    pub(crate) word: Vec<f32>,
+    pub(crate) pos: Vec<f32>,
+    pub(crate) tok_type0: Vec<f32>,
+    pub(crate) emb_ln: (Vec<f32>, Vec<f32>),
+    pub(crate) map_in: Linear,
+    pub(crate) q: Linear,
+    pub(crate) k: Linear,
+    pub(crate) v: Linear,
+    pub(crate) dense: Linear,
+    pub(crate) attn_ln: (Vec<f32>, Vec<f32>),
+    pub(crate) ffn: Linear,
+    pub(crate) ffn_out: Linear,
+    pub(crate) full_ln: (Vec<f32>, Vec<f32>),
+    pub(crate) n_token: usize,
 }
 
 impl Albert {

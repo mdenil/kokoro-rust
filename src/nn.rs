@@ -132,12 +132,12 @@ impl AdaIn1d {
 
 /// StyleTTS2 AdainResBlk1d (predictor F0/N stacks and decoder encode/decode).
 pub struct AdainResBlk1d {
-    conv1: Conv1d,
-    conv2: Conv1d,
-    norm1: AdaIn1d,
-    norm2: AdaIn1d,
-    conv1x1: Option<Conv1d>,
-    pool: Option<(Vec<f32>, Vec<f32>)>,
+    pub(crate) conv1: Conv1d,
+    pub(crate) conv2: Conv1d,
+    pub(crate) norm1: AdaIn1d,
+    pub(crate) norm2: AdaIn1d,
+    pub(crate) conv1x1: Option<Conv1d>,
+    pub(crate) pool: Option<(Vec<f32>, Vec<f32>)>,
     pub dim_in: usize,
     pub dim_out: usize,
     pub upsample: bool,
@@ -196,13 +196,13 @@ impl AdainResBlk1d {
 
 /// iSTFTNet AdaINResBlock1 with Snake activations.
 pub struct AdaInResBlock1 {
-    convs1: Vec<Conv1d>,
-    convs2: Vec<Conv1d>,
-    adain1: Vec<AdaIn1d>,
-    adain2: Vec<AdaIn1d>,
-    alpha1: Vec<Vec<f32>>,
-    alpha2: Vec<Vec<f32>>,
-    c: usize,
+    pub(crate) convs1: Vec<Conv1d>,
+    pub(crate) convs2: Vec<Conv1d>,
+    pub(crate) adain1: Vec<AdaIn1d>,
+    pub(crate) adain2: Vec<AdaIn1d>,
+    pub(crate) alpha1: Vec<Vec<f32>>,
+    pub(crate) alpha2: Vec<Vec<f32>>,
+    pub(crate) c: usize,
 }
 
 fn snake(x: &mut [f32], t: usize, alpha: &[f32]) {
@@ -250,10 +250,10 @@ impl AdaInResBlock1 {
 
 /// Single-layer bidirectional LSTM (torch gate order i, f, g, o). x [t, din] -> [t, 2h].
 pub struct BiLstm {
-    wih: [Vec<f32>; 2],
-    whh: [Vec<f32>; 2],
-    bih: [Vec<f32>; 2],
-    bhh: [Vec<f32>; 2],
+    pub(crate) wih: [Vec<f32>; 2],
+    pub(crate) whh: [Vec<f32>; 2],
+    pub(crate) bih: [Vec<f32>; 2],
+    pub(crate) bhh: [Vec<f32>; 2],
     pub din: usize,
     pub h: usize,
 }
