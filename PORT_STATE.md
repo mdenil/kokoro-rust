@@ -69,10 +69,13 @@
      reproduced with the same exception class.
    Remaining: coverage is still finite
    (generated vocabulary, 5 corpora); arbitrary real-world text can still reach untested paths.
-5. Production behaviours deliberately NOT replicated (explicit instead):
-   - production truncates chunks over 510 characters; we refuse them (status oversize);
-   - production silently skips lines with no phonemes; we record an error.
-   Documented; confirm with the owner if the audiobook contract needs otherwise.
+5. CLOSED (owner contract): production truncates chunks over 510 phonemes, and fails or skips some
+   lines silently. The binary instead marks them `oversize` / `error` by line number, as
+   HERMES_BRIEF.md (#7 and the original brief: "never silent truncation") and
+   HERMES_AUDIOBOOK_INTERFACE_BRIEF.md require.
+   Production KModel also silently drops phoneme characters outside the model vocabulary. The
+   binary drops exactly the same characters (tested) and records them in `dropped_phoneme_chars`
+   in the sidecar.
 6. Misaki lexicon data provenance is open. This is a release concern, not a runtime one.
 
 ## Environment (ALWAYS `source scripts/env.sh` first)
