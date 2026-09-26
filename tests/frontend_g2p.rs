@@ -8,6 +8,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::{Corpus, ALICE, CHAPTER, EDGE};
+
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
 }
@@ -29,14 +33,12 @@ impl Fallback for Recorded {
     }
 }
 
-fn run(file: &str, private: bool) -> (usize, usize, Vec<String>) {
+fn run(c: &Corpus) -> (usize, usize, Vec<String>) {
+    let private = c.private;
     let lex = Lexicon::load(&data().join("frontend/misaki-0.9.4"), false).unwrap();
-    let text = std::fs::read_to_string(data().join(file)).unwrap_or_else(|_| panic!("{file} missing — NOT a pass"));
-    let mut lines = text.lines();
-    let _meta = lines.next();
+    let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
     let (mut n, mut ok, mut bad) = (0, 0, vec![]);
-    for l in lines {
-        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+    for r in &recs {
         if r["blank"].as_bool() == Some(true) {
             continue;
         }
@@ -62,19 +64,20 @@ fn run(file: &str, private: bool) -> (usize, usize, Vec<String>) {
         }
         if why.is_empty() { ok += 1 } else { bad.push(format!("line {line}: {}", why.join("; "))) }
     }
+    assert_eq!(n, c.lines, "{}: checked {n} lines != pinned {}", c.oracle.path, c.lines);
     (n, ok, bad)
 }
 
 #[test]
 fn g2p_matches_oracle_on_public_corpora() {
-    for f in ["fixtures/frontend/frontend_edge_cases.oracle.jsonl", "fixtures/frontend/alice_full.oracle.jsonl"] {
-        let (n, ok, bad) = run(f, false);
-        println!("{f}: {ok}/{n} lines exact");
+    for c in [EDGE, ALICE] {
+        let (n, ok, bad) = run(&c);
+        println!("{}: {ok}/{n} lines exact", c.oracle.path);
         for b in bad.iter().take(12) {
             println!("  {b}");
         }
         assert!(n > 0);
-        assert!(bad.is_empty(), "{f}: {} lines differ", bad.len());
+        assert!(bad.is_empty(), "{}: {} lines differ", c.oracle.path, bad.len());
     }
 }
 
@@ -82,7 +85,7 @@ fn g2p_matches_oracle_on_public_corpora() {
 #[test]
 #[ignore = "private fixture; run explicitly"]
 fn g2p_matches_oracle_on_private_chapter() {
-    let (n, ok, bad) = run("evidence/private/frontend/chapter.oracle.jsonl", true);
+    let (n, ok, bad) = run(&CHAPTER);
     println!("private chapter: {ok}/{n} lines exact; mismatching line numbers: {:?}", bad.iter().map(|b| b.split(':').next().unwrap().to_string()).collect::<Vec<_>>());
     assert!(bad.is_empty());
 }
@@ -91,12 +94,13 @@ fn g2p_matches_oracle_on_private_chapter() {
 /// British lexicon each have to produce mismatches on the public Alice corpus.
 #[test]
 fn g2p_negative_controls_are_detected() {
-    let text = std::fs::read_to_string(data().join("fixtures/frontend/alice_full.oracle.jsonl")).unwrap();
+    let recs = support::load_corpus(&ALICE).unwrap_or_else(|e| panic!("{e}"));
     let us = Lexicon::load(&data().join("frontend/misaki-0.9.4"), false).unwrap();
     let gb = Lexicon::load(&data().join("frontend/misaki-0.9.4"), true).unwrap();
     let (mut tag_diff, mut nofb_diff, mut gb_diff) = (0, 0, 0);
-    for l in text.lines().skip(1).take(400) {
-        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+    let mut n = 0;
+    for r in recs.iter().take(400) {
+        n += 1;
         if r["blank"].as_bool() == Some(true) {
             continue;
         }
@@ -111,6 +115,7 @@ fn g2p_negative_controls_are_detected() {
         nofb_diff += (g2p(&us, &spacy, None, "").0 != want) as usize;
         gb_diff += (g2p(&gb, &spacy, Some(&fb), "").0 != want) as usize;
     }
+    assert_eq!(n, 400);
     println!("mismatching lines of 400: flattened tags {tag_diff}, no fallback {nofb_diff}, british lexicon {gb_diff}");
     assert!(tag_diff > 0 && nofb_diff > 0 && gb_diff > 0, "a perturbation went undetected");
 }

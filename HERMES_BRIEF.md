@@ -195,3 +195,11 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    now. Keep dependency/version/data/GPL-3.0-or-later notices truthful. NOT a project license choice and
    NOT redistribution clearance: open-source distribution obligations are a later release concern, not
    a reason to halt the milestone.
+20. KEEP ON COMPLETENESS/CORRECTNESS (Misha, 1553442132952490105): no diversion to speed testing now (no
+   speed campaign, no comparative benchmark). At this idle milestone: bounded test hardening — pin
+   expected corpus/cardinality and chunk/tag-array counts before any zip; add missing/truncated/duplicate
+   fixture and output negative controls so frontend and private-chapter checks cannot pass vacuously;
+   private material stays local. Reconcile stale PORT_STATE next-actions and the raw-evidence wording in
+   PERFORMANCE_REPORT (evidence/ab holds transcribed summaries, not retained raw ABBA output). Preserve
+   accepted batching/FMA quality and baseline diagnostics; do not reopen listening or change bounds.
+   Record exact commands/results; report remaining concrete correctness gaps.

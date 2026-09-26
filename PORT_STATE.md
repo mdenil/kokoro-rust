@@ -1,118 +1,91 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## CURRENT PRIORITY (owner #15, 2026-09-26): SINGLE-BINARY MILESTONE — completeness + correctness, speed PAUSED
-- One Rust executable: chunk-line text file -> per-line WAVs + metadata, native frontend (normalization,
-  spaCy tokenizer+tagger, misaki G2P, OOV fallback, chunking), GPU model, ordered outputs, safe resume.
-  No Python / helper process / oracle replay at inference. Inventory every external data/runtime dep.
-- Order: F2 spaCy tokenizer+tagger -> F3 OOV fallback (runtime-loaded pinned libespeak-ng 1.52 — accepted
-  for now, owner #19; ffmpeg for optional --encode approved, owner #18) -> F4 CLI default native -> I1 acceptance
-  (no Python on PATH + execve audit, both voices, long lines, failures/restart/invalidation, pronunciation
-  fidelity vs pinned reference, complete private chapter) -> dependency inventory doc.
-- Owner #17: component unit/differential tests (tokenizer, tagger, numbers, pronunciation/fallback,
-  chunking) AND integrated text-file -> audio tests on the accepted GPU path (batching + FMA, no rollback).
-- MILESTONE STATUS (2026-09-26 ~17:30): single-binary text path COMPLETE and verified.
-  - F2 spaCy tokenizer+features+tok2vec/tagger EXACT (tags 0/44,432 mismatches; tensor max|d| 3.2e-6).
-  - F3 espeak fallback EXACT (139 recorded calls + 83 synthetic).
-  - Assembled frontend EXACT (1,803 lines, 4 corpora incl. link features + private).
-  - F4: `synth` defaults to the native frontend; the bridge was removed.
-  - I1 (tests/cli_text_native.rs): Python unavailable + strace execve audit (1 exec); both voices;
-    pronunciations identical to the reference; long lines complete; failures/restart/invalidation;
-    optional ffmpeg --encode. Passes on strict AND FMA builds.
-  - Complete private chapter via the binary: 316/316 lines, 317 chunks, 0 pronunciation mismatches,
-    both voices, both builds (aggregates only).
-  - Full suite: no regressions. The only failing tests are the enforced known-failure tests with
-    identical fail sets (CPU ladder 7 rows, GPU ladder 8 rows, batch-vs-single RB-1 = accepted PL-003).
-  - Dependency inventory: docs/DEPENDENCIES.md.
-  - Known limits / next:
-    - American English only (lang a; British not ported).
-    - pystr::char_isdigit approximates Python's Unicode Digit set (exotic digits).
-    - Lexicon provenance open (release concern).
-    - Frontend throughput unoptimized: ~6 s per private-chapter pass, tagger is scalar f64 — a
-      measured observation for the owner #16 phase, not yet profiled.
-    - bench/interim_compare.py still has the retired bridge row (historical).
-- PAUSED until then: perf levers, conv/fusion experiments, batch tuning, headroom analysis.
-- NEXT PERF PHASE (owner #16): whole-system chapter file -> verified WAVs, production system as used vs the
-  complete Rust binary, cold and resident, overlap-aware stage attribution; headline = whole-system wall.
+## CURRENT PRIORITY (owner #15/#20, 2026-09-26): completeness + correctness. NO speed work.
+- No speed campaign, lever, headroom analysis or comparative benchmark until the owner resumes speed.
+  The next performance phase (owner #16), when resumed: the whole system, chapter file -> verified WAVs,
+  production system as used vs the complete Rust binary, cold and resident, overlap-aware stage
+  attribution.
+- Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (owner #14),
+  the s02_fox/am_adam listening pair (DISC-003), RB-1 bounds, and the strict baseline as the
+  authoritative regression reference. libespeak-ng 1.52 accepted for now (#19); ffmpeg approved (#18).
 
-## Where we are (2026-09-26)
-- Deliverable: **native Rust + CUDA on RTX 4090 (GPU-first, owner decision)**. CPU path = oracle/debug baseline.
-- Correctness: **NOT ACCEPTED as a whole.** Binding original gates (HERMES_BRIEF owner log #2).
-  CUDA ladder `ladder-gpu-1790426627`: all 135 stage-seam rows (9 seams × 15 cases) PASS; ids/durations/
-  sample counts exact; **8 enforced E2E rows FAIL** (v1 max ×5, G-SPEC ×3).
-  - s02_fox/am_adam/s1.0: **OWNER-ACCEPTED by listening (DISC-003)**.
-  - 7 others: OPEN, unaccepted (DISC-004) — escalate to owner; do not self-authorize.
-  - Attainability evidence: exact-f64 reference passes v1 on 6/15; production torch CUDA 3/15
-    (docs/conformance/TOLERANCE_HISTORY.md #9).
-- Performance: levers PL-001 (device noise, 1.39× process wall) and PL-002 (persistent LSTM, bit-identical,
-  −2.5% inference) KEPT; NE-003 (im2col) reverted. Regression policy RB-1 (bounded variation, owner
-  clarification) in force: `gpu_regression_bounded`; bounds fixed in tests/pinned/regression_bounds.json.
-- Interim checkpoint DONE (docs/PERFORMANCE_REPORT.md CURRENT CHECKPOINT; evidence
-  /data/mdenil/code/kokoro-rust/evidence/interim-comparison/20260926-141335/, sealed SHA256SUMS):
-  warm core Rust 2.462 s vs production torch 6.986 s (2.84×, af_heart; 3.09× am_adam; reference cv
-  7–11% → PROVISIONAL); cold text→WAV 25.10 s vs 14.84 s (Rust uses DEV-ONLY Python bridge).
-- FRONTEND PROGRESS: F0 done (oracle dumps, coverage findings docs/frontend/COVERAGE.md). F1 done:
-  native misaki logic (lexicon, stress, stemming, numbers incl. native num2words, retokenize, context
-  resolution, KPipeline chunking) EXACT vs oracle given oracle spaCy tokens+tags and recorded espeak
-  outputs: edge 65/65, Alice 1402/1402, private chapter 316/316 lines (tests/frontend_g2p.rs; negative
-  controls: flattened tags 400/400 lines differ, no-fallback 34, british lexicon 397). Lexicon data
-  pinned under /data/.../frontend/misaki-0.9.4 (hashes in COVERAGE/oracle meta). Next: F2 spaCy
-  tokenizer + tagger port (tags affect nearly every line), then F3 fallback (owner GPL decision).
-- NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
-  COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
-  Next single action: F0 frontend truth pack + oracle token/chunk dump.
-- Levers since checkpoint: PL-004 tiled conv (bit-identical, KEEP); PL-003 batching (opt-in, ~5%) and
-  PL-005 FMA (opt-in build KOKORO_FMA=1, +1.6%): quality OWNER-ACCEPTED by listening (owner #14; receipts
-  evidence/listening/*/OWNER_ACCEPTANCE.json). Raw RB-1 failures of FMA stay recorded. Default build = strict
-  until defaults are chosen after the milestone. Authoritative regression test = gpu_regression_bounded vs
-  the STRICT baseline; FMA snapshot = diagnostic only. ABBA receipts: evidence/ab/.
-- Owner #13: headline = original production Python (unchanged) vs fastest Rust; no Python optimization.
-- Owner #12: representative subsets OK for fast iteration (label them); full-chapter runs for milestones.
-- Owner #11: speed + close match that sounds good; FMA contraction allowed (strict -fmad=false = optional diagnostic build).
-- Owner #10: host-side parallelism allowed/encouraged for GPU chapter throughput (bounded pools, record CPU budgets).
-- NEW SCOPE (owner #8): chapter throughput + RTX 4090 batching; primary workload = private chapter
-  (316 lines, sha256 8129112a…, under /data/mdenil/code/kokoro-rust/bench/private/ — NEVER in Git).
-  Work order: I0 -> chapter baselines -> B1 batching -> (frontend F0–F4 interleaved) -> kernel levers.
-- I0 DONE (line-file interface): `<stem>_<1-based line>.wav/.json` + `<stem>.manifest.json`; UTF-8 validated
-  up front (exact line/byte), BOM/CRLF recorded, control chars / blank (default error) / oversize explicit,
-  resume = line identity + text + config + audio hash, exit 0/1/2; tests/cli_linefile.rs (5 tests, real
-  binary, no Python on PATH). Remaining for I1: text-path long-line multi-chunk completeness + Python-free
-  acceptance with the native frontend.
-- SCOPE (owner #7): audiobook line-file interface on `kokoro synth` (I0 done, I1 with F4) —
-  HERMES_AUDIOBOOK_INTERFACE_BRIEF.md; open question to Hermes: exact audio_chunks filename convention.
-- Optimization continues (owner follow-up), interleaved with F0–F4: Tier A levers under RB-1 — tiled conv_direct,
-  multi-block chan_stats, cheaper LSTM step, elementwise fusions; then Tier B implicit-GEMM conv.
-- Process lesson: never wait with `pgrep -f <pattern>` from a shell whose own command line contains
-  the pattern (self-match hung a waiter); wait on the tracked background task instead.
+## Single-binary milestone: COMPLETE and verified (details + exact commands: docs/conformance/TEST_RECEIPTS.md)
+- `kokoro synth`: prepared line file -> one WAV + JSON sidecar per line plus `<stem>.manifest.json`.
+  - Native frontend by default (misaki 0.9.4 G2P, spaCy en_core_web_sm 3.8.0 tokenizer + tagger,
+    espeak-ng 1.52.0 fallback, KPipeline chunking); GPU model on CUDA:0.
+  - Batched by default (`--batch-phonemes 8000`; 0 = one chunk at a time).
+  - No Python and no subprocesses (strace audit: exactly 1 exec). Dependencies: docs/DEPENDENCIES.md.
+- Component differential tests: all EXACT vs the pinned reference, with fixtures pinned by sha256 and
+  cardinality (tests/support/mod.rs).
+  - Tokenizer: 65 + 1402 + 316 lines.
+  - Features / tok2vec / tagger: tags 0/44,432 mismatches; tensor ≤3.2e-6; logits ≤1.3e-5.
+  - num2words: 37,048 rows.
+  - espeak fallback: 139 distinct calls + 83 synthetic.
+  - misaki logic given oracle tokens: 1,783 lines.
+  - Assembled frontend: 1,803 lines, 1,817 chunks.
+- Integrated binary tests (tests/cli_text_native.rs), passing on strict and FMA builds:
+  - both voices; 98 lines / 111 chunks with pronunciations identical to the reference;
+  - batched vs batch-1 sample counts identical;
+  - long lines 11 / 24 chunks complete;
+  - failures, restart, invalidation; optional ffmpeg `--encode`;
+  - 12 damaged-output + 3 expectation negative controls rejected.
+- Private chapter through the binary: 316/316 lines, 317 chunks, 0 mismatches, both voices, both builds
+  (outputs under evidence/private only).
+- Determinism: repeated identical runs are bit-identical (batch-1 and batched; checked in isolation
+  and while other GPU tests ran). compute-sanitizer initcheck: 0 errors (batched).
+
+## Correctness status of the neural engine (unchanged; original gates binding, owner #2)
+- CUDA ladder: all 135 stage-seam rows pass; ids, durations and sample counts exact.
+  8 enforced E2E rows FAIL (v1 max ×5, G-SPEC ×3). Latest ladder-gpu-1790439506 has the identical
+  fail set.
+  - s02_fox/am_adam/s1.0: OWNER-ACCEPTED by listening (DISC-003).
+  - 7 others OPEN (DISC-004; not self-authorized).
+- CPU f32 ladder: 7 enforced E2E rows FAIL. ladder-cpu-t1-1790439695 has the identical fail set.
+- Attainability: exact f64 reference passes v1 on 6/15; production torch CUDA 3/15 (TOLERANCE_HISTORY #9).
+- `gpu_batch::batched_matches_single_item_within_rb1` FAILS by design: batch drift beyond RB-1,
+  owner-accepted as PL-003 (#14). Raw results are preserved.
+
+## Open correctness gaps (concrete)
+1. DISC-004: 7 enforced E2E rows unaccepted. Owner decision or evidence needed; not self-authorized.
+2. British English (lang b) is not ported. The binary is American English only (voices af_*/am_*).
+3. `pystr::char_isdigit` approximates Python's Unicode Numeric_Type=Digit set. Exotic digit characters
+   could diverge; no corpus exercises them.
+4. Frontend coverage is bounded by the corpora: edge 65, links 20, Alice 1402, chapter 316 lines.
+   There is no fuzz/differential run on arbitrary text yet.
+5. Production behaviours deliberately NOT replicated (explicit instead):
+   - production truncates chunks over 510 characters; we refuse them (status oversize);
+   - production silently skips lines with no phonemes; we record an error.
+   Documented; confirm with the owner if the audiobook contract needs otherwise.
+6. Misaki lexicon data provenance is open. This is a release concern, not a runtime one.
 
 ## Environment (ALWAYS `source scripts/env.sh` first)
 - Data root: /data/mdenil/code/kokoro-rust (relocated; docs/RELOCATION_2026-09-26.md).
 - Cargo target: /home/mdenil/code/kokoro-rust/target. CUDA build: `cargo build --release --features cuda`
-  (nvcc 12.9 → PTX compute_89, -fmad=false). `CUDA_VISIBLE_DEVICES=0` (RTX 4090; never GPU 1).
-- Push via SSH origin, ALWAYS after `python3 scripts/check_private_leaks.py` passes (owner #9). Shell `grep` is a ugrep wrapper honoring .gitignore; use `command grep`.
-- serde_json needs `float_roundtrip` (default parser was 1-ulp lossy — caught by the pin test).
+  (nvcc 12.9 -> PTX compute_89; default strict -fmad=false; `KOKORO_FMA=1` = FMA build, copied to
+  target/release/kokoro-fma for tests via `KOKORO_BIN`). `CUDA_VISIBLE_DEVICES=0` (RTX 4090; never GPU 1).
+- Frontend data: `KOKORO_FRONTEND_DIR=$KOKORO_DATA/frontend` (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/,
+  espeak-ng-1.52.0/). Rebuild with `oracle/export_spacy.py` (deterministic) and `scripts/stage_espeak.sh`.
+- Push via the SSH origin, only after `git add` and then `python3 scripts/check_private_leaks.py`
+  passes (owner #9). Stage first, so new files are audited.
+- Shell `grep` is a ugrep wrapper that honors .gitignore; use `command grep`.
+- serde_json needs `float_roundtrip`.
 
 ## Pins
 - Model: hexgrad/Kokoro-82M @ f3ff357…; weights sha256 496dba11…; loaded natively from .pth (bitwise = reference load).
-- Reference: kokoro==0.9.4, misaki==0.9.4, torch==2.12.1 (CUDA 13.0), Python 3.12.3 (exact prod pins).
-- Production comparison scope: KPipeline('a'), af_heart/am_adam, CUDA:0, warm resident.
+- Reference: kokoro==0.9.4, misaki==0.9.4, torch==2.12.1 (CUDA 13.0), Python 3.12.3 (exact prod pins);
+  spaCy 3.8.14 + en_core_web_sm 3.8.0; espeakng-loader 0.2.4 (espeak-ng 1.52.0).
+- Frontend fixture pins (sha256 + cardinalities): tests/support/mod.rs.
 
-## Tests (skip-honest; missing fixtures or empty filters FAIL)
-- `cargo test --release --test parity` — CPU ladder (v1+G-SPEC enforced; v2 = UNAPPROVED diagnostic), f64 truth, perturbations.
-- `cargo test --release --features cuda --test gpu_parity` — CUDA ladder (enforced), device-noise parity,
-  GPU negative controls, `gpu_regression_pinned` (owner-approved baseline).
-- `cargo test --release --test native_load` — .pth/.pt reader bitwise vs reference.
-- Ladders currently FAIL on the enforced E2E rows listed above; that is the truthful state.
+## Performance record (frozen while speed is paused)
+- The interim checkpoint (docs/PERFORMANCE_REPORT.md) and levers PL-001..005 (docs/PERF_LEDGER.md) stand
+  as recorded.
+- The ABBA evidence for PL-001..005 is terminal summaries transcribed into evidence/ab/README.txt, NOT
+  retained raw output. In-process bench receipts are in evidence/rust/.
+- The pre-batching headroom estimate is stale. Nsys captures of the current tree
+  (evidence/profiles/20260926-1640-paused/) are unanalysed.
+- bench/interim_compare.py still contains the retired python-bridge row (historical driver).
 
-## Measured baselines (receipts under evidence/baseline/)
-- Production torch CUDA, 65-line Alice ch.1 corpus (656.2 s audio): pure inference 6.97 s (cv 2.9%,
-  RTF 0.0106); resident batch 7.41 s; cold process 25.5 s; frontend 0.32 s.
-- torch CPU 8 threads: inference 171.1 s (RTF 0.261). NOTE: that run overlapped with my niced
-  compiles and GPU runs (see PERF_LEDGER) — supporting data only.
-- Rust CUDA timings so far are INVALID as evidence (contended by the concurrent CPU baseline).
-
-## Session log
-- truth pack; oracle + fixtures (15 cases × {cpu-t1, cuda-t1}); OQs resolved.
-- CPU f32 forward, seam ladder; native .pth loader; CLI; production CUDA baseline.
-- CUDA backend (ceef72f) — seams green; E2E judged under v2 (unapproved) → hold.
-- Owner ruling: v1 binding; ladders restored to enforce v1 + G-SPEC (implemented late — was specified
-  originally but missing); attainability evidence; listening pair; owner acceptance of that pair; pin.
+## Process lessons
+- Never wait with `pgrep -f <pattern>` from a shell whose own command line contains the pattern; wait
+  on the tracked background task instead.
+- Run the leak audit AFTER `git add` (a pre-add audit misses new files; happened once, re-audited clean).

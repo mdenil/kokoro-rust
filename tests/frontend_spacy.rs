@@ -4,6 +4,10 @@ use kokoro::frontend::spacy_tag::{word_shape, Tagger};
 use kokoro::frontend::spacy_tok::Tokenizer;
 use std::path::PathBuf;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::{Corpus, ALICE, CHAPTER, EDGE};
+
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
 }
@@ -18,19 +22,24 @@ struct Line {
     toks: Vec<serde_json::Value>,
 }
 
-fn load(file: &PathBuf) -> Vec<Line> {
-    let s = std::fs::read_to_string(file).unwrap_or_else(|_| panic!("{} missing — NOT a pass", file.display()));
-    s.lines()
-        .map(|l| {
-            let r: serde_json::Value = serde_json::from_str(l).unwrap();
-            Line { line: r["line"].as_u64().unwrap(), text: r["text"].as_str().unwrap().into(), toks: r["tokens"].as_array().unwrap().clone() }
-        })
-        .collect()
+/// Pinned spaCy token fixture of a corpus: hash, record count, lines 1..=N, total tokens pinned.
+fn load(c: &Corpus) -> Vec<Line> {
+    let pin = c.spacy_tokens.expect("corpus has spaCy token fixtures");
+    let recs = support::load_jsonl(&pin).unwrap_or_else(|e| panic!("{e}"));
+    let lines: Vec<Line> = recs
+        .iter()
+        .map(|r| Line { line: r["line"].as_u64().unwrap(), text: r["text"].as_str().unwrap().into(), toks: r["tokens"].as_array().unwrap().clone() })
+        .collect();
+    assert_eq!(lines.len(), c.lines, "{}: lines", pin.path);
+    assert_eq!(lines.iter().map(|l| l.toks.len()).sum::<usize>(), c.tokens, "{}: total tokens != pinned", pin.path);
+    lines
 }
 
-fn check_tokens(file: PathBuf, private: bool) {
+fn check_tokens(c: &Corpus) {
+    let private = c.private;
+    let file = c.spacy_tokens.unwrap().path;
     let tk = Tokenizer::load(&spacy_dir()).unwrap();
-    let lines = load(&file);
+    let lines = load(c);
     let mut bad = vec![];
     for l in &lines {
         let got: Vec<(String, String)> = tk.tokenize(&l.text).into_iter().map(|t| (t.text, if t.space { " ".into() } else { String::new() })).collect();
@@ -40,7 +49,7 @@ fn check_tokens(file: PathBuf, private: bool) {
             bad.push(if private { format!("line {}", l.line) } else { format!("line {}:\n  got  {:?}\n  want {:?}", l.line, got, want) });
         }
     }
-    println!("{}: {}/{} lines token-exact", file.display(), lines.len() - bad.len(), lines.len());
+    println!("{file}: {}/{} lines token-exact", lines.len() - bad.len(), lines.len());
     for b in bad.iter().take(10) {
         println!("{b}");
     }
@@ -50,24 +59,28 @@ fn check_tokens(file: PathBuf, private: bool) {
 
 #[test]
 fn tokenizer_matches_oracle_public() {
-    check_tokens(data().join("fixtures/frontend/edge.spacy.tokens.jsonl"), false);
-    check_tokens(data().join("fixtures/frontend/alice.spacy.tokens.jsonl"), false);
+    check_tokens(&EDGE);
+    check_tokens(&ALICE);
 }
 
 #[test]
 #[ignore = "private chapter (local only)"]
 fn tokenizer_matches_oracle_private() {
-    check_tokens(data().join("evidence/private/frontend/chapter.spacy.tokens.jsonl"), true);
+    check_tokens(&CHAPTER);
 }
 
 /// Feature ids / strings exact; tok2vec tensor within max|d| <= 1e-4 (fixed before judging; f32 BLAS
 /// vs f64-accumulated dots); tags EXACT. Fed the NATIVE tokenizer output (already proven exact).
-fn check_tagger(prefix: &str, private: bool) {
+fn check_tagger(c: &Corpus) {
+    let private = c.private;
+    let prefix = c.spacy_tokens.unwrap().path;
     let tk = Tokenizer::load(&spacy_dir()).unwrap();
     let tg = Tagger::load(&spacy_dir()).unwrap();
-    let lines = load(&data().join(format!("{prefix}.tokens.jsonl")));
-    let seams = kokoro::st::load(&data().join(format!("{prefix}.seams.safetensors"))).unwrap();
-    let (mut ntok, mut tag_bad, mut feat_bad, mut max_d, mut bad_lines) = (0usize, 0usize, 0usize, 0f32, vec![]);
+    let lines = load(c);
+    let seam_pin = c.spacy_seams.unwrap();
+    let seams = kokoro::st::parse(&support::read_pinned_bytes(&seam_pin).unwrap_or_else(|e| panic!("{e}"))).unwrap();
+    assert_eq!(seams.len(), seam_pin.records, "{}: tensor count (2 per line)", seam_pin.path);
+    let (mut ntok, mut tag_bad, mut feat_bad, mut max_d, mut max_ds, mut bad_lines) = (0usize, 0usize, 0usize, 0f32, 0f32, vec![]);
     for l in &lines {
         let toks = tk.tokenize(&l.text);
         assert_eq!(toks.len(), l.toks.len(), "line {}: token count", l.line);
@@ -75,6 +88,7 @@ fn check_tagger(prefix: &str, private: bool) {
         for (t, w) in toks.iter().zip(&l.toks) {
             let ids = tg.features(t);
             let want: Vec<u64> = w["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+            assert_eq!(want.len(), 6, "line {}: oracle feature row width", l.line);
             let strings_ok = tg.norm(t) == w["norm"].as_str().unwrap() && word_shape(&t.text) == w["shape"].as_str().unwrap();
             if ids[..] != want[..] || !strings_ok {
                 feat_bad += 1;
@@ -82,8 +96,18 @@ fn check_tagger(prefix: &str, private: bool) {
             }
         }
         let out = tg.tag(&toks);
-        let tensor = seams.get(&format!("l{}.tensor", l.line)).unwrap().f32().unwrap();
-        assert_eq!(tensor.len(), out.tensor.len());
+        assert_eq!(out.tags.len(), toks.len(), "line {}: tag count", l.line);
+        assert_eq!(out.scores.len(), toks.len() * tg.labels.len(), "line {}: score count", l.line);
+        let tensor = seams.get(&format!("l{}.tensor", l.line)).unwrap_or_else(|| panic!("seam tensor for line {} missing", l.line)).f32().unwrap();
+        assert_eq!(tensor.len(), out.tensor.len(), "line {}: tensor size", l.line);
+        assert_eq!(tensor.len(), toks.len() * 96, "line {}: tensor size vs tokens", l.line);
+        let scores = seams.get(&format!("l{}.scores", l.line)).unwrap_or_else(|| panic!("seam scores for line {} missing", l.line)).f32().unwrap();
+        assert_eq!(scores.len(), out.scores.len(), "line {}: scores size", l.line);
+        let ds = scores.iter().zip(&out.scores).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        max_ds = max_ds.max(ds);
+        if ds > 1e-4 {
+            why.push(format!("scores max|d| {ds:.3e}"));
+        }
         let d = tensor.iter().zip(&out.tensor).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         max_d = max_d.max(d);
         if d > 1e-4 {
@@ -100,7 +124,9 @@ fn check_tagger(prefix: &str, private: bool) {
             bad_lines.push(format!("line {}: {}", l.line, why.join("; ")));
         }
     }
-    println!("{prefix}: {} lines, {ntok} tokens; feature mismatches {feat_bad}; tag mismatches {tag_bad}; tensor max|d| {max_d:.3e}; lines with any diff {}", lines.len(), bad_lines.len());
+    println!("{prefix}: {} lines, {ntok} tokens; feature mismatches {feat_bad}; tag mismatches {tag_bad}; tensor max|d| {max_d:.3e}; score max|d| {max_ds:.3e}; lines with any diff {}", lines.len(), bad_lines.len());
+    assert_eq!(ntok, c.tokens, "tokens checked != pinned");
+    assert_eq!(lines.len(), c.lines);
     for b in bad_lines.iter().take(10) {
         println!("  {b}");
     }
@@ -109,21 +135,21 @@ fn check_tagger(prefix: &str, private: bool) {
 
 #[test]
 fn tagger_matches_oracle_public() {
-    check_tagger("fixtures/frontend/edge.spacy", false);
-    check_tagger("fixtures/frontend/alice.spacy", false);
+    check_tagger(&EDGE);
+    check_tagger(&ALICE);
 }
 
 #[test]
 #[ignore = "private chapter (local only)"]
 fn tagger_matches_oracle_private() {
-    check_tagger("evidence/private/frontend/chapter.spacy", true);
+    check_tagger(&CHAPTER);
 }
 
 /// Negative controls: every subtle rule the port depends on must be load-bearing on the public corpora.
 #[test]
 fn tagger_negative_controls() {
     let tk = Tokenizer::load(&spacy_dir()).unwrap();
-    let lines = load(&data().join("fixtures/frontend/alice.spacy.tokens.jsonl"));
+    let lines = load(&ALICE);
     let docs: Vec<_> = lines.iter().map(|l| tk.tokenize(&l.text)).collect();
     let base = Tagger::load(&spacy_dir()).unwrap();
     let want: Vec<Vec<String>> = docs.iter().map(|d| base.tag(d).tags).collect();

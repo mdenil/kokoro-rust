@@ -3,32 +3,32 @@
 //! reference made on the corpora EXACTLY (phonemes + rating).
 use kokoro::frontend::espeak::{default_dir, Espeak};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
+#[path = "support/mod.rs"]
+mod support;
+use support::{Corpus, ALICE, CHAPTER, EDGE, LINKS};
 
 fn espeak() -> &'static Espeak {
     let d = default_dir();
     Espeak::get(&d.join("libespeak-ng.so.1.52.0"), &d).expect("pinned espeak-ng (scripts/stage_espeak.sh) — missing is NOT a pass")
 }
 
-fn recorded(file: &str) -> BTreeSet<(String, Option<String>, Option<i64>)> {
-    let text = std::fs::read_to_string(data().join(file)).unwrap_or_else(|_| panic!("{file} missing — NOT a pass"));
+fn recorded(c: &Corpus) -> BTreeSet<(String, Option<String>, Option<i64>)> {
+    let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
     let mut s = BTreeSet::new();
-    for l in text.lines().skip(1) {
-        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+    for r in &recs {
         for c in r["fallback"].as_array().into_iter().flatten() {
             s.insert((c["text"].as_str().unwrap().to_string(), c["phonemes"].as_str().map(String::from), c["rating"].as_i64()));
         }
     }
+    assert_eq!(s.len(), c.distinct_fallback, "{}: distinct fallback calls != pinned", c.oracle.path);
     s
 }
 
-fn check(file: &str, private: bool) {
+fn check(c: &Corpus) {
+    let (file, private) = (c.oracle.path, c.private);
     let e = espeak();
-    let calls = recorded(file);
+    let calls = recorded(c);
     let mut bad = vec![];
     for (text, want, rating) in &calls {
         let got = e.fallback(text).unwrap();
@@ -47,14 +47,15 @@ fn check(file: &str, private: bool) {
 
 #[test]
 fn fallback_matches_reference_public() {
-    check("fixtures/frontend/frontend_edge_cases.oracle.jsonl", false);
-    check("fixtures/frontend/alice_full.oracle.jsonl", false);
+    check(&EDGE);
+    check(&ALICE);
+    check(&LINKS);
 }
 
 #[test]
 #[ignore = "private chapter (local only)"]
 fn fallback_matches_reference_private() {
-    check("evidence/private/frontend/chapter.oracle.jsonl", true);
+    check(&CHAPTER);
 }
 
 /// Synthetic unit set (oracle/espeak_oracle.py): phonemizer punctuation preserve/restore, clauses,
@@ -62,10 +63,9 @@ fn fallback_matches_reference_private() {
 #[test]
 fn fallback_matches_reference_synthetic() {
     let e = espeak();
-    let text = std::fs::read_to_string(data().join("fixtures/frontend/espeak_synthetic.oracle.jsonl")).expect("synthetic fixture — missing is NOT a pass");
+    let rows = support::load_jsonl(&support::ESPEAK_SYNTHETIC).unwrap_or_else(|e| panic!("{e}"));
     let (mut n, mut bad) = (0, vec![]);
-    for l in text.lines() {
-        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+    for r in &rows {
         let t = r["text"].as_str().unwrap();
         let raw: Vec<String> = r["phonemize"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
         let got_raw = e.phonemize(t).unwrap();
@@ -75,6 +75,7 @@ fn fallback_matches_reference_synthetic() {
             bad.push(format!("{t:?}: raw {got_raw:?} want {raw:?}; got {got:?} want {}", r["phonemes"]));
         }
     }
+    assert_eq!(n, support::ESPEAK_SYNTHETIC.records);
     println!("synthetic: {}/{n} exact", n - bad.len());
     for b in &bad {
         println!("  {b}");

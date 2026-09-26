@@ -5,6 +5,10 @@ use kokoro::frontend::pipeline::{Chunk, EnglishFrontend, FrontendPaths};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[path = "support/mod.rs"]
+mod support;
+use support::{Corpus, ALICE, CHAPTER, EDGE, LINKS};
+
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
 }
@@ -14,11 +18,11 @@ fn fe() -> &'static EnglishFrontend {
     FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&data().join("frontend"))).expect("native frontend data — missing is NOT a pass"))
 }
 
-fn check(file: &str, private: bool) {
-    let text = std::fs::read_to_string(data().join(file)).unwrap_or_else(|_| panic!("{file} missing — NOT a pass"));
-    let (mut n, mut bad, mut nchunks) = (0usize, vec![], 0usize);
-    for l in text.lines().skip(1) {
-        let r: serde_json::Value = serde_json::from_str(l).unwrap();
+fn check(c: &Corpus) {
+    let (file, private) = (c.oracle.path, c.private);
+    let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
+    let (mut n, mut bad, mut nchunks, mut got_chunks) = (0usize, vec![], 0usize, 0usize);
+    for r in &recs {
         if r["blank"].as_bool() == Some(true) {
             continue;
         }
@@ -38,6 +42,7 @@ fn check(file: &str, private: bool) {
                 why.push(if private { "phonemes".into() } else { format!("phonemes\n   got  {ps}\n   want {}", r["phonemes"].as_str().unwrap()) });
             }
             let got = fe().line_chunks(t).unwrap();
+            got_chunks += got.len();
             if got != want {
                 why.push(if private { "chunks".into() } else { format!("chunks\n   got  {got:?}\n   want {want:?}") });
             }
@@ -50,20 +55,54 @@ fn check(file: &str, private: bool) {
     for b in bad.iter().take(10) {
         println!("  {b}");
     }
-    assert!(n > 0);
+    assert_eq!(n, c.lines, "lines checked != pinned");
+    assert_eq!(nchunks, c.chunks, "reference chunks != pinned");
+    assert_eq!(got_chunks, c.chunks, "native chunks != pinned");
     assert!(bad.is_empty(), "{} lines differ", bad.len());
 }
 
 #[test]
 fn native_frontend_matches_reference_public() {
     println!("{}", fe().ident());
-    check("fixtures/frontend/frontend_edge_cases.oracle.jsonl", false);
-    check("fixtures/frontend/link_features.oracle.jsonl", false);
-    check("fixtures/frontend/alice_full.oracle.jsonl", false);
+    check(&EDGE);
+    check(&LINKS);
+    check(&ALICE);
 }
 
 #[test]
 #[ignore = "private chapter (local only)"]
 fn native_frontend_matches_reference_private() {
-    check("evidence/private/frontend/chapter.oracle.jsonl", true);
+    check(&CHAPTER);
+}
+
+/// The fixture validators must reject missing, truncated (dropped record / cut line), duplicated
+/// and altered fixtures — so no differential test above can pass on a damaged or partial fixture.
+#[test]
+fn fixture_validators_reject_damaged_fixtures() {
+    for c in [EDGE, ALICE, LINKS] {
+        support::validator_negative_controls(&c.oracle);
+        if let Some(p) = c.spacy_tokens {
+            support::validator_negative_controls(&p);
+        }
+    }
+    support::validator_negative_controls(&support::ESPEAK_SYNTHETIC);
+    support::validator_negative_controls(&support::NUM2WORDS);
+    // a corpus whose pinned cardinalities disagree with its fixture is rejected
+    let wrong = Corpus { chunks: EDGE.chunks + 1, ..EDGE };
+    assert!(support::load_corpus(&wrong).is_err());
+    let wrong = Corpus { tokens: EDGE.tokens - 1, ..EDGE };
+    assert!(support::load_corpus(&wrong).is_err());
+    println!("validator negative controls: missing / dropped / cut / duplicate / altered rejected for 7 public fixtures");
+}
+
+/// Same validator negative controls on the private fixtures (local only; hashes pinned, no content).
+#[test]
+#[ignore = "private chapter (local only)"]
+fn fixture_validators_reject_damaged_fixtures_private() {
+    support::validator_negative_controls(&CHAPTER.oracle);
+    support::validator_negative_controls(&CHAPTER.spacy_tokens.unwrap());
+    support::read_pinned_bytes(&CHAPTER.spacy_seams.unwrap()).unwrap();
+    let input = support::read_pinned_bytes(&support::CHAPTER_INPUT).unwrap();
+    assert_eq!(input.iter().filter(|&&b| b == b'\n').count(), support::CHAPTER_INPUT.records);
+    println!("private fixtures: pins verified; validator negative controls pass");
 }

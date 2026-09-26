@@ -168,7 +168,8 @@ pub struct Tagged {
     pub tags: Vec<String>,
     /// tok2vec output [T, 96] (the doc.tensor seam)
     pub tensor: Vec<f32>,
-    /// tagger scores (softmax) [T, nL]
+    /// tagger scores [T, nL] as `tagger.model.predict` returns them: LOGITS (thinc Softmax with
+    /// softmax_normalize=False skips normalisation at inference); tags = argmax
     pub scores: Vec<f32>,
 }
 
@@ -325,11 +326,9 @@ impl Tagger {
                 let w = &self.softmax_w[j * WIDTH..(j + 1) * WIDTH];
                 *lg = h.iter().zip(w).map(|(a, b)| *a as f64 * *b as f64).sum::<f64>() + self.softmax_b[j] as f64;
             }
-            let mx = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let z: f64 = logits.iter().map(|v| (v - mx).exp()).sum();
             let mut best = 0;
             for j in 0..nl {
-                scores[i * nl + j] = ((logits[j] - mx).exp() / z) as f32;
+                scores[i * nl + j] = logits[j] as f32;
                 if logits[j] > logits[best] {
                     best = j;
                 }

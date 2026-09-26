@@ -39,6 +39,9 @@ the frozen baseline is not.
 ---
 
 ## Status notes (2026-09-26)
+- EVIDENCE CAVEAT: rule 9 (raw per-run output + SHA-256 manifest) was NOT met for the PL-001..PL-005
+  ABBA runs. Only terminal summaries were transcribed (evidence/ab/README.txt), plus the in-process
+  bench JSON receipts in evidence/rust/. Future ABBA runs go through scripts/ab.sh, which tees the raw output.
 - Perf work was BLOCKED ON CORRECTNESS (supervisor hold) and resumed after the owner's listening
   acceptance (DISC-003), under the pinned owner-approved envelope (tests/pinned/gpu_envelope.json).
 - INVALID / contended measurements (not evidence, kept for honesty):

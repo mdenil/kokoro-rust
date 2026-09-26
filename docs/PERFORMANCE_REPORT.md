@@ -116,7 +116,10 @@ library path production uses), NOT the deployed openclaw wrapper. Rust's total a
 equals full-f32 torch exactly; production TF32 is 0.05 s longer (duration differences somewhere).
 
 ## Lever receipts after the checkpoint (Alice 69 chunks, public; exploratory subset per owner #12)
-Raw ABBA outputs: evidence/ab/ (see PERF_LEDGER PL-001..005). In-process pass (bench --reps 3):
+ABBA evidence for PL-001..005 is NOT retained raw output. evidence/ab/README.txt holds summaries
+transcribed from the terminal (per-arm medians, cv, ratio, wins; only some per-pair values survive).
+The ABBA script wrote no files at the time. scripts/ab.sh now tees raw output for any future run.
+In-process pass receipts (bench --out JSON) are retained under evidence/rust/. In-process pass (bench --reps 3):
 batch-1 strict 2.465 s → +PL-004 tiled conv 2.426 s → batched(8000)+PL-004 2.298 s → +FMA (opt-in,
 provisional) 2.285 s. Batching and FMA quality: OWNER-ACCEPTED by listening (owner #14, 2026-09-26);
 both still opt-in until defaults are chosen after the single-binary milestone.
