@@ -16,6 +16,13 @@
   /data/mdenil/code/kokoro-rust/evidence/interim-comparison/20260926-141335/, sealed SHA256SUMS):
   warm core Rust 2.462 s vs production torch 6.986 s (2.84×, af_heart; 3.09× am_adam; reference cv
   7–11% → PROVISIONAL); cold text→WAV 25.10 s vs 14.84 s (Rust uses DEV-ONLY Python bridge).
+- FRONTEND PROGRESS: F0 done (oracle dumps, coverage findings docs/frontend/COVERAGE.md). F1 done:
+  native misaki logic (lexicon, stress, stemming, numbers incl. native num2words, retokenize, context
+  resolution, KPipeline chunking) EXACT vs oracle given oracle spaCy tokens+tags and recorded espeak
+  outputs: edge 65/65, Alice 1402/1402, private chapter 316/316 lines (tests/frontend_g2p.rs; negative
+  controls: flattened tags 400/400 lines differ, no-fallback 34, british lexicon 397). Lexicon data
+  pinned under /data/.../frontend/misaki-0.9.4 (hashes in COVERAGE/oracle meta). Next: F2 spaCy
+  tokenizer + tagger port (tags affect nearly every line), then F3 fallback (owner GPL decision).
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
