@@ -11,7 +11,7 @@ fn data() -> PathBuf {
 
 fn fe() -> &'static EnglishFrontend {
     static FE: OnceLock<EnglishFrontend> = OnceLock::new();
-    FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&data())).expect("native frontend data — missing is NOT a pass"))
+    FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&data().join("frontend"))).expect("native frontend data — missing is NOT a pass"))
 }
 
 fn check(file: &str, private: bool) {
