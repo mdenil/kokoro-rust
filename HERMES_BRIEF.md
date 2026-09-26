@@ -186,3 +186,12 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    fallback, chunking) plus integrated actual text-file -> audio tests on the accepted GPU path
    (batched, FMA build exercised as well as strict). No new speed work; no re-litigation of accepted
    audio variation.
+18. FFMPEG APPROVED (Misha, 1553439300211970079): the external ffmpeg dependency is explicitly FINE. The
+   optional `--encode` subprocess is not a single-binary completion blocker: document the dependency and
+   test it when enabled. Keep the default WAV path and the no-Python proof.
+19. LIBESPEAK-NG FINE FOR NOW (Misha, 1553440298590281732): the pinned native libespeak-ng 1.52.0
+   pronunciation fallback (in-process C shared library, not neural synthesis) is accepted for current
+   development/runtime use. A non-GPL replacement may be desirable later; do NOT spend time replacing it
+   now. Keep dependency/version/data/GPL-3.0-or-later notices truthful. NOT a project license choice and
+   NOT redistribution clearance: open-source distribution obligations are a later release concern, not
+   a reason to halt the milestone.

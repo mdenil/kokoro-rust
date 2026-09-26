@@ -156,6 +156,10 @@ struct Sidecar {
     phonemes: Vec<String>,
     dropped_phoneme_chars: Vec<String>,
     config: Config,
+    /// batching policy the line was synthesized under (provenance; not a resume key — batched and
+    /// batch-1 outputs are both owner-accepted)
+    #[serde(default)]
+    synthesis: serde_json::Value,
     wav: Option<String>,
     audio_sha256: Option<String>,
     samples: usize,
@@ -320,6 +324,7 @@ fn synth(
         phonemes: vec![],
         dropped_phoneme_chars: vec![],
         config: cfg.clone(),
+        synthesis: serde_json::json!({"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window}),
         wav: None,
         audio_sha256: None,
         samples: 0,

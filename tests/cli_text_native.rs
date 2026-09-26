@@ -37,6 +37,10 @@ struct Run {
 /// `kokoro synth` (text, native frontend, CUDA GPU 0) under `strace -f -e trace=execve` with a
 /// cleared environment: no PATH entry with Python, no PYTHON* variables, no HOME.
 fn synth(input: &Path, out: &Path, extra: &[&str]) -> Run {
+    synth_path(input, out, extra, "/nonexistent")
+}
+
+fn synth_path(input: &Path, out: &Path, extra: &[&str], path: &str) -> Run {
     let log = out.with_extension("strace");
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     let o = Command::new("/usr/bin/strace")
@@ -44,7 +48,7 @@ fn synth(input: &Path, out: &Path, extra: &[&str]) -> Run {
         .arg(&log)
         .arg(bin())
         .env_clear()
-        .env("PATH", "/nonexistent")
+        .env("PATH", path)
         .env("CUDA_VISIBLE_DEVICES", "0")
         .env("KOKORO_FRONTEND_DIR", data().join("frontend"))
         .args(["synth", "--device", "cuda", "--model-dir"])
@@ -298,4 +302,83 @@ fn failures_restart_and_invalidation() {
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// Complete private chapter acceptance (owner #15): the prepared chapter line file -> all per-line
+/// WAVs through the binary, both voices, Python unavailable + execve audit; pronunciations vs the
+/// pinned reference. Private-safe: outputs under evidence/private (outside Git), only aggregates
+/// printed, no text/phonemes in messages.
+#[test]
+#[ignore = "private chapter (local only)"]
+fn private_chapter_acceptance() {
+    let input = data().join("bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt");
+    assert!(input.exists(), "private chapter missing — NOT a pass");
+    let oracle = std::fs::read_to_string(data().join("evidence/private/frontend/chapter.oracle.jsonl")).expect("chapter oracle");
+    let want: Vec<serde_json::Value> = oracle.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+    let tag = bin().file_name().unwrap().to_string_lossy().into_owned();
+    let vocab = vocab();
+    for voice in ["af_heart", "am_adam"] {
+        let out = data().join("evidence/private/acceptance").join(&tag).join(voice);
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let t = std::time::Instant::now();
+        let r = synth(&input, &out, &["--voice", voice]);
+        let wall = t.elapsed().as_secs_f64();
+        assert_eq!(r.code, 0, "chapter run failed (exit {}); see private sidecars", r.code);
+        assert_no_helpers(&r);
+        let m = json(&out.join("002_hidden_curriculum_of_youth_whaddaya_want_from_me.manifest.json"));
+        assert_eq!(m["complete"], true);
+        let n = m["input_lines"].as_u64().unwrap() as usize;
+        assert_eq!(n, want.len());
+        let (mut chunks, mut samples, mut pron_bad, mut drop_bad) = (0usize, 0usize, 0usize, 0usize);
+        for (i, w) in want.iter().enumerate() {
+            let line = i + 1;
+            let sc = json(&out.join(format!("002_hidden_curriculum_of_youth_whaddaya_want_from_me_{line:05}.json")));
+            assert_eq!(sc["line"], line);
+            assert!(sc["status"] == "ok", "line {line} status not ok");
+            let got: Vec<(String, String)> = sc["graphemes"].as_array().unwrap().iter().zip(sc["phonemes"].as_array().unwrap()).map(|(g, p)| (g.as_str().unwrap().into(), p.as_str().unwrap().into())).collect();
+            let exp: Vec<(String, String)> = w["chunks"].as_array().unwrap().iter().map(|c| (c["graphemes"].as_str().unwrap().into(), c["phonemes"].as_str().unwrap().into())).collect();
+            if got != exp {
+                pron_bad += 1;
+            }
+            let want_dropped: Vec<String> = exp.iter().flat_map(|c| c.1.chars()).filter(|c| !vocab.contains(c)).map(|c| c.to_string()).collect();
+            let dropped: Vec<String> = sc["dropped_phoneme_chars"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            if dropped != want_dropped {
+                drop_bad += 1;
+            }
+            let wav = std::fs::read(out.join(format!("002_hidden_curriculum_of_youth_whaddaya_want_from_me_{line:05}.wav"))).unwrap();
+            assert!(sc["audio_sha256"].as_str().unwrap() == sha256_hex(&wav), "line {line}: audio hash");
+            chunks += exp.len();
+            samples += sc["samples"].as_u64().unwrap() as usize;
+        }
+        println!(
+            "PRIVATE chapter [{tag}] {voice}: {n} lines, {chunks} chunks, {:.1} s audio, pronunciation mismatches {pron_bad}, dropped-char mismatches {drop_bad}, execs {}, process wall {wall:.2} s",
+            samples as f64 / 24000.0,
+            r.execs.len()
+        );
+        assert_eq!(pron_bad, 0);
+        assert_eq!(drop_bad, 0);
+    }
+}
+
+/// Optional `--encode` (owner-approved external ffmpeg, #18): encoded files exist, hashes recorded,
+/// and the only extra processes are ffmpeg (one per line) — still no Python.
+#[test]
+fn encode_with_ffmpeg_when_enabled() {
+    let d = scratch("encode");
+    let input = d.join("enc.txt");
+    std::fs::write(&input, "First line here.\nSecond line, a bit longer.\nThird.\n").unwrap();
+    let r = synth_path(&input, &d.join("out"), &["--encode", "flac"], "/usr/bin");
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(!r.execs.iter().any(|e| e.contains("python")));
+    let ff = r.execs.iter().filter(|e| e.contains("ffmpeg")).count();
+    assert_eq!(r.execs.len(), 1 + ff);
+    assert_eq!(ff, 3, "{}", r.execs.join("\n"));
+    for line in 1..=3 {
+        let sc = json(&d.join(format!("out/enc_{line:05}.json")));
+        let flac = std::fs::read(d.join(format!("out/enc_{line:05}.flac"))).unwrap();
+        assert_eq!(&flac[..4], b"fLaC");
+        assert_eq!(sc["encoded_sha256"].as_str().unwrap(), sha256_hex(&flac));
+        assert!(d.join(format!("out/enc_{line:05}.wav")).exists());
+    }
 }

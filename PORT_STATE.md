@@ -4,12 +4,32 @@
 - One Rust executable: chunk-line text file -> per-line WAVs + metadata, native frontend (normalization,
   spaCy tokenizer+tagger, misaki G2P, OOV fallback, chunking), GPU model, ordered outputs, safe resume.
   No Python / helper process / oracle replay at inference. Inventory every external data/runtime dep.
-- Order: F2 spaCy tokenizer+tagger -> F3 OOV fallback (interim: runtime-loaded pinned libespeak-ng 1.52,
-  explicit dependency, license decision surfaced to owner) -> F4 CLI default native -> I1 acceptance
+- Order: F2 spaCy tokenizer+tagger -> F3 OOV fallback (runtime-loaded pinned libespeak-ng 1.52 — accepted
+  for now, owner #19; ffmpeg for optional --encode approved, owner #18) -> F4 CLI default native -> I1 acceptance
   (no Python on PATH + execve audit, both voices, long lines, failures/restart/invalidation, pronunciation
   fidelity vs pinned reference, complete private chapter) -> dependency inventory doc.
 - Owner #17: component unit/differential tests (tokenizer, tagger, numbers, pronunciation/fallback,
   chunking) AND integrated text-file -> audio tests on the accepted GPU path (batching + FMA, no rollback).
+- MILESTONE STATUS (2026-09-26 ~17:30): single-binary text path COMPLETE and verified.
+  - F2 spaCy tokenizer+features+tok2vec/tagger EXACT (tags 0/44,432 mismatches; tensor max|d| 3.2e-6).
+  - F3 espeak fallback EXACT (139 recorded calls + 83 synthetic).
+  - Assembled frontend EXACT (1,803 lines, 4 corpora incl. link features + private).
+  - F4: `synth` defaults to the native frontend; the bridge was removed.
+  - I1 (tests/cli_text_native.rs): Python unavailable + strace execve audit (1 exec); both voices;
+    pronunciations identical to the reference; long lines complete; failures/restart/invalidation;
+    optional ffmpeg --encode. Passes on strict AND FMA builds.
+  - Complete private chapter via the binary: 316/316 lines, 317 chunks, 0 pronunciation mismatches,
+    both voices, both builds (aggregates only).
+  - Full suite: no regressions. The only failing tests are the enforced known-failure tests with
+    identical fail sets (CPU ladder 7 rows, GPU ladder 8 rows, batch-vs-single RB-1 = accepted PL-003).
+  - Dependency inventory: docs/DEPENDENCIES.md.
+  - Known limits / next:
+    - American English only (lang a; British not ported).
+    - pystr::char_isdigit approximates Python's Unicode Digit set (exotic digits).
+    - Lexicon provenance open (release concern).
+    - Frontend throughput unoptimized: ~6 s per private-chapter pass, tagger is scalar f64 — a
+      measured observation for the owner #16 phase, not yet profiled.
+    - bench/interim_compare.py still has the retired bridge row (historical).
 - PAUSED until then: perf levers, conv/fusion experiments, batch tuning, headroom analysis.
 - NEXT PERF PHASE (owner #16): whole-system chapter file -> verified WAVs, production system as used vs the
   complete Rust binary, cold and resident, overlap-aware stage attribution; headline = whole-system wall.
