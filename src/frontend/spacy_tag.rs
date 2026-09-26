@@ -83,7 +83,7 @@ pub fn word_shape(text: &str) -> String {
     let mut seq = 0;
     for c in text.chars() {
         let sc = if pystr::char_isalpha(c) {
-            if c.is_uppercase() {
+            if pystr::char_isupper(c) {
                 'X'
             } else {
                 'x'

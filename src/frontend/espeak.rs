@@ -114,14 +114,14 @@ impl Espeak {
 
     /// EspeakBackend._postprocess_line (strip=False, word separator ' ', tie '^', keep-flags).
     fn postprocess_line(line: &str) -> String {
-        let line = line.trim().replace('\n', " ").replace("  ", " ");
+        let line = super::pystr::strip(line).replace('\n', " ").replace("  ", " ");
         let line = collapse_underscores(&line).replace("_ ", " ");
         if line.is_empty() {
             return String::new();
         }
         let mut out = String::new();
         for word in line.split(' ') {
-            out.push_str(&word.trim().replace('\u{0361}', "^"));
+            out.push_str(&super::pystr::strip(word).replace('\u{0361}', "^"));
             out.push(' ');
         }
         out
@@ -220,7 +220,7 @@ impl Espeak {
     pub fn fallback(&self, text: &str) -> Result<Option<String>> {
         let ps = self.phonemize(text)?;
         let Some(first) = ps.first() else { return Ok(None) };
-        let mut ps = first.trim().to_string();
+        let mut ps = super::pystr::strip(first).to_string();
         for (old, new) in e2m() {
             ps = ps.replace(old, new);
         }

@@ -8,6 +8,8 @@ pub mod lexicon;
 pub mod num2words;
 pub mod pipeline;
 pub mod pystr;
+#[rustfmt::skip]
+mod pyunicode;
 pub mod spacy_tag;
 pub mod spacy_tok;
 

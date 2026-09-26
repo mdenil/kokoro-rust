@@ -1,60 +1,151 @@
-//! Python `str` semantics the misaki port depends on (isalpha, isdigit, capitalize, ...).
+//! Python `str` semantics the misaki / spaCy ports depend on, EXACT for the pinned reference
+//! interpreter (Python 3.12.3, Unicode 15.0.0) via generated tables (pyunicode.rs), not Rust's own
+//! (newer-Unicode) char properties. Verified exhaustively over every scalar value by
+//! tests/frontend_pystr.rs.
 
-use unicode_general_category::{get_general_category, GeneralCategory as G};
+use super::pyunicode as t;
 
-/// Python str.isalpha(): non-empty and every char in Lu/Ll/Lt/Lm/Lo.
+/// (Python version, Unicode version) the tables were generated from.
+pub fn table_basis() -> (&'static str, &'static str) {
+    (t::PYTHON, t::UNICODE)
+}
+
+fn in_ranges(r: &[(u32, u32)], c: char) -> bool {
+    let cp = c as u32;
+    match r.binary_search_by(|&(a, b)| {
+        if b < cp {
+            std::cmp::Ordering::Less
+        } else if a > cp {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }) {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+fn mapped(table: &'static [(u32, &'static str)], c: char) -> Option<&'static str> {
+    table.binary_search_by_key(&(c as u32), |&(k, _)| k).ok().map(|i| table[i].1)
+}
+
+/// Python str.isalpha() for one char.
+pub fn char_isalpha(c: char) -> bool {
+    in_ranges(t::ISALPHA, c)
+}
+
+/// Python str.isalpha(): non-empty and every char alphabetic.
 pub fn isalpha(s: &str) -> bool {
     !s.is_empty() && s.chars().all(char_isalpha)
 }
 
-pub fn char_isalpha(c: char) -> bool {
-    matches!(get_general_category(c), G::UppercaseLetter | G::LowercaseLetter | G::TitlecaseLetter | G::ModifierLetter | G::OtherLetter)
-}
-
-/// Python str.isdigit() for one char: Numeric_Type Decimal or Digit. Approximation: Nd plus the
-/// superscript/subscript/circled digit forms (Numeric_Type=Digit) that occur in English text.
+/// Python str.isdigit() for one char (Numeric_Type Digit or Decimal).
 pub fn char_isdigit(c: char) -> bool {
-    get_general_category(c) == G::DecimalNumber
-        || matches!(c, '²' | '³' | '¹' | '⁰' | '⁴'..='⁹' | '₀'..='₉' | '①'..='⑨' | '⓪')
+    digit_value(c).is_some()
 }
 
-/// Numeric value for a digit char (used by misaki's numeric_if_needed after NFKC). ASCII and the
-/// common decimal-digit blocks; None otherwise (misaki then keeps the char).
+/// int(unicodedata.numeric(c)) for chars where c.isdigit() (misaki numeric_if_needed); else None.
 pub fn digit_value(c: char) -> Option<u32> {
-    if c.is_ascii_digit() {
-        return c.to_digit(10);
-    }
     let cp = c as u32;
-    // zero code points of common Nd blocks (Arabic-Indic, Extended, Devanagari, Bengali, fullwidth)
-    for z in [0x0660u32, 0x06F0, 0x0966, 0x09E6, 0xFF10, 0x2070, 0x2080] {
-        if (z..z + 10).contains(&cp) {
-            return Some(cp - z);
+    let i = t::DIGITS.partition_point(|&(_, end, _)| end < cp);
+    t::DIGITS.get(i).filter(|&&(start, _, _)| start <= cp).map(|&(start, _, v)| v + (cp - start))
+}
+
+/// Python str.isspace() for one char.
+pub fn char_isspace(c: char) -> bool {
+    in_ranges(t::ISSPACE, c)
+}
+
+/// Python str.isupper() for one char.
+pub fn char_isupper(c: char) -> bool {
+    in_ranges(t::ISUPPER, c)
+}
+
+/// Python str.strip() / lstrip() / rstrip() (no argument: Python whitespace).
+pub fn strip(s: &str) -> &str {
+    s.trim_matches(char_isspace)
+}
+
+pub fn lstrip(s: &str) -> &str {
+    s.trim_start_matches(char_isspace)
+}
+
+pub fn rstrip(s: &str) -> &str {
+    s.trim_end_matches(char_isspace)
+}
+
+/// CPython handle_capital_sigma: U+03A3 lowercases to final ς when preceded (skipping
+/// case-ignorable chars) by a cased char and not followed (skipping case-ignorables) by one.
+fn sigma(chars: &[char], i: usize) -> char {
+    let mut j = i as isize - 1;
+    while j >= 0 && in_ranges(t::SIGMA_IGNORABLE, chars[j as usize]) {
+        j -= 1;
+    }
+    let mut fin = j >= 0 && in_ranges(t::SIGMA_CASED, chars[j as usize]);
+    if fin && i + 1 < chars.len() {
+        let mut k = i + 1;
+        while k < chars.len() && in_ranges(t::SIGMA_IGNORABLE, chars[k]) {
+            k += 1;
+        }
+        fin = k == chars.len() || !in_ranges(t::SIGMA_CASED, chars[k]);
+    }
+    if fin {
+        'ς'
+    } else {
+        'σ'
+    }
+}
+
+fn push_lower(chars: &[char], i: usize, out: &mut String) {
+    let c = chars[i];
+    if c == 'Σ' {
+        out.push(sigma(chars, i));
+    } else {
+        match mapped(t::LOWER, c) {
+            Some(m) => out.push_str(m),
+            None => out.push(c),
         }
     }
-    match c {
-        '¹' => Some(1),
-        '²' => Some(2),
-        '³' => Some(3),
-        '①'..='⑨' => Some(c as u32 - '①' as u32 + 1),
-        _ => None,
-    }
 }
 
+/// Python str.lower() (full case mapping incl. Final_Sigma).
 pub fn lower(s: &str) -> String {
-    s.to_lowercase()
-}
-
-pub fn upper(s: &str) -> String {
-    s.to_uppercase()
-}
-
-/// Python str.capitalize(): first char upper(title)case, rest lowercase.
-pub fn capitalize(s: &str) -> String {
-    let mut it = s.chars();
-    match it.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + &it.as_str().to_lowercase(),
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    for i in 0..chars.len() {
+        push_lower(&chars, i, &mut out);
     }
+    out
+}
+
+/// Python str.upper() (full case mapping).
+pub fn upper(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match mapped(t::UPPER, c) {
+            Some(m) => out.push_str(m),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// Python str.capitalize(): first char TITLE-cased (full mapping), the rest lower() (Final_Sigma
+/// evaluated over the whole string).
+pub fn capitalize(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    if let Some(&f) = chars.first() {
+        match mapped(t::TITLE, f) {
+            Some(m) => out.push_str(m),
+            None => out.push(f),
+        }
+    }
+    for i in 1..chars.len() {
+        push_lower(&chars, i, &mut out);
+    }
+    out
 }
 
 pub fn nchars(s: &str) -> usize {

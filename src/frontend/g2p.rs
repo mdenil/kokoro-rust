@@ -57,7 +57,7 @@ pub fn merge_tokens(tokens: &[MToken], unk: Option<&str>) -> MToken {
     let phonemes = unk.map(|unk| {
         let mut p = String::new();
         for tk in tokens {
-            if tk.prespace && !p.is_empty() && !p.chars().last().unwrap().is_whitespace() && tk.phonemes.as_deref().map(|x| !x.is_empty()).unwrap_or(false) {
+            if tk.prespace && !p.is_empty() && !super::pystr::char_isspace(p.chars().last().unwrap()) && tk.phonemes.as_deref().map(|x| !x.is_empty()).unwrap_or(false) {
                 p.push(' ');
             }
             p.push_str(tk.phonemes.as_deref().unwrap_or(unk));
@@ -358,16 +358,12 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
 pub const MAX_CHUNK: usize = 510;
 
 fn tokens_to_ps(tokens: &[MToken]) -> String {
-    tokens
-        .iter()
-        .map(|t| format!("{}{}", t.phonemes.as_deref().unwrap_or(""), if t.whitespace.is_empty() { "" } else { " " }))
-        .collect::<String>()
-        .trim()
-        .to_string()
+    let joined: String = tokens.iter().map(|t| format!("{}{}", t.phonemes.as_deref().unwrap_or(""), if t.whitespace.is_empty() { "" } else { " " })).collect();
+    super::pystr::strip(&joined).to_string()
 }
 
 fn tokens_to_text(tokens: &[MToken]) -> String {
-    tokens.iter().map(|t| format!("{}{}", t.text, t.whitespace)).collect::<String>().trim().to_string()
+    super::pystr::strip(&tokens.iter().map(|t| format!("{}{}", t.text, t.whitespace)).collect::<String>()).to_string()
 }
 
 fn waterfall_last(tokens: &[MToken], next_count: usize) -> usize {
@@ -399,7 +395,7 @@ pub fn en_tokenize(tokens: &mut [MToken]) -> Vec<(String, String)> {
             t.phonemes = Some(String::new());
         }
         let mut next_ps = format!("{}{}", t.phonemes.as_deref().unwrap(), if t.whitespace.is_empty() { "" } else { " " });
-        let next_pcount = pcount + nchars(next_ps.trim_end());
+        let next_pcount = pcount + nchars(super::pystr::rstrip(&next_ps));
         if next_pcount > MAX_CHUNK {
             let z = waterfall_last(&tks, next_pcount);
             let (text, ps) = (tokens_to_text(&tks[..z]), tokens_to_ps(&tks[..z]));
@@ -407,7 +403,7 @@ pub fn en_tokenize(tokens: &mut [MToken]) -> Vec<(String, String)> {
             tks = tks[z..].to_vec();
             pcount = nchars(&tokens_to_ps(&tks));
             if tks.is_empty() {
-                next_ps = next_ps.trim_start().to_string();
+                next_ps = super::pystr::lstrip(&next_ps).to_string();
             }
         }
         tks.push(t.clone());

@@ -27,8 +27,9 @@ pub struct Tokenizer {
     matcher: HashMap<String, Vec<(Vec<String>, String)>>,
 }
 
+/// Python str.isspace() for one char (exact; see pystr).
 pub fn py_isspace(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+    super::pystr::char_isspace(c)
 }
 
 impl Tokenizer {

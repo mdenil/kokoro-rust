@@ -48,8 +48,10 @@
 ## Open correctness gaps (concrete)
 1. DISC-004: 7 enforced E2E rows unaccepted. Owner decision or evidence needed; not self-authorized.
 2. British English (lang b) is not ported. The binary is American English only (voices af_*/am_*).
-3. `pystr::char_isdigit` approximates Python's Unicode Numeric_Type=Digit set. Exotic digit characters
-   could diverge; no corpus exercises them.
+3. CLOSED 2026-09-26: the Python str semantics (isalpha/isdigit/isspace/isupper/lower/upper/capitalize/
+   strip) were approximations on Rust's Unicode 16 tables and diverged on thousands of code points.
+   They are now exact to the reference Python 3.12.3 (Unicode 15.0) via generated tables, verified
+   exhaustively (tests/frontend_pystr.rs).
 4. Frontend coverage is bounded by the corpora: edge 65, links 20, Alice 1402, chapter 316 lines.
    There is no fuzz/differential run on arbitrary text yet.
 5. Production behaviours deliberately NOT replicated (explicit instead):
