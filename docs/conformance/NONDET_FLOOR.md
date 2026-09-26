@@ -1,7 +1,7 @@
 # Reference nondeterminism floor (Phase 0 gate)
 
 Command: `CUDA_VISIBLE_DEVICES=0 $VENV/bin/python oracle/nondet_floor.py`
-Raw: `/data/mdenil/kokoro-rust/fixtures/nondet_floor.json` (pins asserted in-run).
+Raw: `/data/mdenil/code/kokoro-rust/fixtures/nondet_floor.json` (pins asserted in-run).
 Case: "The quick brown fox jumps over the lazy dog." / af_heart / speed 1.0 / 78,000 samples,
 reference waveform RMS 0.0472.
 

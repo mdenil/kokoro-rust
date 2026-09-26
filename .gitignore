@@ -2,7 +2,7 @@
 /target
 Cargo.lock.orig
 
-# Large/generated/private material lives under /data/mdenil/kokoro-rust (see docs/truth-pack)
+# Large/generated/private material lives under /data/mdenil/code/kokoro-rust (see docs/truth-pack)
 *.wav
 *.flac
 *.mp3

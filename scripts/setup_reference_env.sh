@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Recreate the pinned production-reference Python environment (oracle side).
 # Pins are the OBSERVED production versions from HERMES_BRIEF.md; the oracle asserts
-# them at runtime. Everything large lives under /data/mdenil/kokoro-rust.
+# them at runtime. Everything large lives under /data/mdenil/code/kokoro-rust.
 set -euo pipefail
 
-DATA=${KOKORO_DATA:-/data/mdenil/kokoro-rust}
+source "$(dirname "$0")/env.sh"
+DATA="$KOKORO_DATA"
 VENV="$DATA/reference/venv-prod"
-export UV_CACHE_DIR="$DATA/uv-cache"
 
 uv venv --python /usr/bin/python3 "$VENV"
 uv pip install -p "$VENV/bin/python" \

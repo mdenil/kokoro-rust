@@ -1,7 +1,7 @@
 # OQ_INDEX — kokoro-rust open questions register
 
 **Hard rule: no kernel ships against an unresolved [OPEN].** Answers cite the INSTALLED pinned
-packages under `/data/mdenil/kokoro-rust/reference/venv-prod/lib/python3.12/site-packages/`
+packages under `/data/mdenil/code/kokoro-rust/reference/venv-prod/lib/python3.12/site-packages/`
 (`kokoro/` = kokoro 0.9.4, `transformers/…/modeling_albert.py` = transformers 5.12.1).
 
 | OQ | Question | Status | Answer (line-cited) |

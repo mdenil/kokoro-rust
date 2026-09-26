@@ -2,10 +2,11 @@
 # Fetch (and with --verify, hash-check) the pinned Kokoro-82M snapshot.
 set -euo pipefail
 
-DATA=${KOKORO_DATA:-/data/mdenil/kokoro-rust}
+source "$(dirname "$0")/env.sh"
+DATA="$KOKORO_DATA"
 REV=f3ff3571791e39611d31c381e3a41a3af07b4987
 SNAP="$DATA/hf/hub/models--hexgrad--Kokoro-82M/snapshots/$REV"
-export HF_HOME="$DATA/hf" UV_CACHE_DIR="$DATA/uv-cache"
+# HF_HOME / UV_CACHE_DIR come from env.sh
 
 uvx --from 'huggingface-hub==1.20.1' hf download hexgrad/Kokoro-82M --revision "$REV" >/dev/null
 echo "snapshot at: $SNAP"
