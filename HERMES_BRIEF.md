@@ -180,3 +180,9 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    accounting for overlap (no summing of concurrent stages). Profiling establishes where savings are —
    no assumed gains. Headline = whole-system wall time, not core-only. No optimization campaign before
    the complete/correct milestone.
+17. TESTING SHAPE CONFIRMED (Misha, 1553431050242490532): unit tests IN ADDITION TO end-to-end tests.
+   Accepted batching + FMA stay in force (NO rollback). Focus: finish the native frontend now. Keep
+   component-level differential/unit tests (tokenizer, tagger, normalization/numbers, pronunciation/
+   fallback, chunking) plus integrated actual text-file -> audio tests on the accepted GPU path
+   (batched, FMA build exercised as well as strict). No new speed work; no re-litigation of accepted
+   audio variation.

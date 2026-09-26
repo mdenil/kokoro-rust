@@ -5,6 +5,8 @@ pub mod g2p;
 pub mod lexicon;
 pub mod num2words;
 pub mod pystr;
+pub mod spacy_tag;
+pub mod spacy_tok;
 
 /// misaki MToken (token.py) with the `_` underscore fields flattened.
 #[derive(Clone, Debug, Default)]

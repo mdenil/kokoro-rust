@@ -8,6 +8,8 @@
   explicit dependency, license decision surfaced to owner) -> F4 CLI default native -> I1 acceptance
   (no Python on PATH + execve audit, both voices, long lines, failures/restart/invalidation, pronunciation
   fidelity vs pinned reference, complete private chapter) -> dependency inventory doc.
+- Owner #17: component unit/differential tests (tokenizer, tagger, numbers, pronunciation/fallback,
+  chunking) AND integrated text-file -> audio tests on the accepted GPU path (batching + FMA, no rollback).
 - PAUSED until then: perf levers, conv/fusion experiments, batch tuning, headroom analysis.
 - NEXT PERF PHASE (owner #16): whole-system chapter file -> verified WAVs, production system as used vs the
   complete Rust binary, cold and resident, overlap-aware stage attribution; headline = whole-system wall.
