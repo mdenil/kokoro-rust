@@ -11,12 +11,30 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_PHONEMES: usize = CONTEXT_LEN - 2;
 
+/// SHA-256 of a file, streamed. Uses ring's assembly implementation (AVX2 on this host; the
+/// pure-Rust sha2 crate only accelerates via SHA-NI, which e.g. Broadwell lacks: ~2.6x slower).
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(hex(&Sha256::digest(&bytes)))
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).with_context(|| format!("reading {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(hex(ctx.finish().as_ref()))
 }
 
 pub fn sha256_bytes(b: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, b).as_ref())
+}
+
+/// Reference implementation (sha2 crate) kept for the equivalence test.
+#[doc(hidden)]
+pub fn sha256_bytes_sha2(b: &[u8]) -> String {
     hex(&Sha256::digest(b))
 }
 

@@ -40,6 +40,15 @@ def main():
     out = pathlib.Path(a.out)
     (out / "logs").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"))
+    # preserve every measured binary under its content hash (later rebuilds overwrite target/)
+    keep = DATA / "bin"
+    keep.mkdir(exist_ok=True)
+    for k, b in list(bins.items()):
+        h = sc.sha256_file(b)
+        dst = keep / f"kokoro-{h[:12]}"
+        if not dst.exists():
+            shutil.copy2(b, dst)
+        bins[k] = str(dst)
     corpus = pathlib.Path(a.corpus).resolve()
     git = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True).stdout.splitlines()
@@ -95,6 +104,8 @@ def main():
                 ratio = summ[f"{base}.{mode}"]["median"] / s["median"]
                 print(f"{k:>10} {mode}: median {s['median']:.3f}s cv {s['cv_pct']:.1f}% (vs {base}: {ratio:.3f}x) {[round(v, 3) for v in s['values']]}")
     (out / "summary.json").write_text(json.dumps(summ, indent=1))
+    raw.close()
+    (out / "SHA256SUMS").write_text("".join(f"{sc.sha256_file(p)}  {p.relative_to(out)}\n" for p in sorted(out.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"))
 
 
 if __name__ == "__main__":

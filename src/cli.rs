@@ -478,69 +478,19 @@ fn synth(
                     };
         let prep = sc_scope.spawn(move || -> Result<()> {
             let n = inp_r.lines.len();
-            // Bounded look-ahead: a worker may only start line i once i < emitted + window, so the
-            // reorder buffer and all in-flight work hold at most `window` lines. Any exit of the
-            // sequencer (done, error, downstream closed) sets `stop` and wakes every worker.
+            // bounded look-ahead, strictly ordered emission (see crate::ordered)
             let window = (4 * prep_threads.max(1)).max(8);
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let emitted = std::sync::Mutex::new(0usize);
-            let cv = std::sync::Condvar::new();
-            let stop = std::sync::atomic::AtomicBool::new(false);
-            struct StopOnExit<'a>(&'a std::sync::atomic::AtomicBool, &'a std::sync::Mutex<usize>, &'a std::sync::Condvar);
-            impl Drop for StopOnExit<'_> {
-                fn drop(&mut self) {
-                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let _g = self.1.lock().unwrap_or_else(|e| e.into_inner());
-                    self.2.notify_all();
+            let emitted = crate::ordered::ordered_parallel_map(n, prep_threads, window, |i| make_job(i, &inp_r.lines[i]), |_, job| {
+                let ws = now();
+                if prep_tx.send(job).is_err() {
+                    return false;
                 }
-            }
-            let (res_tx, res_rx) = std::sync::mpsc::channel::<(usize, Result<Job>)>();
-            std::thread::scope(|ws_scope| -> Result<()> {
-                for _ in 0..prep_threads.max(1) {
-                    let res_tx = res_tx.clone();
-                    let (next, make_job, emitted, cv, stop) = (&next, &make_job, &emitted, &cv, &stop);
-                    ws_scope.spawn(move || loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if i >= n {
-                            break;
-                        }
-                        {
-                            let mut e = emitted.lock().unwrap_or_else(|e| e.into_inner());
-                            while i >= *e + window && !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                                e = cv.wait(e).unwrap_or_else(|e| e.into_inner());
-                            }
-                        }
-                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
-                            break;
-                        }
-                        let r = make_job(i, &inp_r.lines[i]);
-                        let fail = r.is_err();
-                        if res_tx.send((i, r)).is_err() || fail {
-                            break;
-                        }
-                    });
-                }
-                drop(res_tx);
-                let _stop = StopOnExit(&stop, &emitted, &cv);
-                let mut pending = std::collections::BTreeMap::new();
-                let mut want = 0usize;
-                for (i, r) in res_rx {
-                    pending.insert(i, r?);
-                    debug_assert!(pending.len() <= window);
-                    while let Some(job) = pending.remove(&want) {
-                        let ws = now();
-                        if prep_tx.send(job).is_err() {
-                            return Ok(());
-                        }
-                        tl_r.push(pass, "prepare", "send_wait", ws, 1);
-                        want += 1;
-                        *emitted.lock().unwrap_or_else(|e| e.into_inner()) = want;
-                        cv.notify_all();
-                    }
-                }
-                anyhow::ensure!(want == n, "prepare stage produced {want} of {n} lines");
-                Ok(())
-            })
+                tl_r.push(pass, "prepare", "send_wait", ws, 1);
+                true
+            })?;
+            // emitted < n only when the GPU stage closed its receiver (it then reports its own error)
+            let _ = emitted;
+            Ok(())
         });
         let out_rx = std::sync::Arc::new(std::sync::Mutex::new(out_rx));
         let writer_fn = move |out_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<Out>>>| -> Result<(Vec<(usize, serde_json::Value)>, usize, usize, usize, f64)> {

@@ -10,6 +10,7 @@ pub mod frontend;
 pub mod gpu;
 pub mod model;
 pub mod nn;
+pub mod ordered;
 pub mod prof;
 #[allow(unsafe_code)]
 pub mod ops;

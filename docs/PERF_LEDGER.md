@@ -121,8 +121,9 @@ the frozen baseline is not.
     execs produced them, and it was a test artifact, not an extra process.
 - A/B, sealed (`/data/mdenil/code/kokoro-rust/evidence/ab/20260926-235743-L1-sealed-alice`): Alice, 4 interleaved rounds; identities, host/GPU state and coverage digests
   per run.
-  - warm pass: base (commit 6e306b7) 4.766 s → new 2.575 s (**1.85×**, cv 1.6%);
-  - cold process: 9.749 s → 5.504 s (**1.77×**);
+  - warm pass: base (commit 6e306b7) 4.766 s → new 2.575 s (**1.85×, PROVISIONAL**: the base warm
+    process medians are 11.409 / 4.809 / 4.722 / 4.721 s, cv 51.9% from one outlier, kept; new cv 1.6%);
+  - cold process: 9.749 s → 5.504 s (**1.77×**; cv 0.9% / 4.1%);
   - same-binary single-worker ablation: warm 5.037 s, cold 7.410 s.
   - Earlier exploratory rounds under a concurrent root `zfs receive`: fsync amplified write
     stalls up to 27 s; with fsync off, the remaining fsync (on the manifest) stalled 2–4 s, so the
@@ -132,3 +133,34 @@ the frozen baseline is not.
   - target/baseline-6e306b7/release/kokoro (b1bb54cd…).
   They are the same commit built from different checkout paths; debuginfo paths make the builds
   not byte-reproducible across locations.
+- Identity addendum (audit):
+  - the measured "new" binary sha256 c1815fa2… was NOT retained (later builds overwrote target/);
+  - its source is identical to commit f20090a: tree 1eb73fc + the uncommitted src/cli.rs,
+    engine.rs and wav.rs edits, committed unchanged as f20090a;
+  - ab_synth now copies every measured binary to $KOKORO_DATA/bin/kokoro-<sha12>;
+  - the L1 evidence dirs now carry SHA256SUMS; the regression-suite log is archived in the
+    sealed dir (L1_regression_suites.log).
+
+### PL-007 — cold-start load: ring SHA-256 + contiguous .pth fast path   [2026-09-27 | KEEP]
+- Measured (examples/load_breakdown.rs; this host is a Broadwell E5-2698 v4 without SHA-NI):
+  - weight sha256 2.6–2.8 s with the pure-Rust sha2 (no SHA-NI path) — the longest load item,
+    even on its helper thread;
+  - load_pth 1.0–1.25 s, mostly a per-element strided copy of 82M floats.
+- Lever:
+  - SHA-256 via ring (assembly; 0.92 s for the 327 MB file). tests/hashing.rs checks it is
+    byte-identical to sha2 on 14 lengths and to the known file hash 496dba11…
+  - contiguous tensor views are converted straight from the zip bytes (load_pth → 0.48 s); the
+    generic strided walk is kept for other views. tests/native_load bitwise vs reference: pass.
+  - Also in this commit: the prepare-stage logic moved to crate::ordered with unit tests (see
+    below).
+- Correctness:
+  - WAVs bit-identical (Alice 65/65) and model_sha256 unchanged;
+  - regression suites: see the commit.
+- A/B, sealed (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-001711-L2-load-alice`): cold 5.463 → 4.704 s (**1.16×**, cv 5.2% / 2.4%); warm 2.586 → 2.548 s
+  (1.015×, neutral as expected).
+- crate::ordered (bounded ordered parallel map): unit tests cover a delayed first item (no
+  run-ahead beyond the window), sink cancellation, error propagation, and empty/single-thread
+  inputs, plus a negative control (an unbounded window DOES run ahead).
+  - Found and fixed on the way: an f() error could be raised before the earlier items were
+    emitted. It surfaced in 4/20 runs. Errors are now raised at their ordered position (0/30
+    failures afterwards).

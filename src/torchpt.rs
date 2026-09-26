@@ -256,6 +256,24 @@ impl<'a> Loader<'a> {
 
     fn tensor(&mut self, v: &V) -> Result<PtTensor> {
         let V::Tensor { key, offset, shape, stride } = v else { bail!("expected tensor, got {v:?}") };
+        let numel: usize = shape.iter().product();
+        // Fast path: a row-major contiguous view is a plain byte range of its storage (same values
+        // as the generic strided walk below, without the per-element index arithmetic).
+        let mut contiguous = true;
+        let mut expect = 1usize;
+        for d in (0..shape.len()).rev() {
+            if shape[d] != 1 && stride[d] != expect {
+                contiguous = false;
+            }
+            expect *= shape[d];
+        }
+        if contiguous && !self.storages.contains_key(key) {
+            let raw = self.zip.get(&format!("{}data/{key}", self.prefix))?;
+            ensure!(raw.len() % 4 == 0, "storage {key} size not a multiple of 4");
+            let bytes = raw.get(4 * offset..4 * (offset + numel)).with_context(|| format!("tensor view exceeds storage {key}"))?;
+            let data = bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+            return Ok(PtTensor { shape: shape.clone(), data });
+        }
         if !self.storages.contains_key(key) {
             let raw = self.zip.get(&format!("{}data/{key}", self.prefix))?;
             ensure!(raw.len() % 4 == 0, "storage {key} size not a multiple of 4");
@@ -263,7 +281,6 @@ impl<'a> Loader<'a> {
             self.storages.insert(key.clone(), vals);
         }
         let st = &self.storages[key];
-        let numel: usize = shape.iter().product();
         let mut out = Vec::with_capacity(numel);
         let nd = shape.len();
         let mut idx = vec![0usize; nd];

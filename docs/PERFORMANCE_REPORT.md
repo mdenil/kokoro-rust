@@ -66,6 +66,18 @@ Attribution, private chapter.
 - FMA vs strict is within noise at the whole-system level; the GPU kernels are not the only
   bottleneck.
 
+## Phase-1 lever receipts (approximately lossless; details in docs/PERF_LEDGER.md)
+Alice ch.1, sealed interleaved A/B (bench/ab_synth.py; identities, host/GPU state and coverage
+digests per run); warm = resident pass median, cold = process wall. All WAVs are bit-identical to
+before for these host-side levers.
+
+| lever | warm pass | cold process | status |
+|---|---|---|---|
+| PL-006 pipeline (parallel frontend, bounded window; 4 writers; fsync off; concurrent load) | 4.766 → 2.575 s, 1.85× (**provisional**: base cv 51.9% from one outlier; new cv 1.6%) | 9.749 → 5.504 s, 1.77× (cv 0.9% / 4.1%) | KEEP |
+| PL-007 load (ring SHA-256, contiguous .pth fast path) | 2.586 → 2.548 s (neutral) | 5.463 → 4.704 s, 1.16× | KEEP |
+
+Full-chapter checkpoints are pending after the next GPU-side levers.
+
 ## Durability tradeoff (lever L1, fsync)
 From L1 on, `synth` no longer fsyncs each WAV, sidecar and manifest; `--fsync` restores that.
 - Files are still written to `<name>.partial` and atomically renamed, so after a PROCESS crash no
