@@ -170,3 +170,17 @@ fn tagger_negative_controls() {
     assert_eq!(word_shape("C3PO-xyz!"), "XdXX-xxx!");
     assert_eq!(word_shape(&"a".repeat(100)), "LONG");
 }
+
+/// Regression (found by the fuzz corpus): the special-case matcher matches token texts regardless of
+/// the whitespace between them, but spaCy only applies a rule when span.text (WITH internal spaces)
+/// is a rule. ":(" is an emoticon rule; ": (" is not and must stay ":" + "(" with its space.
+#[test]
+fn special_case_spans_respect_internal_whitespace() {
+    let tk = Tokenizer::load(&spacy_dir()).unwrap();
+    let show = |s: &str| -> Vec<(String, bool)> { tk.tokenize(s).into_iter().map(|t| (t.text, t.space)).collect() };
+    let v = |xs: &[(&str, bool)]| xs.iter().map(|(a, b)| (a.to_string(), *b)).collect::<Vec<_>>();
+    assert_eq!(show("sad :( face"), v(&[("sad", true), (":(", true), ("face", false)]));
+    assert_eq!(show("note: (aside)"), v(&[("note", false), (":", true), ("(", false), ("aside", false), (")", false)]));
+    assert_eq!(show("x = (y)"), v(&[("x", true), ("=", true), ("(", false), ("y", false), (")", false)]));
+    assert_eq!(show("'a' 'b'"), v(&[("'", false), ("a", false), ("'", true), ("'", false), ("b", false), ("'", false)]));
+}

@@ -10,7 +10,7 @@ use std::process::Command;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::{Corpus, ALICE, CHAPTER, EDGE, LINKS};
+use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS};
 
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
@@ -494,4 +494,61 @@ fn encode_with_ffmpeg_when_enabled() {
         assert_eq!(sc["encoded_sha256"].as_str().unwrap(), sha256_hex(&flac));
         assert!(d.join(format!("out/enc_{line:05}.wav")).exists());
     }
+}
+
+/// Whole synthetic fuzz corpus (4000 lines) through the binary: every line gets exactly the status
+/// the pinned reference implies — "error" where the reference frontend raises, "oversize" where a
+/// reference chunk exceeds 510 phonemes (production would truncate; we refuse explicitly), "ok"
+/// with reference-identical chunks otherwise; exit code 1 (incomplete) and no helper processes.
+#[test]
+fn fuzz_corpus_through_binary() {
+    let recs = support::load_corpus(&FUZZ).unwrap_or_else(|e| panic!("{e}"));
+    let d = scratch("fuzz");
+    let input = d.join("fuzz.txt");
+    std::fs::write(&input, recs.iter().map(|r| format!("{}\n", r["text"].as_str().unwrap())).collect::<String>()).unwrap();
+    let r = synth(&input, &d.join("out"), &[]);
+    assert_eq!(r.code, 1, "reference-error and oversize lines must make the run incomplete: {}", r.stderr.lines().last().unwrap_or(""));
+    assert_no_helpers(&r);
+    let m = json(&d.join("out/fuzz.manifest.json"));
+    let entries = m["lines"].as_array().unwrap();
+    assert_eq!(entries.len(), FUZZ.lines);
+    let (mut ok, mut err, mut over, mut chunks) = (0, 0, 0, 0);
+    for (i, rec) in recs.iter().enumerate() {
+        let line = i + 1;
+        assert_eq!(entries[i]["line"].as_u64(), Some(line as u64));
+        let sc = json(&d.join(format!("out/fuzz_{line:05}.json")));
+        let want = if rec.get("error").is_some() {
+            "error"
+        } else if rec["chunks"].as_array().unwrap().iter().any(|c| c["oversize"] == true) {
+            "oversize"
+        } else {
+            "ok"
+        };
+        assert_eq!(sc["status"], want, "line {line}: {}", sc["error"]);
+        match want {
+            "ok" => {
+                ok += 1;
+                let exp: Vec<(&str, &str)> = rec["chunks"].as_array().unwrap().iter().map(|c| (c["graphemes"].as_str().unwrap(), c["phonemes"].as_str().unwrap())).collect();
+                let got: Vec<(&str, &str)> = sc["graphemes"].as_array().unwrap().iter().zip(sc["phonemes"].as_array().unwrap()).map(|(g, p)| (g.as_str().unwrap(), p.as_str().unwrap())).collect();
+                assert_eq!(sc["graphemes"].as_array().unwrap().len(), exp.len(), "line {line}: chunk count");
+                assert_eq!(got, exp, "line {line}: chunks differ from the reference");
+                chunks += exp.len();
+                let wav = std::fs::read(d.join(format!("out/fuzz_{line:05}.wav"))).unwrap();
+                assert_eq!(sc["audio_sha256"].as_str().unwrap(), sha256_hex(&wav));
+            }
+            "error" => {
+                err += 1;
+                assert!(sc["error"].as_str().unwrap().contains("TypeError"), "line {line}: {}", sc["error"]);
+                assert!(!d.join(format!("out/fuzz_{line:05}.wav")).exists());
+            }
+            _ => {
+                over += 1;
+                assert!(sc["error"].as_str().unwrap().contains("refusing to truncate"));
+                assert!(!d.join(format!("out/fuzz_{line:05}.wav")).exists());
+            }
+        }
+    }
+    assert_eq!((ok + err + over, err, over), (FUZZ.lines, 1, 2), "pinned status counts");
+    assert_eq!(m["counts"]["failed"], err + over);
+    println!("fuzz through binary: {ok} ok ({chunks} chunks, reference-identical), {err} error (reference TypeError), {over} oversize (refused), exit 1, 1 exec");
 }

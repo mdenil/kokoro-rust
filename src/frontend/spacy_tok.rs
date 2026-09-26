@@ -256,14 +256,22 @@ impl Tokenizer {
         let mut fi = 0;
         while i < doc.len() {
             if fi < filtered.len() && filtered[fi].0 == i {
-                let (s, e, ref key) = filtered[fi];
-                // span.text of doc[s:e] must be the rule key (it is, by construction of the pattern)
-                let final_space = doc[e - 1].space;
-                let mut toks = self.special(key).unwrap_or_else(|| doc[s..e].to_vec());
-                if let Some(last) = toks.last_mut() {
-                    last.space = final_space;
+                let (s, e, _) = filtered[fi];
+                // The PhraseMatcher matches token texts regardless of the whitespace between them;
+                // _retokenize_special_spans then looks the rule up by span.text (WITH internal spaces)
+                // and keeps the original tokens when there is no such rule. The span still counts as
+                // consumed for the overlap filter above.
+                let span_text: String = doc[s..e].iter().enumerate().map(|(k, t)| if t.space && s + k + 1 < e { format!("{} ", t.text) } else { t.text.clone() }).collect();
+                match self.special(&span_text) {
+                    Some(mut toks) => {
+                        let final_space = doc[e - 1].space;
+                        if let Some(last) = toks.last_mut() {
+                            last.space = final_space;
+                        }
+                        out.extend(toks);
+                    }
+                    None => out.extend_from_slice(&doc[s..e]),
                 }
-                out.extend(toks);
                 i = e;
                 fi += 1;
             } else {

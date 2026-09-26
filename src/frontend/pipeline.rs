@@ -247,7 +247,7 @@ impl EnglishFrontend {
             }
         }
         let fb: &dyn Fallback = self.espeak;
-        Ok(g2p_tokens(&self.lex, mts, Some(fb), ""))
+        g2p_tokens(&self.lex, mts, Some(fb), "")
     }
 
     /// KPipeline.__call__ text path for one input line: every non-empty (graphemes, phonemes) chunk,

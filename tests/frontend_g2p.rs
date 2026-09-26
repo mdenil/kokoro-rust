@@ -48,7 +48,7 @@ fn run(c: &Corpus) -> (usize, usize, Vec<String>) {
         let map = r["fallback"].as_array().unwrap().iter().map(|c| (c["text"].as_str().unwrap().to_string(),
             (c["phonemes"].as_str().map(String::from), c["rating"].as_i64().map(|x| x as i32)))).collect();
         let fb = Recorded { map, missing: RefCell::new(vec![]) };
-        let (ps, mut toks) = g2p(&lex, &spacy, Some(&fb), "");
+        let (ps, mut toks) = g2p(&lex, &spacy, Some(&fb), "").unwrap();
         let chunks = en_tokenize(&mut toks);
         let want_chunks: Vec<(String, String)> = r["chunks"].as_array().unwrap().iter().map(|c| (c["graphemes"].as_str().unwrap().into(), c["phonemes"].as_str().unwrap().into())).collect();
         let line = r["line"].as_u64().unwrap();
@@ -111,9 +111,9 @@ fn g2p_negative_controls_are_detected() {
             (c["phonemes"].as_str().map(String::from), c["rating"].as_i64().map(|x| x as i32)))).collect();
         let fb = Recorded { map, missing: RefCell::new(vec![]) };
         let flat: Vec<SpacyToken> = spacy.iter().map(|t| SpacyToken { tag: "NN".into(), ..t.clone() }).collect();
-        tag_diff += (g2p(&us, &flat, Some(&fb), "").0 != want) as usize;
-        nofb_diff += (g2p(&us, &spacy, None, "").0 != want) as usize;
-        gb_diff += (g2p(&gb, &spacy, Some(&fb), "").0 != want) as usize;
+        tag_diff += (g2p(&us, &flat, Some(&fb), "").unwrap().0 != want) as usize;
+        nofb_diff += (g2p(&us, &spacy, None, "").unwrap().0 != want) as usize;
+        gb_diff += (g2p(&gb, &spacy, Some(&fb), "").unwrap().0 != want) as usize;
     }
     assert_eq!(n, 400);
     println!("mismatching lines of 400: flattened tags {tag_diff}, no fallback {nofb_diff}, british lexicon {gb_diff}");

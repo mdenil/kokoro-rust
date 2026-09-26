@@ -84,6 +84,18 @@ pub const CHAPTER: Corpus = Corpus {
     private: true,
 };
 
+/// Synthetic fuzz corpus (bench/make_frontend_fuzz.py, seed 20260926; 4000 lines, 1 reference error).
+pub const FUZZ: Corpus = Corpus {
+    oracle: pin("fixtures/frontend/fuzz.oracle.jsonl", "6096bf1220b15d4d807a017f36f10c24795fb3bfd7dac801a0efd98294b34f25", 4000, true, true),
+    spacy_tokens: None,
+    spacy_seams: None,
+    lines: 4000,
+    chunks: 4388,
+    tokens: 127514,
+    distinct_fallback: 1843,
+    private: false,
+};
+
 /// The prepared private chapter line file (primary workload; owner #8).
 pub const CHAPTER_INPUT: Pin = pin(
     "bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt",

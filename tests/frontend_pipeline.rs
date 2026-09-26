@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::{Corpus, ALICE, CHAPTER, EDGE, LINKS};
+use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS};
 
 fn data() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
@@ -69,6 +69,13 @@ fn native_frontend_matches_reference_public() {
     check(&ALICE);
 }
 
+/// Synthetic fuzz corpus: 4000 generated lines of hard constructs (numbers/currency/abbreviations/
+/// quotes/links/unicode/long lines), incl. one line the reference itself fails on.
+#[test]
+fn native_frontend_matches_reference_fuzz() {
+    check(&FUZZ);
+}
+
 #[test]
 #[ignore = "private chapter (local only)"]
 fn native_frontend_matches_reference_private() {
@@ -105,4 +112,19 @@ fn fixture_validators_reject_damaged_fixtures_private() {
     let input = support::read_pinned_bytes(&support::CHAPTER_INPUT).unwrap();
     assert_eq!(input.iter().filter(|&&b| b == b'\n').count(), support::CHAPTER_INPUT.records);
     println!("private fixtures: pins verified; validator negative controls pass");
+}
+
+/// Regression (found by the fuzz corpus): misaki's `ord(c.lower())` raises TypeError in the reference
+/// when a punctuation-tagged token contains a char whose lowercase is 2 code points (e.g. 'İ') and no
+/// earlier char short-circuited; the reference fails the line, so the native frontend must too.
+#[test]
+fn reference_typeerror_is_reproduced_as_an_error() {
+    let recs = support::load_corpus(&FUZZ).unwrap();
+    let bad: Vec<_> = recs.iter().filter(|r| r.get("error").is_some()).collect();
+    assert_eq!(bad.len(), 1, "pinned: exactly one reference error line in the fuzz corpus");
+    let e = fe().line_chunks(bad[0]["text"].as_str().unwrap()).unwrap_err();
+    assert!(format!("{e:#}").contains("TypeError"), "{e:#}");
+    // same line with İ replaced by I synthesizes fine (the error is specific, not a blanket refusal)
+    let fixed = bad[0]["text"].as_str().unwrap().replace('İ', "I");
+    assert!(fe().line_chunks(&fixed).is_ok());
 }

@@ -94,7 +94,23 @@ fn stress_weight(ps: &str) -> usize {
     ps.chars().map(|c| if "AIOQWYʤʧ".contains(c) { 2 } else { 1 }).sum()
 }
 
-fn retokenize(tokens: &[MToken]) -> Vec<Word> {
+/// misaki `all(97 <= ord(c.lower()) <= 122 for c in text)` with Python's short-circuit: a char whose
+/// lower() is not exactly one code point raises TypeError in the reference (e.g. 'İ' -> 'i̇') unless an
+/// earlier char already made the predicate false. The reference then fails the whole line; so do we.
+fn all_ascii_lower_ord(text: &str) -> anyhow::Result<bool> {
+    for c in text.chars() {
+        let l: Vec<char> = lower(&c.to_string()).chars().collect();
+        if l.len() != 1 {
+            anyhow::bail!("reference misaki raises TypeError here (ord() of {c:?}.lower(), {} code points): line not synthesizable by the pinned frontend", l.len());
+        }
+        if !l[0].is_ascii_lowercase() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn retokenize(tokens: &[MToken]) -> anyhow::Result<Vec<Word>> {
     let mut words: Vec<Word> = vec![];
     let mut currency: Option<String> = None;
     for (i, token) in tokens.iter().enumerate() {
@@ -134,7 +150,7 @@ fn retokenize(tokens: &[MToken]) -> Vec<Word> {
             } else if tk.tag == ":" && (tk.text == "-" || tk.text == "–") {
                 tk.phonemes = Some("—".into());
                 tk.rating = Some(3);
-            } else if PUNCT_TAGS.contains(&tk.tag.as_str()) && !tk.text.chars().all(|c| lower(&c.to_string()).chars().all(|l| l.is_ascii_lowercase())) {
+            } else if PUNCT_TAGS.contains(&tk.tag.as_str()) && !all_ascii_lower_ord(&tk.text)? {
                 tk.phonemes = Some(punct_tag_phonemes(&tk.tag).map(String::from).unwrap_or_else(|| tk.text.chars().filter(|c| PUNCTS.contains(*c)).collect()));
                 tk.rating = Some(4);
             } else if currency.is_some() {
@@ -164,13 +180,13 @@ fn retokenize(tokens: &[MToken]) -> Vec<Word> {
             }
         }
     }
-    words
+    Ok(words
         .into_iter()
         .map(|w| match w {
             Word::Many(mut l) if l.len() == 1 => Word::One(l.pop().unwrap()),
             w => w,
         })
-        .collect()
+        .collect())
 }
 
 fn token_context(ctx: Ctx, ps: Option<&str>, token: &MToken) -> Ctx {
@@ -238,7 +254,7 @@ fn resolve_tokens(tokens: &mut [MToken]) {
 
 /// G2P over one (already preprocessed) text's spaCy tokens. Returns (phoneme string, tokens).
 /// `unk` is the unknown-token phoneme placeholder ('' in production).
-pub fn g2p(lex: &Lexicon, spacy: &[SpacyToken], fallback: Option<&dyn Fallback>, unk: &str) -> (String, Vec<MToken>) {
+pub fn g2p(lex: &Lexicon, spacy: &[SpacyToken], fallback: Option<&dyn Fallback>, unk: &str) -> anyhow::Result<(String, Vec<MToken>)> {
     let toks: Vec<MToken> = spacy
         .iter()
         .map(|t| MToken { text: t.text.clone(), tag: t.tag.clone(), whitespace: t.ws.clone(), is_head: true, ..Default::default() })
@@ -261,9 +277,9 @@ pub fn fold_left(tokens: Vec<MToken>, unk: &str) -> Vec<MToken> {
 }
 
 /// G2P.__call__ from the tokenize() output onwards (fold_left, retokenize, lexicon/fallback, merge).
-pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallback>, unk: &str) -> (String, Vec<MToken>) {
+pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallback>, unk: &str) -> anyhow::Result<(String, Vec<MToken>)> {
     let toks = fold_left(toks, unk);
-    let mut words = retokenize(&toks);
+    let mut words = retokenize(&toks)?;
     let mut ctx = Ctx::default();
     for w in words.iter_mut().rev() {
         match w {
@@ -350,7 +366,7 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
         }
     }
     let result = out.iter().map(|t| format!("{}{}", t.phonemes.as_deref().unwrap_or(unk), t.whitespace)).collect::<String>();
-    (result, out)
+    Ok((result, out))
 }
 
 // ------------------------------------------------------------------ KPipeline chunking

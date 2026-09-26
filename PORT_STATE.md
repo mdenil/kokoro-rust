@@ -52,8 +52,16 @@
    strip) were approximations on Rust's Unicode 16 tables and diverged on thousands of code points.
    They are now exact to the reference Python 3.12.3 (Unicode 15.0) via generated tables, verified
    exhaustively (tests/frontend_pystr.rs).
-4. Frontend coverage is bounded by the corpora: edge 65, links 20, Alice 1402, chapter 316 lines.
-   There is no fuzz/differential run on arbitrary text yet.
+4. PARTLY CLOSED 2026-09-26: a deterministic synthetic fuzz corpus of 4000 hard-construct lines
+   (bench/make_frontend_fuzz.py, seed 20260926; 127,514 tokens, 1,843 distinct fallback calls,
+   143 multi-chunk lines) is differentially tested against the pinned reference.
+   It found 2 real bugs, both fixed:
+   (a) spaCy special-case retokenization ignored the whitespace inside a matched span
+       (`: (` became the emoticon `:(`; 7/4000 lines);
+   (b) the reference misaki raises TypeError on `ord('İ'.lower())` in punctuation-tagged tokens;
+       native silently succeeded, and now fails that line explicitly like production.
+   Result: 4000/4000 exact, plus unit regressions for both. Remaining: coverage is still finite
+   (generated vocabulary, 5 corpora); arbitrary real-world text can still reach untested paths.
 5. Production behaviours deliberately NOT replicated (explicit instead):
    - production truncates chunks over 510 characters; we refuse them (status oversize);
    - production silently skips lines with no phonemes; we record an error.
