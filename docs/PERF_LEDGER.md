@@ -48,3 +48,12 @@ the frozen baseline is not.
     benches; recorded as supporting data only.
 - Admissible so far: production torch CUDA baseline receipts `prod-cuda-20260926-130924` (batch,
   frontend, cold) and `prod-cuda-inference-20260926-131240` (inference, cv 2.9%).
+
+### PL-001 — SineGen excitation noise generated on device (counter-based RNG)   [2026-09-26 | WIN (local)]
+- Lever: `gen_noise` kernel + `RngNoise` counter-based (splitmix64 + f32 Box-Muller), identical
+  integer stream on CPU and GPU. Kill switch: `KOKORO_GPU_HOST_NOISE=1`.
+- Correctness: FixedNoise (parity/fixture) path untouched — `gpu_regression_pinned` 15/15 bitwise.
+  Device vs CPU noise stream max |Δ| 4.8e-7 (80.7% bit-exact; transcendental ulps); E2E product
+  path device-vs-host noise rel 1.5e-6. Noise mean 0.0002 var 0.9999.
+- A/B (quiet host, ABBA n=5, whole-process wall, bench --reps 2, 69 chunks): A 16.877 s (cv 4.99%)
+  → B 12.153 s (cv 2.75%), 1.389×, B faster 5/5. Keep, default on.

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-fn enabled() -> bool {
+pub fn enabled() -> bool {
     static E: OnceLock<bool> = OnceLock::new();
     *E.get_or_init(|| std::env::var("KOKORO_PROFILE").map(|v| v == "1").unwrap_or(false))
 }

@@ -104,3 +104,15 @@ cv%>5 rows are noise. Interleaved same-window stage pairs only.
   PASSES it. The stage-isolated `har_source` seam (gate 1e-4) catches it (rel 1.44e-2).
 - Rule: correctness claims rest on the seam ladder + exact discrete gates; the E2E waveform
   gate is a coarse backstop, never sufficient on its own. F0 ×1.001 is caught by E2E (rel 1.3).
+
+### NE-003 — CUDA conv as im2col + single GEMM (K = Cin·taps)   [2026-09-26 | NEGATIVE(reverted)]
+- Hypothesis: per-tap GEMM accumulation (beta=1, C read-modify-write per tap) was the generator
+  bottleneck (profile: generator 67% of GPU time at ~15-17 TFLOPS f32).
+- Correctness (not bit-identical): all seams PASS; enforced E2E failures 8→6; vs pinned envelope
+  34 metric comparisons better / 26 worse (e.g. s01_hello/am_adam max 0.0088→0.0141); listened
+  case not bitwise → would have required owner escalation. Receipt ladder-gpu-1790427458.json.
+- Speed (quiet host): ABBA n=5 whole-process 14.28 s → 14.71 s (0.97×, B faster 1/5);
+  inference 2.526 s → 2.630 s (receipts evidence/rust/cuda-im2col{0,1}-*.json). LOSS → reverted.
+- Do-not-retry unless: a custom implicit-GEMM kernel (no im2col materialization) or a cuBLASLt
+  epilogue-fused path is available; plain im2col+SGEMM is dead on this shape set.
+- Tally: W0/L1/N0
