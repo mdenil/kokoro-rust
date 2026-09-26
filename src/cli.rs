@@ -103,6 +103,13 @@ enum Cmd {
         /// Blank-line policy (canonical audiobook files contain none).
         #[arg(long, value_enum, default_value = "error")]
         blank_lines: BlankLines,
+        /// BENCHMARK ONLY: after loading once, run 1 warm-up + N timed full passes (frontend, GPU,
+        /// WAV/sidecar/manifest writes) into <out-dir>/pass<k> (fresh dirs, no resume skips).
+        #[arg(long, default_value_t = 0, hide = true)]
+        bench_passes: usize,
+        /// Write raw per-thread stage spans + per-pass summaries (overlap-aware timing) to this JSON.
+        #[arg(long)]
+        timeline: Option<PathBuf>,
     },
     /// Time pure inference over pre-computed phoneme chunks (JSONL with a "phonemes" field).
     Bench {
@@ -269,18 +276,28 @@ fn synth(
     encode: Option<String>,
     force: bool,
     blank_lines: BlankLines,
+    bench_passes: usize,
+    timeline: Option<PathBuf>,
 ) -> Result<i32> {
+    use crate::timeline::{now, Timeline};
+    let tl = Timeline::default();
+    let t_main = now();
     if input_format == InputFormat::Text && frontend == Frontend::None {
         bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
     set_threads(common.threads);
+    let ts = now();
     let inp = read_input(&input)?;
+    tl.push(0, "main", "input_read", ts, inp.lines.len());
     std::fs::create_dir_all(&out_dir)?;
+    let ts = now();
     let t_load = Instant::now();
     let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     let voice_sha = engine.voice(&common.voice)?.sha256.clone();
     let load_s = t_load.elapsed().as_secs_f64();
+    tl.push(0, "main", "model_load", ts, 1);
     eprintln!("loaded model + voice in {load_s:.2}s");
+    let ts = now();
     let t_fe = Instant::now();
     let fe = match (input_format, frontend) {
         (InputFormat::Text, Frontend::Native) => {
@@ -294,6 +311,7 @@ fn synth(
         _ => None,
     };
     let frontend_load_s = t_fe.elapsed().as_secs_f64();
+    tl.push(0, "main", "frontend_load", ts, 1);
     if fe.is_some() {
         eprintln!("loaded native frontend in {frontend_load_s:.2}s");
     }
@@ -310,6 +328,21 @@ fn synth(
         frontend: fe.as_ref().map(|f| f.ident().to_string()).unwrap_or_else(|| "none (phoneme input)".into()),
         sample_rate: SAMPLE_RATE,
     };
+    let npasses = if bench_passes > 0 { bench_passes + 1 } else { 1 };
+    let base_out = out_dir.clone();
+    let mut code = 0;
+    let mut pass_records = vec![];
+    for pass in 0..npasses {
+    let out_dir: PathBuf = if bench_passes > 0 {
+        let d = base_out.join(format!("pass{pass}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d)?;
+        d
+    } else {
+        base_out.clone()
+    };
+    let force = force || bench_passes > 0;
+    let t_pass = now();
     let width = inp.lines.len().max(1).to_string().len().max(5);
     let name = |line: usize, ext: &str| format!("{}_{line:0width$}.{ext}", inp.stem);
     let new_sidecar = |line: usize, text: &str, text_sha: String| Sidecar {
@@ -350,6 +383,7 @@ fn synth(
     let depth = 8;
     let (inp_r, out_r, enc_r, cfg_r) = (&inp, &out_dir, &encode, &cfg);
     let t_all = Instant::now();
+    let tl_r = &tl;
     let (manifest_lines, n_ok, n_skip, n_bad, audio_total) = std::thread::scope(|sc_scope| -> Result<_> {
         let (prep_tx, prep_rx) = std::sync::mpsc::sync_channel::<Job>(depth);
         let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<Out>(depth);
@@ -357,12 +391,14 @@ fn synth(
         let prep = sc_scope.spawn(move || -> Result<()> {
             for (i, text) in inp_r.lines.iter().enumerate() {
                 let line = i + 1;
+                let ts = now();
                 let (wav_path, json_path) = (out_r.join(name(line, "wav")), out_r.join(name(line, "json")));
                 let text_sha = sha256_bytes(text.as_bytes());
                 if !force && resume_ok(&json_path, &wav_path, line, &text_sha, cfg_r) {
                     let sc: Sidecar = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
                     let entry = serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav, "sidecar": name(line, "json"),
                         "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s});
+                    tl_r.push(pass, "prepare", "resume_check", ts, 1);
                     if prep_tx.send(Job::Resumed(line, entry, sc.duration_s)).is_err() {
                         break;
                     }
@@ -412,16 +448,23 @@ fn synth(
                         Job::Final(Box::new(sc))
                     }
                 };
+                tl_r.push(pass, "prepare", "frontend", ts, 1);
+                let ws = now();
                 if prep_tx.send(job).is_err() {
                     break;
                 }
+                tl_r.push(pass, "prepare", "send_wait", ws, 1);
             }
             Ok(())
         });
         let writer = sc_scope.spawn(move || -> Result<(Vec<(usize, serde_json::Value)>, usize, usize, usize, f64)> {
             let (mut n_ok, mut n_skip, mut n_bad, mut audio_total) = (0usize, 0usize, 0usize, 0.0f64);
             let mut entries = vec![];
-            for msg in out_rx {
+            loop {
+                let ws = now();
+                let Ok(msg) = out_rx.recv() else { break };
+                tl_r.push(pass, "writer", "recv_wait", ws, 1);
+                let ts = now();
                 match msg {
                     Out::Resumed(line, e, d) => {
                         n_skip += 1;
@@ -473,6 +516,7 @@ fn synth(
                             "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s, "error": sc.error})));
                     }
                 }
+                tl_r.push(pass, "writer", "write", ts, 1);
             }
             Ok((entries, n_ok, n_skip, n_bad, audio_total))
         });
@@ -490,7 +534,9 @@ fn synth(
                     reqs.push((c.clone(), mix_seed(seed, (sc.line as u64) << 16 | k as u64)));
                 }
             }
+            let ts = now();
             let mut res = engine.synth_batch(&reqs, &common.voice, common.speed, policy).into_iter();
+            tl_r.push(pass, "gpu", "synth", ts, reqs.len());
             for (mut sc, chunks, t0) in pending.drain(..) {
                 let mut audio = vec![];
                 let mut err = None;
@@ -516,13 +562,18 @@ fn synth(
                         Out::Write(sc, None, t0)
                     }
                 };
+                let ws = now();
                 if out_tx.send(msg).is_err() {
                     return false;
                 }
+                tl_r.push(pass, "gpu", "send_wait", ws, 1);
             }
             true
         };
-        for job in prep_rx {
+        loop {
+            let ws = now();
+            let Ok(job) = prep_rx.recv() else { break };
+            tl_r.push(pass, "gpu", "recv_wait", ws, 1);
             let msg = match job {
                 Job::Resumed(line, e, d) => Out::Resumed(line, e, d),
                 Job::Final(sc) => Out::Write(sc, None, Instant::now()),
@@ -540,6 +591,7 @@ fn synth(
                 Job::Synth(mut sc, chunks, t0) => {
                     let mut audio = vec![];
                     let mut err = None;
+                    let ts = now();
                     for (k, c) in chunks.iter().enumerate() {
                         match engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (sc.line as u64) << 16 | k as u64)) {
                             Ok(s) => {
@@ -552,6 +604,7 @@ fn synth(
                             }
                         }
                     }
+                    tl_r.push(pass, "gpu", "synth", ts, chunks.len());
                     match err {
                         None => Out::Write(sc, Some(audio), t0),
                         Some(e) => {
@@ -562,9 +615,11 @@ fn synth(
                     }
                 }
             };
+            let ws = now();
             if out_tx.send(msg).is_err() {
                 break;
             }
+            tl_r.push(pass, "gpu", "send_wait", ws, 1);
         }
         if !pending.is_empty() {
             flush(&mut engine, &mut pending, &out_tx);
@@ -584,7 +639,10 @@ fn synth(
         "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
         "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
     });
+    let ts = now();
     wav::write_atomic(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+    tl.push(pass, "main", "manifest", ts, 1);
+    tl.push(pass, "main", "pass", t_pass, inp.lines.len());
     eprintln!(
         "{} lines: {n_ok} done, {n_skip} resumed/skipped, {n_bad} failed; {audio_total:.1}s audio in {wall:.2}s (RTF {:.4})",
         inp.lines.len(),
@@ -592,9 +650,23 @@ fn synth(
     );
     if !complete {
         eprintln!("INCOMPLETE: {n_bad} line(s) failed; see {}.manifest.json and sidecars", inp.stem);
-        return Ok(1);
+        code = 1;
     }
-    Ok(0)
+    pass_records.push(serde_json::json!({"pass": pass, "warmup": bench_passes > 0 && pass == 0, "out_dir": out_dir,
+        "pass_wall_s": now() - t_pass, "synth_wall_s": wall, "audio_s": audio_total, "complete": complete,
+        "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad}, "timing": tl.summary(pass)}));
+    }
+    if let Some(path) = timeline {
+        let rec = serde_json::json!({
+            "engine": cfg.engine, "frontend": cfg.frontend, "input_file": inp.display, "input_sha256": inp.sha256,
+            "input_lines": inp.lines.len(), "bench_passes": bench_passes,
+            "synthesis": {"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window},
+            "main_entered_s": t_main, "exit_s": now(), "load_s": load_s, "frontend_load_s": frontend_load_s,
+            "passes": pass_records, "spans": tl.spans(),
+        });
+        std::fs::write(&path, serde_json::to_string(&rec)?).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(code)
 }
 
 fn peak_rss_mb() -> f64 {
@@ -683,8 +755,8 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
 /// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
 pub fn cli_main() -> Result<i32> {
     match Cli::parse().cmd {
-        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines } => {
-            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines)
+        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline } => {
+            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline)
         }
         Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out).map(|_| 0),
     }

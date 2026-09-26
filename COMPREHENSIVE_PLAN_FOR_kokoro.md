@@ -151,3 +151,14 @@ Then (owner #16): whole-system performance phase — same prepared chapter file 
 metadata; production system as used vs the complete Rust binary; cold and resident separately; stage
 attribution (startup/load, frontend, scheduling/transfers, GPU, writes/hashes) accounting for overlap.
 Batching/FMA defaults chosen then on measured speed. Tier A/B kernel levers only after that profiling.
+
+### SPEED PHASE (owner #21, 2026-09-26) — supersedes the no-speed hold
+1. Whole-system baseline: `bench/system_compare.py`. Chapter file -> all WAVs + metadata.
+   - production Python (KPipeline per line + WAV writes, unchanged) vs the current native binary;
+   - cold processes and warm resident passes;
+   - overlap-aware stage timing (Rust: per-thread busy intervals in the manifest; Python:
+     sequential per-call timers);
+   - raw per-replicate logs, identities, host state, output coverage.
+   Report it to the owner before the campaign.
+2. Perf ritual on the measured bottleneck: one lever, regression + negative controls, ABBA,
+   keep/revert. Representative subsets while iterating, full chapter at milestones.

@@ -203,3 +203,46 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    PERFORMANCE_REPORT (evidence/ab holds transcribed summaries, not retained raw ABBA output). Preserve
    accepted batching/FMA quality and baseline diagnostics; do not reopen listening or change bounds.
    Record exact commands/results; report remaining concrete correctness gaps.
+21. SPEED PHASE AUTHORIZED (Misha, 1553520469574164483; supersedes the no-speed hold of #15/#20):
+   1) FIRST measure/profile the CURRENT complete native Python-free binary end-to-end:
+      - workload: prepared chapter file -> ALL audio files + metadata;
+      - baseline: the ORIGINAL production Python as actually used, unchanged (no Python
+        optimization or batching, no matched execution strategies);
+      - cold process and warm resident measured separately;
+      - overlap-aware attribution of startup/model load, frontend, scheduling/transfers, GPU, output;
+      - primary workload: the private 316-line chapter (contents never published); public Alice for
+        reproducibility;
+      - keep raw individual replicates, commands, build/input identity, host state and output
+        coverage (not summary-only or filtered logs);
+      - clean comparisons have no contention, no resume skips and no profiler timings.
+   2) Then the skill's perf ritual:
+      - measured bottleneck -> one lever -> focused regression + negative controls -> comparable
+        A/B -> commit keep/revert;
+      - representative subsets for iteration, full chapter at milestones;
+      - batching/FMA authorized; tune Rust to the 4090 including CPU-side work.
+   3) Other terms:
+      - unchanged historical numerical diagnostics are disclosed but are not a reason to idle or
+        restart broad hardening;
+      - speed authorization is NOT blanket listening approval: escalate meaningful NEW degradation
+        or real bugs;
+      - finite coverage, British support and release licensing are not speed blockers;
+      - preserve the native English file contract, the approved libespeak/ffmpeg and the private
+        corpus boundary;
+      - report the current full-system baseline before a long optimization campaign.
+22. KEEP GOING UNTIL SEVERELY DIMINISHING RETURNS (Misha, 1553522797244850308): after the full-system
+   baseline, continue profile-driven optimization autonomously across ALL meaningful bottlenecks (not one
+   small lever and then idle).
+   - Target: chapter-file-to-audio throughput and cold/resident costs on the 4090; the current
+     native binary vs the unchanged incumbent Python.
+   - Keep accepted batching/FMA, regression gates and private-corpus protection.
+   - Method: the skill; targeted subset tests/A-B for iteration, full-system checkpoints, raw
+     receipts, incremental keep/revert commits.
+   - STOPPING CRITERION (diminishing returns treated as evidence): the remaining plausible material
+     levers have been explored; gains are repeatedly marginal or noise-level; or the complexity/risk
+     is disproportionate to a negligible whole-system benefit. Never declare saturation from one
+     failed experiment or an assumed roofline.
+   - At that point report: the best measured configuration, gains vs the incumbent, levers tried or
+     rejected, and residual opportunities.
+   - Escalate only new meaningful quality loss or real blockers.
+   - Do not disturb unrelated host workloads to get quiet measurements: record contention and
+     adapt bounded runs.

@@ -14,6 +14,7 @@ pub mod prof;
 #[allow(unsafe_code)]
 pub mod ops;
 pub mod st;
+pub mod timeline;
 pub mod torchpt;
 pub mod vocoder;
 pub mod wav;

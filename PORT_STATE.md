@@ -1,38 +1,17 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## CURRENT PRIORITY (owner #15/#20, 2026-09-26): completeness + correctness. NO speed work.
-- No speed campaign, lever, headroom analysis or comparative benchmark until the owner resumes speed.
-  The next performance phase (owner #16), when resumed: the whole system, chapter file -> verified WAVs,
-  production system as used vs the complete Rust binary, cold and resident, overlap-aware stage
-  attribution.
-- Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (owner #14),
-  the s02_fox/am_adam listening pair (DISC-003), RB-1 bounds, and the strict baseline as the
-  authoritative regression reference. libespeak-ng 1.52 accepted for now (#19); ffmpeg approved (#18).
-
-## Single-binary milestone: COMPLETE and verified (details + exact commands: docs/conformance/TEST_RECEIPTS.md)
-- `kokoro synth`: prepared line file -> one WAV + JSON sidecar per line plus `<stem>.manifest.json`.
-  - Native frontend by default (misaki 0.9.4 G2P, spaCy en_core_web_sm 3.8.0 tokenizer + tagger,
-    espeak-ng 1.52.0 fallback, KPipeline chunking); GPU model on CUDA:0.
-  - Batched by default (`--batch-phonemes 8000`; 0 = one chunk at a time).
-  - No Python and no subprocesses (strace audit: exactly 1 exec). Dependencies: docs/DEPENDENCIES.md.
-- Component differential tests: all EXACT vs the pinned reference, with fixtures pinned by sha256 and
-  cardinality (tests/support/mod.rs).
-  - Tokenizer: 65 + 1402 + 316 lines.
-  - Features / tok2vec / tagger: tags 0/44,432 mismatches; tensor ≤3.2e-6; logits ≤1.3e-5.
-  - num2words: 37,048 rows.
-  - espeak fallback: 139 distinct calls + 83 synthetic.
-  - misaki logic given oracle tokens: 1,783 lines.
-  - Assembled frontend: 1,803 lines, 1,817 chunks.
-- Integrated binary tests (tests/cli_text_native.rs), passing on strict and FMA builds:
-  - both voices; 98 lines / 111 chunks with pronunciations identical to the reference;
-  - batched vs batch-1 sample counts identical;
-  - long lines 11 / 24 chunks complete;
-  - failures, restart, invalidation; optional ffmpeg `--encode`;
-  - 12 damaged-output + 3 expectation negative controls rejected.
-- Private chapter through the binary: 316/316 lines, 317 chunks, 0 mismatches, both voices, both builds
-  (outputs under evidence/private only).
-- Determinism: repeated identical runs are bit-identical (batch-1 and batched; checked in isolation
-  and while other GPU tests ran). compute-sanitizer initcheck: 0 errors (batched).
+## CURRENT PRIORITY (owner #21, 2026-09-26): SPEED PHASE
+- Step 1 (in progress): whole-system baseline of the CURRENT native binary vs the ORIGINAL production
+  Python as used. Private chapter primary, Alice public. Cold and warm-resident measured separately,
+  with overlap-aware stage attribution and raw per-replicate evidence.
+- Step 2: perf ritual on the measured bottleneck (one lever at a time, regression + negative controls,
+  A/B, keep/revert). Continue across ALL meaningful bottlenecks until severely diminishing returns
+  (owner #22 stopping criterion); then report the best config, gains vs incumbent, tried/rejected
+  levers and residual opportunities. Never disturb other users' jobs; record contention.
+- Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
+  RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
+  must be escalated.
+- libespeak-ng 1.52 accepted (#19); ffmpeg approved (#18). The private corpus stays under /data only.
 
 ## Milestone closeout (2026-09-26, documentation only; awaiting owner direction)
 - Execution logs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/ (README + SHA256SUMS).
