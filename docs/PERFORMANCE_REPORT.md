@@ -18,6 +18,46 @@
 > performance phase is whole-system file→WAVs (owner #16). The numbers below are kept as receipts;
 > none of them is a headline for the current binary.
 
+## WHOLE-SYSTEM BASELINE — current native binary vs ORIGINAL production Python (owner #21; 2026-09-26 ~23:30)
+
+Scope: prepared line file -> ALL per-line WAVs.
+- Rust also writes JSON sidecars, a manifest and SHA-256 hashes (more work than Python).
+- Python: kokoro 0.9.4 `KPipeline(lang_code='a')` per line, concatenated chunks, `soundfile.write`,
+  unchanged (default torch threads = 40, CUDA). Harness: bench/system_reference.py.
+- Rust: tree 6e306b7, default `synth` (native frontend, batched 8000, strict build), plus the
+  owner-accepted FMA build.
+- af_heart, speed 1.0, RTX 4090 (GPU 0).
+- Cold = fresh process per replicate (3 replicates, interleaved across engines).
+- Warm = resident process, 1 untimed warm-up pass + 3 timed passes, ×2 processes.
+- Attribution = separate labelled runs (Python per-call timers; Rust per-thread timeline spans).
+- No resume skips; GPU 0 idle before every run. Host load avg 4–16 from other users (recorded
+  per run; not disturbed).
+- Output coverage verified for every pass (a WAV per line; Rust manifests complete).
+- Raw evidence: every process's stdout/stderr, timelines, identity.json, raw.jsonl, SHA256SUMS.
+  WAVs were hashed, then deleted.
+  - Alice: `/data/mdenil/code/kokoro-rust/evidence/system-baseline/20260926-224902-alice`
+  - private chapter: `/data/mdenil/code/kokoro-rust/evidence/private/system-baseline/20260926-224902-chapter` (private; aggregates only here)
+
+| workload | metric | production Python | Rust strict | Rust FMA | Python / Rust strict |
+|---|---|---|---|---|---|
+| private chapter (316 lines, 2915 s audio) | cold process wall | 67.08 s (cv 8.4%) | 24.47 s (cv 2.8%) | 26.16 s (cv 4.2%) | **2.74×** |
+| private chapter | warm resident pass | 51.12 s (cv 4.9%, n=6) | 19.44 s (cv 3.0%, n=6) | 19.70 s (cv 5.7%) | **2.63×** |
+| Alice ch.1 (65 lines, 656 s audio) | cold process wall | 25.16 s (cv 5.4%) | 9.94 s (cv 6.8%) | 9.91 s (cv 2.4%) | 2.53× |
+| Alice ch.1 | warm resident pass | 8.10 s (cv 7.5%) | 4.70 s (cv 1.7%) | 4.80 s (cv 7.6%) | 1.73× |
+
+Attribution, private chapter.
+- Python warm pass 54.2 s = g2p 1.5 + inference 50.6 (incl. its `.cpu()` sync) + WAV write 1.7
+  + rest. Cold adds import 5.5 s + load 3.2 s.
+- Rust warm pass 19.9 s (timeline spans): the three stages are effectively SERIAL.
+  - frontend 6.4 s on 1 thread; the GPU starves 6.25 s, because the 256-chunk batch window waits
+    for the frontend;
+  - GPU synth 10.1 s;
+  - writer 3.7 s busy, 3.4 s of it as backpressure on the GPU. Two fsyncs per line on ZFS
+    dominate.
+- Rust cold = 0.64 s outside main + model load 4.1 s + frontend load 0.6 s (serial) + pass 19.1 s.
+- FMA vs strict is within noise at the whole-system level; the GPU kernels are not the only
+  bottleneck.
+
 ## Benchmark policy (owner #13)
 Headline = the ORIGINAL pinned production Python usage (kokoro 0.9.4 KPipeline, one line at a time,
 production defaults incl. cuDNN TF32) vs the FASTEST Rust configuration (batching, host parallelism,
