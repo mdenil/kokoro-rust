@@ -94,6 +94,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--scopes", default="frontend,inference,batch,cold")
     ap.add_argument("--cold-child", action="store_true")
+    ap.add_argument("--no-tf32", action="store_true", help="matched full-f32 regime (cuDNN TF32 off); NOT production")
+    ap.add_argument("--chunks", default=None, help="JSONL of phoneme chunks for the inference scope (else derived from corpus)")
     ap.add_argument("--wav-dir", default=None)
     args = ap.parse_args()
     if args.cold_child:
@@ -103,12 +105,14 @@ def main():
     import torch
     from kokoro.pipeline import KPipeline
     torch.set_num_threads(args.threads)
+    if args.no_tf32:
+        torch.backends.cudnn.allow_tf32 = False
     scopes = args.scopes.split(",")
     out = pathlib.Path(args.out or (common.DATA / "evidence/baseline" / time.strftime("%Y%m%d-%H%M%S")))
     out.mkdir(parents=True, exist_ok=True)
     lines = load_corpus(args.corpus)
     import hashlib
-    rec = {"device": args.device, "threads": args.threads, "voice": args.voice, "speed": args.speed,
+    rec = {"device": args.device, "threads": args.threads, "tf32": not args.no_tf32, "voice": args.voice, "speed": args.speed,
            "reps": args.reps, "corpus": args.corpus, "corpus_lines": len(lines),
            "corpus_sha256": hashlib.sha256(pathlib.Path(args.corpus).read_bytes()).hexdigest(),
            "runtime": common.runtime_meta(), "host_before": host_state(), "scopes": {}}
@@ -130,7 +134,10 @@ def main():
         rec["scopes"]["frontend"] = {"total_s": summarize(per_rep)}
 
     # phoneme chunks exactly as production would produce them
-    chunks = [r.phonemes for line in lines for r in quiet(line) if r.phonemes]
+    if args.chunks:
+        chunks = [json.loads(l)["phonemes"] for l in pathlib.Path(args.chunks).read_text(encoding="utf-8").splitlines() if l.strip()]
+    else:
+        chunks = [r.phonemes for line in lines for r in quiet(line) if r.phonemes]
     rec["n_chunks"] = len(chunks)
     rec["chunk_phoneme_lens"] = [len(c) for c in chunks]
 
@@ -208,7 +215,7 @@ def main():
 
     rec["host_after"] = host_state()
     rec["peak_rss_mb_parent"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    path = out / f"reference_{args.device}_t{args.threads}_{args.voice}.json"
+    path = out / f"reference_{args.device}_{'f32' if args.no_tf32 else 'prod'}_t{args.threads}_{args.voice}.json"
     path.write_text(json.dumps(rec, indent=1, default=str))
     s = rec["scopes"]
     print("receipt:", path)
