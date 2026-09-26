@@ -35,7 +35,7 @@ kernels!(
     fill_channels, fill_rows, leaky_relu, add_inplace, div_inplace, residual_scale, chan_stats, adain_apply,
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
-    sine_har_source, stft20, istft_frames, istft_ola,
+    sine_har_source, stft20, istft_frames, istft_ola, gen_noise,
 );
 
 macro_rules! launch {
@@ -714,10 +714,20 @@ impl GpuKokoro {
     fn har(&self, f0c: &Buf, len2n: usize, noise: &mut dyn NoiseSource) -> Result<(Buf, usize)> {
         let g = &self.gpu;
         let s_len = len2n * UPSAMPLE_SCALE;
-        let (rand_ini, sine_noise) = noise.draw(s_len)?;
-        ensure!(sine_noise.len() == s_len * HARMONICS, "noise size");
-        let ri = g.up(&rand_ini)?;
-        let nz = g.up(&sine_noise)?;
+        let host_noise = std::env::var("KOKORO_GPU_HOST_NOISE").map(|v| v == "1").unwrap_or(false);
+        let (ri, nz) = match noise.counter_seed() {
+            Some(seed) if !host_noise => {
+                let mut nz = g.alloc(s_len * HARMONICS)?;
+                let n = (s_len * HARMONICS) as i64;
+                launch!(g, gen_noise, cfg1(s_len * HARMONICS / 2 + 1), &seed, &mut nz, &n)?;
+                (g.up(&vocoder::RngNoise::new(seed).rand_ini())?, nz)
+            }
+            _ => {
+                let (rand_ini, sine_noise) = noise.draw(s_len)?;
+                ensure!(sine_noise.len() == s_len * HARMONICS, "noise size");
+                (g.up(&rand_ini)?, g.up(&sine_noise)?)
+            }
+        };
         let d = (s_len as f64 * (1.0 / UPSAMPLE_SCALE as f64)).floor() as usize;
         let mut pp = g.alloc(HARMONICS * d)?;
         let near = (1.0 / UPSAMPLE_SCALE as f64) as f32;
@@ -822,6 +832,14 @@ impl GpuKokoro {
     }
 
     // ---- stage entry points for oracle seam tests (host in, host out)
+
+    pub fn seam_gen_noise(&self, seed: u64, n: usize) -> Result<Vec<f32>> {
+        let g = &self.gpu;
+        let mut nz = g.alloc(n)?;
+        let ni = n as i64;
+        launch!(g, gen_noise, cfg1(n / 2 + 1), &seed, &mut nz, &ni)?;
+        g.down(&nz)
+    }
 
     pub fn seam_bert(&self, m: &Kokoro, ids: &[i64]) -> Result<Vec<f32>> {
         let g = &self.gpu;

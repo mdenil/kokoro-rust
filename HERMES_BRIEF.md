@@ -43,3 +43,24 @@ Priority: demonstrably correct native Rust model inference, then measured fast i
 
 ## First action
 Load the named skill. Inspect available toolchains/storage and public reference. Write a compact milestone plan with explicit unresolved assumptions, execute the reference oracle and baseline, then implement with tests. Proceed without asking for routine choices: single Kokoro-82M model, existing production revision, CPU float correctness baseline plus RTX 4090 deployment performance as the main optimization target; English/default voices first with other language limitations documented. Ask only on genuine missing authority, semantic ambiguity or blocked resources. Keep all evidence grounded in executed commands.
+
+## OWNER DECISIONS LOG (appended 2026-09-26; newest last; these override earlier text)
+1. GPU-FIRST (Misha): the primary deliverable is a native Rust + CUDA engine on the RTX 4090.
+   CPU is a supporting oracle/debug baseline only: no CPU performance work; CPU-specific waveform
+   differences are documented (never concealed) but are not release blockers for a correctly
+   validated CUDA product. Do not run CPU baseline workloads concurrently with GPU perf evidence.
+2. CORRECTNESS HOLD + BINDING ORIGINAL GATES (Misha, via supervisor): the original precommitted
+   thresholds are binding — per-seam rel ≤ 1e-4; ids/durations/sample counts exact; E2E vs the
+   frozen cpu-t1 fixture: rel-RMS ≤ 0.019, max ≤ 0.033, corr ≥ 0.9995; original spectral gate.
+   G-E2E-v2 (written after initial failures) confers NO acceptance. No widening, per-case
+   relaxation, dropped cases/seams/metrics, baseline substitution, precision change,
+   post-processing or waivers. If a gate is impossible/underspecified: stop and report evidence.
+   History: docs/conformance/TOLERANCE_HISTORY.md.
+3. OWNER LISTENING ACCEPTANCE (Misha, Discord 1553386472906694677): the worst-peak pair
+   s02_fox/am_adam/s1.0 (evidence/listening/, WAV sha256 8aeb4c6c… reference cpu-t1 /
+   aa5de4d4… Rust CUDA) is "indistinguishable ... I am happy with this" → DISC-003. This lifts
+   the performance hold. It is NOT bit identity, NOT an audition of other cases, NOT permission
+   to relax thresholds. Original-gate failures stay truthfully reported; unaccepted failures
+   (DISC-004) remain open and must be escalated, not self-authorized. The owner-approved CUDA
+   baseline is pinned (tests/pinned/gpu_envelope.json; listened case bitwise). New optimizations
+   must not regress it or widen thresholds; any new/worse discrepancy is escalated.

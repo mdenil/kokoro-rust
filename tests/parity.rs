@@ -11,6 +11,9 @@ use kokoro::weights::Weights;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[path = "common_gates.rs"]
+mod common_gates;
+
 fn data_root() -> PathBuf {
     PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
 }
@@ -53,9 +56,14 @@ fn fixtures(device: &str) -> Vec<Fixture> {
         .collect();
     names.sort();
     assert!(!names.is_empty(), "no fixtures in {} — ladder cannot run (NOT a pass)", dir.display());
+    let filter = std::env::var("KOKORO_CASE").ok();
+    let names: Vec<String> = names.into_iter().filter(|n| filter.as_ref().map(|c| n.contains(c.as_str())).unwrap_or(true)).collect();
+    assert!(!names.is_empty(), "case filter {filter:?} selected ZERO fixtures — NOT a pass");
+    if filter.is_none() {
+        assert_eq!(names.len(), EXPECTED_CASES, "fixture set {device} is incomplete");
+    }
     names
         .into_iter()
-        .filter(|n| std::env::var("KOKORO_CASE").map(|c| n.contains(&c)).unwrap_or(true))
         .map(|n| {
             let p = dir.join(&n);
             Fixture {
@@ -138,13 +146,54 @@ fn floors() -> &'static serde_json::Value {
 fn gate_e2e_v2(case: &str, got: &[f32], want: &[f32]) -> Cmp {
     let f = &floors()["cases"][case];
     let (fr, fm) = (f["floor_rel"].as_f64().expect("floor_rel"), f["floor_max"].as_f64().expect("floor_max"));
-    let mut r = compare(case, "E2E waveform [G-v2]", got, want, 2.0 * fr);
+    let mut r = compare(case, "E2E waveform [G-v2 UNAPPROVED diagnostic]", got, want, 2.0 * fr);
     r.pass = r.pass && r.max_abs <= 2.0 * fm && r.corr >= 0.9995;
     r
 }
 
 /// Stage-isolated linear-algebra seam gate (docs/conformance/NONDET_FLOOR.md).
 const SEAM_GATE: f64 = 1e-4;
+
+/// Corpus size: 1+1 (s01) + 6 (s02) + 2 (s03) + 2 (s04) + 2 (s05) + 1 (s06).
+const EXPECTED_CASES: usize = 15;
+
+/// Every case must produce each of these seams (prefix match); missing coverage fails.
+const REQUIRED_SEAMS: &[&str] = &[
+    "bert", "bert_encoder", "dur_enc", "pred_lstm", "duration_proj", "F0_pred", "N_pred", "text_encoder",
+    "decoder.pre_generator", "har_source", "stft.mag", "stft.phase", "generator(oracle in)", "istft(oracle in)",
+    "E2E waveform [G-v1", "E2E spectral",
+];
+
+/// ORIGINAL precommitted E2E gate (NONDET_FLOOR.md, before any subject result): rel ≤ 1.9%,
+/// max ≤ 3.3e-2, corr ≥ 0.9995. This is the ENFORCED E2E gate; no revision is approved.
+fn gate_e2e_v1(case: &str, got: &[f32], want: &[f32]) -> Cmp {
+    let mut r = compare(case, "E2E waveform [G-v1 original, enforced]", got, want, 0.019);
+    r.pass = r.pass && r.max_abs <= 3.3e-2 && r.corr >= 0.9995;
+    r
+}
+
+/// G-SPEC floor: 2 × mean|ΔdB|(reference cpu-t1, reference cpu-t8) on the floor case.
+fn spec_gate() -> f64 {
+    static G: OnceLock<f64> = OnceLock::new();
+    *G.get_or_init(|| {
+        let c = common_gates::FLOOR_CASE;
+        let t1 = st::load(&data_root().join(format!("fixtures/cpu-t1/{c}/fixture.safetensors"))).unwrap()["audio"].f32().unwrap().to_vec();
+        let t8 = st::load(&data_root().join(format!("fixtures/f64/{c}/f64.safetensors"))).expect("run oracle/gen_f64.py")["audio_f32_t8"].f32().unwrap().to_vec();
+        let floor = common_gates::spec_mean_abs_db(&t1, &t8);
+        println!("G-SPEC floor pair (reference cpu-t1 vs cpu-t8, {c}): {floor:.6} dB -> gate {:.6} dB", 2.0 * floor);
+        2.0 * floor
+    })
+}
+
+fn gate_spec(case: &str, got: &[f32], want: &[f32]) -> Cmp {
+    let v = common_gates::spec_mean_abs_db(got, want);
+    let g = spec_gate();
+    Cmp { case: case.into(), seam: "E2E spectral mean|dB| [G-SPEC original, enforced]".into(), n: got.len(), rel_l2: v, max_abs: 0.0, ref_rms: 0.0, corr: f64::NAN, gate: g, pass: v <= g }
+}
+
+fn unapproved(r: &Cmp) -> bool {
+    r.seam.contains("UNAPPROVED")
+}
 
 fn run_ladder(device: &str) -> Vec<Cmp> {
     let m = model();
@@ -217,9 +266,8 @@ fn run_ladder(device: &str) -> Vec<Cmp> {
         assert_eq!(out.pred_dur, fx.i("pred_dur"), "{c}: e2e durations differ");
         let want = fx.f("audio");
         assert_eq!(out.audio.len(), want.len(), "{c}: e2e sample count differs");
-        let mut v1 = compare(c, "E2E waveform [G-v1 info]", &out.audio, &want, 0.019);
-        v1.pass = true; // superseded single-case gate, reported for audit only (NONDET_FLOOR Rev 1)
-        rows.push(v1);
+        rows.push(gate_e2e_v1(c, &out.audio, &want));
+        rows.push(gate_spec(c, &out.audio, &want));
         rows.push(gate_e2e_v2(c, &out.audio, &want));
     }
     rows
@@ -231,7 +279,12 @@ fn report(rows: &[Cmp], tag: &str) {
         println!(
             "{:<34} {:<26} {:>9} {:>10.3e} {:>10.3e} {:>9.6} {:>8}",
             r.case, r.seam, r.n, r.rel_l2, r.max_abs, r.corr,
-            if r.seam.contains("info") { "INFO" } else if r.pass { "PASS" } else { "FAIL" }
+            match (unapproved(r), r.pass) {
+                (true, true) => "diag-ok",
+                (true, false) => "diag-FAIL",
+                (false, true) => "PASS",
+                (false, false) => "FAIL",
+            }
         );
     }
     let dir = data_root().join("evidence/ladder");
@@ -246,7 +299,15 @@ fn report(rows: &[Cmp], tag: &str) {
 fn ladder_cpu_f32() {
     let rows = run_ladder("cpu-t1");
     report(&rows, "ladder-cpu-t1");
-    let fails: Vec<_> = rows.iter().filter(|r| !r.pass).map(|r| format!("{}/{}", r.case, r.seam)).collect();
+    let mut cases: Vec<&str> = rows.iter().map(|r| r.case.as_str()).collect();
+    cases.dedup();
+    for c in &cases {
+        for req in REQUIRED_SEAMS {
+            assert!(rows.iter().any(|r| r.case == *c && r.seam.starts_with(req)), "{c}: required seam {req} missing");
+        }
+    }
+    println!("coverage: {} cases x {} required seams present", cases.len(), REQUIRED_SEAMS.len());
+    let fails: Vec<_> = rows.iter().filter(|r| !r.pass && !unapproved(r)).map(|r| format!("{}/{}", r.case, r.seam)).collect();
     assert!(fails.is_empty(), "{} seam(s) failed: {fails:?}", fails.len());
 }
 

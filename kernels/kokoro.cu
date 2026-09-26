@@ -447,3 +447,25 @@ extern "C" __global__ void istft_ola(const double* fr, int F, float* out, int le
     }
     out[i] = (float)(acc / env);
 }
+
+// ---------------------------------------------------------------- native noise (mirrors vocoder::RngNoise)
+
+__device__ __forceinline__ unsigned long long splitmix_at(unsigned long long seed, unsigned long long ctr) {
+    unsigned long long x = seed + (ctr + 1ULL) * 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+// out[0..n): Gaussian values, pair i -> out[2i], out[2i+1]
+extern "C" __global__ void gen_noise(unsigned long long seed, float* out, long n) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (2 * i >= n) return;
+    unsigned long long x = splitmix_at(seed, 1024ULL + (unsigned long long)i);
+    float u1 = (float)((x >> 40) + 1ULL) * (1.0f / 16777216.0f);
+    float u2 = (float)((x >> 16) & 0xFFFFFFULL) * (1.0f / 16777216.0f);
+    float r = sqrtf(-2.0f * logf(u1));
+    float th = 6.2831855f * u2;
+    out[2 * i] = r * cosf(th);
+    if (2 * i + 1 < n) out[2 * i + 1] = r * sinf(th);
+}

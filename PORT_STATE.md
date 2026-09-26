@@ -1,51 +1,48 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## Where we are
-- Mode: full-port   Phase: 1 (f32 forward, code-first) — Phases −1 and 0 complete.
-- Ladder: none green yet (Rust forward being written)   Ship gate: n/a
-- Next single action: finish `src/vocoder.rs` (Decoder/Generator/SineGen/STFT/iSTFT +
-  NoiseSource), build, then seam tests in pipeline order vs `fixtures/cpu-t1/*` (tests/parity.rs).
+## Where we are (2026-09-26)
+- Deliverable: **native Rust + CUDA on RTX 4090 (GPU-first, owner decision)**. CPU path = oracle/debug baseline.
+- Correctness: **NOT ACCEPTED as a whole.** Binding original gates (HERMES_BRIEF owner log #2).
+  CUDA ladder `ladder-gpu-1790426627`: all 150 stage seams PASS on 15/15 cases; ids/durations/
+  sample counts exact; **8 enforced E2E rows FAIL** (v1 max ×5, G-SPEC ×3).
+  - s02_fox/am_adam/s1.0: **OWNER-ACCEPTED by listening (DISC-003)**.
+  - 7 others: OPEN, unaccepted (DISC-004) — escalate to owner; do not self-authorize.
+  - Attainability evidence: exact-f64 reference passes v1 on 6/15; production torch CUDA 3/15
+    (docs/conformance/TOLERANCE_HISTORY.md #9).
+- Performance: hold lifted by owner listening decision; CUDA optimization RESUMED under the
+  pinned owner-approved envelope (`tests/pinned/gpu_envelope.json`; any regression escalates).
+- Next single action: re-run the device-noise lever A/B on a quiet host (earlier run was contended
+  → invalid), then profile the CUDA forward and continue the one-lever ritual; then the report.
 
 ## Environment (ALWAYS `source scripts/env.sh` first)
-- Data root: /data/mdenil/code/kokoro-rust (hf/, reference/venv-prod, fixtures/, models/, evidence/, tmp/)
-  — relocated 2026-09-26 from retired /data/mdenil/kokoro-rust; see docs/RELOCATION_2026-09-26.md.
-- Cargo target: /home/mdenil/code/kokoro-rust/target (gitignored, real dir). Launch env exported
-  CARGO_TARGET_DIR/HF_HOME/etc. at the retired root — env.sh and .claude/settings.local.json override.
-- Push: origin push URL is SSH (git@github.com:mdenil/kokoro-rust.git); HTTPS has no credential.
-- Shell `grep` is a ugrep wrapper honoring .gitignore (skips the venv); use `command grep`.
+- Data root: /data/mdenil/code/kokoro-rust (relocated; docs/RELOCATION_2026-09-26.md).
+- Cargo target: /home/mdenil/code/kokoro-rust/target. CUDA build: `cargo build --release --features cuda`
+  (nvcc 12.9 → PTX compute_89, -fmad=false). `CUDA_VISIBLE_DEVICES=0` (RTX 4090; never GPU 1).
+- Push via SSH origin. Shell `grep` is a ugrep wrapper honoring .gitignore; use `command grep`.
+- serde_json needs `float_roundtrip` (default parser was 1-ulp lossy — caught by the pin test).
 
-## Pins (docs/truth-pack/PINNED_SOURCES.md + SOURCE_HASHES.md)
-- Model: hexgrad/Kokoro-82M @ f3ff3571791e39611d31c381e3a41a3af07b4987; weights sha256 496dba11…
-- Reference: kokoro==0.9.4 + misaki==0.9.4; torch==2.12.1 (CUDA 13.0); Python 3.12.3 — exact prod pins, asserted in oracle.
-- Production comparison scope: KPipeline('a'), af_heart/am_adam, CUDA:0 RTX 4090, warm resident.
+## Pins
+- Model: hexgrad/Kokoro-82M @ f3ff357…; weights sha256 496dba11…; loaded natively from .pth (bitwise = reference load).
+- Reference: kokoro==0.9.4, misaki==0.9.4, torch==2.12.1 (CUDA 13.0), Python 3.12.3 (exact prod pins).
+- Production comparison scope: KPipeline('a'), af_heart/am_adam, CUDA:0, warm resident.
 
-## Phase gates
-| Phase | Gate artifact | Status |
-|---|---|---|
-| −1 truth pack | OQ register zero-blocking + hashes | DONE (docs/truth-pack/OQ_INDEX.md; OQ-12 frontend-scoped) |
-| 0 oracle | floor envelope + fixture inventory | DONE (docs/conformance/NONDET_FLOOR.md; 15 cases × {cpu-t1, cuda-t1}) |
-| 1 forward | e2e waveform parity + seam table | IN PROGRESS (ops/nn/albert/model written; vocoder next) |
-| 2 quant | (deferred; float first per brief) | — |
-| 3 kernels | selftest battery | not started |
-| 4 perf | ledger rows + baseline receipts | not started |
-| 6 gpu | go/no-go doc (4090 target) | not started |
-| 7 ship | certification bundle | deferred until review |
+## Tests (skip-honest; missing fixtures or empty filters FAIL)
+- `cargo test --release --test parity` — CPU ladder (v1+G-SPEC enforced; v2 = UNAPPROVED diagnostic), f64 truth, perturbations.
+- `cargo test --release --features cuda --test gpu_parity` — CUDA ladder (enforced), device-noise parity,
+  GPU negative controls, `gpu_regression_pinned` (owner-approved baseline).
+- `cargo test --release --test native_load` — .pth/.pt reader bitwise vs reference.
+- Ladders currently FAIL on the enforced E2E rows listed above; that is the truthful state.
 
-## Key facts established
-- 3 RNG draws per forward (rand_ini[1,9], sine noise [1,S,9], unused noise branch [1,S,1]);
-  frozen-noise replay is bit-exact per (device, threads). Free noise moves waveform 9.45% RMS.
-- Floor: cpu-t1 vs cpu-t8 0.93% RMS / 1.65e-2 max; cpu vs cuda (TF32 convs) 5.65% RMS.
-  Gates (frozen): ids/durations/sample count EXACT; wave RMS rel ≤1.9%, max ≤3.3e-2, corr ≥0.9995.
-- ids + durations identical CPU↔CUDA on all 15 fixtures.
-- Subject loads raw_state.safetensors (verbatim weight_g/weight_v) and computes weight-norm itself.
-
-## Open threads
-- Voices are .pt (torch zip pickles) — native Rust reader planned; dev bridge = oracle-exported safetensors.
-- Frontend (misaki G2P) parity tracked SEPARATELY from core phoneme→audio parity (M4).
-- Retire /data/mdenil/kokoro-rust (only live-session tmp/ remains) after this Claude session ends.
+## Measured baselines (receipts under evidence/baseline/)
+- Production torch CUDA, 65-line Alice ch.1 corpus (656.2 s audio): pure inference 6.97 s (cv 2.9%,
+  RTF 0.0106); resident batch 7.41 s; cold process 25.5 s; frontend 0.32 s.
+- torch CPU 8 threads: inference 171.1 s (RTF 0.261). NOTE: that run overlapped with my niced
+  compiles and GPU runs (see PERF_LEDGER) — supporting data only.
+- Rust CUDA timings so far are INVALID as evidence (contended by the concurrent CPU baseline).
 
 ## Session log
-- 2026-09-26 claude: scaffold + truth pack pins/hashes; plan; HF snapshot fetched+hashed; env installed (exact prod pins).
-- 2026-09-26 claude: OWNER CORRECTION — cargo builds in project-local gitignored ./target (verified via cargo metadata + git check-ignore).
-- 2026-09-26 claude: oracle (noise tap, seam recorder, weight export), nondeterminism floor, 32 frozen fixtures; OQs resolved.
-- 2026-09-26 claude: OWNER CORRECTION — data root relocated to /data/mdenil/code/kokoro-rust; 169-file manifest byte-identical; venv shebangs rewritten; bit-exact fixture replay validated.
+- truth pack; oracle + fixtures (15 cases × {cpu-t1, cuda-t1}); OQs resolved.
+- CPU f32 forward, seam ladder; native .pth loader; CLI; production CUDA baseline.
+- CUDA backend (ceef72f) — seams green; E2E judged under v2 (unapproved) → hold.
+- Owner ruling: v1 binding; ladders restored to enforce v1 + G-SPEC (implemented late — was specified
+  originally but missing); attainability evidence; listening pair; owner acceptance of that pair; pin.

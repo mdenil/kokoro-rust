@@ -20,6 +20,11 @@ const SR: f32 = 24000.0;
 /// is zeroed by the model), `sine_noise` is randn [samples, 9] (time-major).
 pub trait NoiseSource {
     fn draw(&mut self, samples: usize) -> Result<([f32; HARMONICS], Vec<f32>)>;
+    /// Seed of a counter-based stream (see `RngNoise`) a device backend may regenerate in place
+    /// instead of drawing on the host; None for replayed noise.
+    fn counter_seed(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Replays recorded draws (parity harness).
@@ -40,61 +45,65 @@ impl NoiseSource for FixedNoise {
     }
 }
 
-/// Native generator: xoshiro256** uniform + Box-Muller normal. Distributionally equivalent to
+/// Counter-based native noise: value i is a pure function of (seed, i), so a GPU backend can
+/// generate the identical integer stream in parallel (kernels/kokoro.cu `gen_noise`).
+/// Uniforms: splitmix64 outputs; normals: f32 Box-Muller. Distributionally equivalent to
 /// torch's draws, not bit-identical (the reference itself is unseeded in production).
 pub struct RngNoise {
-    pub(crate) s: [u64; 4],
+    pub seed: u64,
+}
+
+/// splitmix64 output number `ctr` of the stream starting at `seed`.
+pub fn splitmix_at(seed: u64, ctr: u64) -> u64 {
+    let mut x = seed.wrapping_add(ctr.wrapping_add(1).wrapping_mul(0x9E3779B97F4A7C15));
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x ^ (x >> 31)
+}
+
+/// Counter offset of the Gaussian pairs (counters below it are reserved for rand_ini).
+pub const NOISE_PAIR_BASE: u64 = 1024;
+
+/// Normal pair number `i` (Box-Muller on a 24-bit (0,1] and a 24-bit [0,1) uniform).
+pub fn normal_pair(seed: u64, i: u64) -> (f32, f32) {
+    let x = splitmix_at(seed, NOISE_PAIR_BASE + i);
+    let u1 = ((x >> 40) + 1) as f32 * (1.0 / 16_777_216.0);
+    let u2 = ((x >> 16) & 0xFF_FFFF) as f32 * (1.0 / 16_777_216.0);
+    let r = (-2.0 * u1.ln()).sqrt();
+    let th = 6.283_185_5 * u2;
+    (r * th.cos(), r * th.sin())
 }
 
 impl RngNoise {
     pub fn new(seed: u64) -> Self {
-        let mut z = seed;
-        let mut next = || {
-            z = z.wrapping_add(0x9E3779B97F4A7C15);
-            let mut x = z;
-            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-            x ^ (x >> 31)
-        };
-        Self { s: [next(), next(), next(), next()] }
+        Self { seed }
     }
 
-    fn next_u64(&mut self) -> u64 {
-        let r = self.s[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-        let t = self.s[1] << 17;
-        self.s[2] ^= self.s[0];
-        self.s[3] ^= self.s[1];
-        self.s[1] ^= self.s[2];
-        self.s[0] ^= self.s[3];
-        self.s[2] ^= t;
-        self.s[3] = self.s[3].rotate_left(45);
-        r
-    }
-
-    /// Uniform in [0, 1) with 24 bits of mantissa.
-    fn uniform(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 * (1.0 / (1u64 << 24) as f32)
+    pub fn rand_ini(&self) -> [f32; HARMONICS] {
+        let mut ri = [0.0f32; HARMONICS];
+        for (h, v) in ri.iter_mut().enumerate() {
+            *v = (splitmix_at(self.seed, h as u64) >> 40) as f32 * (1.0 / 16_777_216.0);
+        }
+        ri
     }
 }
 
 impl NoiseSource for RngNoise {
     fn draw(&mut self, samples: usize) -> Result<([f32; HARMONICS], Vec<f32>)> {
-        let mut ri = [0.0f32; HARMONICS];
-        for v in ri.iter_mut() {
-            *v = self.uniform();
-        }
         let n = samples * HARMONICS;
-        let mut out = Vec::with_capacity(n + 1);
-        while out.len() < n {
-            let u1 = (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
-            let u2 = (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
-            let r = (-2.0 * (1.0 - u1).ln()).sqrt();
-            let th = 2.0 * std::f64::consts::PI * u2;
-            out.push((r * th.cos()) as f32);
-            out.push((r * th.sin()) as f32);
+        let mut out = vec![0.0f32; n];
+        for (i, pair) in out.chunks_mut(2).enumerate() {
+            let (a, b) = normal_pair(self.seed, i as u64);
+            pair[0] = a;
+            if pair.len() > 1 {
+                pair[1] = b;
+            }
         }
-        out.truncate(n);
-        Ok((ri, out))
+        Ok((self.rand_ini(), out))
+    }
+
+    fn counter_seed(&self) -> Option<u64> {
+        Some(self.seed)
     }
 }
 

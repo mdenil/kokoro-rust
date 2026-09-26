@@ -49,6 +49,11 @@ struct Common {
     /// Worker threads for the math kernels (0 = library default).
     #[arg(long, default_value_t = 0)]
     threads: usize,
+    #[arg(long, value_enum, default_value = "cpu")]
+    device: crate::engine::Device,
+    /// CUDA device index (after CUDA_VISIBLE_DEVICES).
+    #[arg(long, default_value_t = 0)]
+    cuda_device: usize,
 }
 
 #[derive(Subcommand)]
@@ -236,7 +241,7 @@ fn synth(
     let lines = read_lines(&input)?;
     std::fs::create_dir_all(&out_dir)?;
     let t_load = Instant::now();
-    let mut engine = Engine::load(&common.model_dir)?;
+    let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     let voice_sha = engine.voice(&common.voice)?.sha256.clone();
     eprintln!("loaded model + voice in {:.2}s", t_load.elapsed().as_secs_f64());
     let mut bridge = match (input_format, frontend) {
@@ -384,7 +389,7 @@ fn peak_rss_mb() -> f64 {
 fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> Result<()> {
     set_threads(common.threads);
     let t0 = Instant::now();
-    let mut engine = Engine::load(&common.model_dir)?;
+    let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     engine.voice(&common.voice)?;
     let load_s = t0.elapsed().as_secs_f64();
     let items: Vec<String> = std::fs::read_to_string(&chunks)?
@@ -423,7 +428,7 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
         println!("stage profile (warmup + {reps} reps):\n{prof}");
     }
     let rec = serde_json::json!({
-        "engine": ENGINE_VERSION, "device": "cpu", "threads": common.threads, "voice": common.voice, "speed": common.speed,
+        "engine": ENGINE_VERSION, "device": format!("{:?}", common.device), "threads": common.threads, "voice": common.voice, "speed": common.speed,
         "reps": reps, "chunks_file": chunks, "chunks_sha256": sha256_file(&chunks)?, "n_chunks": items.len(),
         "model_sha256": engine.model_sha256, "load_s": load_s, "total_s": tot, "audio_s": audio_total,
         "rtf_median": tot["median"].as_f64().unwrap() / audio_total, "peak_rss_mb": peak_rss_mb(),

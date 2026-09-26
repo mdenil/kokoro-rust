@@ -19,7 +19,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 matrixmultiply = { version = "0.3.11", features = ["threading"] }
 rayon = "1.12.0"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 sha2 = "0.11.0"
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = ["std", "driver", "cublas", "nvrtc", "cuda-12090", "dynamic-loading"] }
 
@@ -35,3 +35,5 @@ debug = 1
 
 [profile.test]
 opt-level = 3
+
+[dev-dependencies]

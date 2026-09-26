@@ -35,3 +35,16 @@ ratchet-only advance, cv>5% ineligible, posture-mismatch refusal, parity-receipt
 The frozen baseline is hash-pinned core evidence that moves ONLY via an explicit reviewed
 ratchet; run-generated evidence is subject to the certification max-age gate (exemplar: 24h) —
 the frozen baseline is not.
+
+---
+
+## Status notes (2026-09-26)
+- Perf work was BLOCKED ON CORRECTNESS (supervisor hold) and resumed after the owner's listening
+  acceptance (DISC-003), under the pinned owner-approved envelope (tests/pinned/gpu_envelope.json).
+- INVALID / contended measurements (not evidence, kept for honesty):
+  - First Rust CUDA bench (6.29 s) and the device-noise ABBA (A 17.30 s / B 11.80 s, 4/4 B faster)
+    ran while the torch CPU baseline (8 threads) was running → contended; must be re-run quiet.
+  - torch CPU baseline receipt `prod-cpu-20260926-131415` overlapped my niced `-j2` compiles and GPU
+    benches; recorded as supporting data only.
+- Admissible so far: production torch CUDA baseline receipts `prod-cuda-20260926-130924` (batch,
+  frontend, cold) and `prod-cuda-inference-20260926-131240` (inference, cv 2.9%).
