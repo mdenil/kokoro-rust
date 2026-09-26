@@ -35,7 +35,8 @@ kernels!(
     fill_channels, fill_rows, leaky_relu, add_inplace, div_inplace, residual_scale, chan_stats, adain_apply,
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
-    sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq,
+    sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld,
 );
 
 macro_rules! launch {
@@ -140,12 +141,12 @@ impl Gpu {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gemm_batched(&self, ta: bool, tb: bool, m: usize, n: usize, k: usize, a: &Buf, a_off: usize, lda: usize, sa: usize, b: &Buf, ldb: usize, sb: usize, c: &mut Buf, c_off: usize, ldc: usize, sc: usize, batch: usize) -> Result<()> {
+    fn gemm_batched(&self, ta: bool, tb: bool, m: usize, n: usize, k: usize, a: &Buf, a_off: usize, lda: usize, sa: usize, b: &Buf, b_off: usize, ldb: usize, sb: usize, c: &mut Buf, c_off: usize, ldc: usize, sc: usize, batch: usize) -> Result<()> {
         let ext = |off: usize, rows: usize, cols: usize, ld: usize, s: usize| off + (batch - 1) * s + (cols - 1) * ld + rows;
         let (ar, ac) = if ta { (k, m) } else { (m, k) };
         let (br, bc) = if tb { (n, k) } else { (k, n) };
         ensure!(ext(a_off, ar, ac, lda, sa) <= a.len(), "gemm_batched: A out of bounds");
-        ensure!(ext(0, br, bc, ldb, sb) <= b.len(), "gemm_batched: B out of bounds");
+        ensure!(ext(b_off, br, bc, ldb, sb) <= b.len(), "gemm_batched: B out of bounds");
         ensure!(ext(c_off, m, n, ldc, sc) <= c.len(), "gemm_batched: C out of bounds");
         let cfg = StridedBatchedConfig {
             gemm: GemmConfig {
@@ -166,9 +167,10 @@ impl Gpu {
             stride_c: sc as i64,
         };
         let av = a.slice(a_off..);
+        let bv = b.slice(b_off..);
         let mut cv = c.slice_mut(c_off..);
         // SAFETY: operand extents (including the batch stride) checked above.
-        unsafe { self.blas.gemm_strided_batched(cfg, &av, b, &mut cv) }.context("cublas sgemm batched")?;
+        unsafe { self.blas.gemm_strided_batched(cfg, &av, &bv, &mut cv) }.context("cublas sgemm batched")?;
         Ok(())
     }
 
@@ -555,13 +557,13 @@ impl GAlbert {
         let v = self.v.fwd(g, h, t)?;
         let mut scores = g.alloc(HEADS * t * t)?;
         // row-major S_h[i,j] = sum_d Q[i,hd] K[j,hd]  ==  col-major M = Kc^T Qc per head
-        g.gemm_batched(true, false, t, t, HEAD_DIM, &k, 0, HID, HEAD_DIM, &q, HID, HEAD_DIM, &mut scores, 0, t, t * t, HEADS)?;
+        g.gemm_batched(true, false, t, t, HEAD_DIM, &k, 0, HID, HEAD_DIM, &q, 0, HID, HEAD_DIM, &mut scores, 0, t, t * t, HEADS)?;
         let cfg = LaunchConfig { grid_dim: ((HEADS * t) as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         let (ni, scale) = (t as i32, (HEAD_DIM as f32).powf(-0.5));
         launch!(g, softmax_rows, cfg, &mut scores, &ni, &scale)?;
         let mut ctx = g.alloc(t * HID)?;
         // ctx_c[64, T] (ld 768) = Vc[64, T] * P_c   per head
-        g.gemm_batched(false, false, HEAD_DIM, t, t, &v, 0, HID, HEAD_DIM, &scores, t, t * t, &mut ctx, 0, HID, HEAD_DIM, HEADS)?;
+        g.gemm_batched(false, false, HEAD_DIM, t, t, &v, 0, HID, HEAD_DIM, &scores, 0, t, t * t, &mut ctx, 0, HID, HEAD_DIM, HEADS)?;
         let mut a = self.dense.fwd(g, &ctx, t)?;
         g.add(&mut a, h)?;
         Self::ln(g, &mut a, t, HID, &self.attn_ln.0, &self.attn_ln.1, 1e-12)?;
@@ -856,6 +858,12 @@ impl GpuKokoro {
         launch!(g, expand_cols, cfg1(HIDDEN * nf), &t_en, &aln_d, &mut asr, &ci, &ti, &nfi)?;
         g.prof_sync();
         drop(_p);
+        if let Ok(dir) = std::env::var("KOKORO_DEBUG_F0_DIR") {
+            // diagnostics only: dump the F0 curve keyed by the item's ids
+            let key = crate::engine::sha256_bytes(&ids.iter().flat_map(|v| v.to_le_bytes()).chain(ref_s.iter().flat_map(|v| v.to_le_bytes())).chain(speed.to_le_bytes()).collect::<Vec<u8>>());
+            let v: Vec<u8> = g.down(&f0)?.iter().flat_map(|x| x.to_le_bytes()).collect();
+            std::fs::write(std::path::Path::new(&dir).join(format!("single-{}.f32", &key[..16])), v)?;
+        }
         let (x, t2) = {
             let _p = crate::prof::scope("gpu.decoder.pre");
             let r = self.pre_generator(&asr, nf, &f0, &n, &s_dec)?;
@@ -928,3 +936,7 @@ impl GpuKokoro {
         g.down(&self.generator(&g.up(x)?, t, &g.up(s)?, &g.up(har)?, frames)?)
     }
 }
+
+#[path = "gpu_batch.rs"]
+mod batch;
+pub use batch::{BatchItem, ItemNoise};

@@ -135,3 +135,16 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    requirement. Exact waveform identity is not an acceptance criterion; evaluate speed and audio quality.
    Keep functional correctness, text coverage, ordering, line identity/resume and negative controls.
    Document numerical/perceptual trade-offs honestly; never silently widen tolerances to pass.
+12. REPRESENTATIVE SUBSETS (Misha): smaller representative test/benchmark sets may be used when the full
+   chapter makes iteration too slow; favor fast feedback with relevant lengths and edge cases; label
+   subset results accurately (never present them as full-chapter numbers); use broader validation when
+   warranted. Private source content stays out of commits.
+13. HEADLINE BENCHMARK = ORIGINAL PYTHON vs FASTEST RUST (Misha, 1553418452436385864): benchmark the
+   original, pinned production Python usage (unchanged behaviour/settings: KPipeline per line, batch-1,
+   its defaults) against the fastest Rust achievable. No batching/optimization/matched worker budgets
+   for Python; unequal batching and host scheduling are intended, not an unfairness to repair. Same
+   source workload / voice / speed / output contract; document settings and timing scope honestly.
+   Matched-precision diagnostics are optional supporting evidence, not the headline or a blocker. Do not
+   replace the original baseline with optimized Python, and do not imply deployed-wrapper overhead is
+   included when unmeasured. Consult the ai-model-into-rust-mega-fused-hyper-kernel skill for the
+   remaining performance work.

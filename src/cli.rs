@@ -1,6 +1,6 @@
 //! `kokoro` command line: `synth` (narration lines -> WAV + JSON sidecars) and `bench`.
 
-use crate::engine::{mix_seed, sha256_bytes, sha256_file, Engine, MAX_PHONEMES};
+use crate::engine::{mix_seed, sha256_bytes, sha256_file, BatchPolicy, Engine, MAX_PHONEMES};
 use crate::model::SAMPLE_RATE;
 use crate::wav::{self, Format};
 use anyhow::{bail, Context, Result};
@@ -54,6 +54,15 @@ struct Common {
     /// CUDA device index (after CUDA_VISIBLE_DEVICES).
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
+    /// Batched synthesis budget: max phoneme chars per microbatch (0 = one chunk at a time).
+    #[arg(long, default_value_t = 0)]
+    batch_phonemes: usize,
+    /// Max chunks per microbatch.
+    #[arg(long, default_value_t = 64)]
+    batch_items: usize,
+    /// Chunks collected before scheduling batches in `synth` (window for length bucketing).
+    #[arg(long, default_value_t = 256)]
+    batch_window: usize,
 }
 
 #[derive(Subcommand)]
@@ -332,123 +341,263 @@ fn synth(
     };
     let width = inp.lines.len().max(1).to_string().len().max(5);
     let name = |line: usize, ext: &str| format!("{}_{line:0width$}.{ext}", inp.stem);
-    let (mut n_ok, mut n_skip, mut n_bad, mut audio_total) = (0usize, 0usize, 0usize, 0.0f64);
-    let mut manifest_lines = Vec::with_capacity(inp.lines.len());
+    let new_sidecar = |line: usize, text: &str, text_sha: String| Sidecar {
+        line,
+        input_file: inp.display.clone(),
+        input_sha256: inp.sha256.clone(),
+        text: text.to_string(),
+        text_sha256: text_sha,
+        status: "ok".into(),
+        error: None,
+        phonemes: vec![],
+        dropped_phoneme_chars: vec![],
+        config: cfg.clone(),
+        wav: None,
+        audio_sha256: None,
+        samples: 0,
+        duration_s: 0.0,
+        clipped_samples: 0,
+        encoded: None,
+        encoded_sha256: None,
+        elapsed_s: 0.0,
+    };
+
+    // Three pipelined stages (bounded channels, strict per-line identity):
+    //   prepare (resume check, validation, frontend) -> GPU synthesis -> writer (encode, hash,
+    //   atomic writes, sidecar). Host work overlaps GPU work; output order/naming is unchanged.
+    enum Job {
+        Resumed(usize, serde_json::Value, f64),
+        Final(Box<Sidecar>),                       // no synthesis (blank/invalid/oversize/frontend error)
+        Synth(Box<Sidecar>, Vec<String>, Instant), // chunks to synthesize
+    }
+    enum Out {
+        Resumed(usize, serde_json::Value, f64),
+        Write(Box<Sidecar>, Option<Vec<f32>>, Instant),
+    }
+    let depth = 8;
+    let (inp_r, out_r, enc_r, cfg_r) = (&inp, &out_dir, &encode, &cfg);
     let t_all = Instant::now();
-    for (i, text) in inp.lines.iter().enumerate() {
-        let line = i + 1;
-        let (wav_path, json_path) = (out_dir.join(name(line, "wav")), out_dir.join(name(line, "json")));
-        let text_sha = sha256_bytes(text.as_bytes());
-        if !force && resume_ok(&json_path, &wav_path, line, &text_sha, &cfg) {
-            n_skip += 1;
-            let sc: Sidecar = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
-            audio_total += sc.duration_s;
-            manifest_lines.push(serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav, "sidecar": name(line, "json"),
-                "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s}));
-            continue;
-        }
-        let t0 = Instant::now();
-        let mut sc = Sidecar {
-            line,
-            input_file: inp.display.clone(),
-            input_sha256: inp.sha256.clone(),
-            text: text.clone(),
-            text_sha256: text_sha,
-            status: "ok".into(),
-            error: None,
-            phonemes: vec![],
-            dropped_phoneme_chars: vec![],
-            config: cfg.clone(),
-            wav: None,
-            audio_sha256: None,
-            samples: 0,
-            duration_s: 0.0,
-            clipped_samples: 0,
-            encoded: None,
-            encoded_sha256: None,
-            elapsed_s: 0.0,
-        };
-        let result: Result<Option<Vec<f32>>> = (|| {
-            if text.trim().is_empty() {
-                sc.status = "blank".into();
-                if blank_lines == BlankLines::Error {
-                    bail!("blank line (canonical input has none; use --blank-lines skip to allow)");
+    let (manifest_lines, n_ok, n_skip, n_bad, audio_total) = std::thread::scope(|sc_scope| -> Result<_> {
+        let (prep_tx, prep_rx) = std::sync::mpsc::sync_channel::<Job>(depth);
+        let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<Out>(depth);
+        let bridge_ref = &mut bridge;
+        let prep = sc_scope.spawn(move || -> Result<()> {
+            for (i, text) in inp_r.lines.iter().enumerate() {
+                let line = i + 1;
+                let (wav_path, json_path) = (out_r.join(name(line, "wav")), out_r.join(name(line, "json")));
+                let text_sha = sha256_bytes(text.as_bytes());
+                if !force && resume_ok(&json_path, &wav_path, line, &text_sha, cfg_r) {
+                    let sc: Sidecar = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
+                    let entry = serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav, "sidecar": name(line, "json"),
+                        "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s});
+                    if prep_tx.send(Job::Resumed(line, entry, sc.duration_s)).is_err() {
+                        break;
+                    }
+                    continue;
                 }
-                return Ok(None);
-            }
-            if let Some((col, c)) = control_char(text) {
-                sc.status = "invalid".into();
-                bail!("control character U+{:04X} at character {col}", c as u32);
-            }
-            let chunks = match &mut bridge {
-                Some(b) => b.phonemize(text)?,
-                None => vec![text.clone()],
-            };
-            sc.phonemes = chunks.clone();
-            if chunks.is_empty() {
-                sc.status = "error".into();
-                bail!("frontend produced no phonemes for a non-blank line");
-            }
-            if let Some(c) = chunks.iter().find(|c| c.chars().count() > MAX_PHONEMES) {
-                sc.status = "oversize".into();
-                bail!("chunk of {} phoneme chars exceeds {MAX_PHONEMES}; refusing to truncate", c.chars().count());
-            }
-            let mut audio = vec![];
-            for (k, c) in chunks.iter().enumerate() {
-                let s = engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (line as u64) << 16 | k as u64))?;
-                sc.dropped_phoneme_chars.extend(s.dropped.iter().map(|ch| ch.to_string()));
-                audio.extend_from_slice(&s.audio);
-            }
-            Ok(Some(audio))
-        })();
-        match result {
-            Ok(None) => {
-                let _ = std::fs::remove_file(&wav_path);
-            }
-            Ok(Some(audio)) => {
-                let enc = wav::encode(&audio, SAMPLE_RATE as u32, format);
-                wav::write_atomic(&wav_path, &enc.bytes)?;
-                sc.wav = Some(name(line, "wav"));
-                sc.audio_sha256 = Some(sha256_bytes(&enc.bytes));
-                sc.samples = audio.len();
-                sc.duration_s = audio.len() as f64 / SAMPLE_RATE as f64;
-                sc.clipped_samples = enc.clipped;
-                audio_total += sc.duration_s;
-                if let Some(ext) = &encode {
-                    let dst = out_dir.join(name(line, ext));
-                    let st = Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-i"]).arg(&wav_path).arg(&dst).status();
-                    match st {
-                        Ok(s) if s.success() => {
-                            sc.encoded_sha256 = Some(sha256_file(&dst)?);
-                            sc.encoded = Some(name(line, ext));
+                let t0 = Instant::now();
+                let mut sc = new_sidecar(line, text, text_sha);
+                let chunks: Result<Option<Vec<String>>> = (|| {
+                    if text.trim().is_empty() {
+                        sc.status = "blank".into();
+                        if blank_lines == BlankLines::Error {
+                            bail!("blank line (canonical input has none; use --blank-lines skip to allow)");
                         }
-                        other => {
+                        return Ok(None);
+                    }
+                    if let Some((col, c)) = control_char(text) {
+                        sc.status = "invalid".into();
+                        bail!("control character U+{:04X} at character {col}", c as u32);
+                    }
+                    let chunks = match bridge_ref.as_mut() {
+                        Some(b) => b.phonemize(text)?,
+                        None => vec![text.clone()],
+                    };
+                    sc.phonemes = chunks.clone();
+                    if chunks.is_empty() {
+                        sc.status = "error".into();
+                        bail!("frontend produced no phonemes for a non-blank line");
+                    }
+                    if let Some(c) = chunks.iter().find(|c| c.chars().count() > MAX_PHONEMES) {
+                        sc.status = "oversize".into();
+                        bail!("chunk of {} phoneme chars exceeds {MAX_PHONEMES}; refusing to truncate", c.chars().count());
+                    }
+                    Ok(Some(chunks))
+                })();
+                let job = match chunks {
+                    Ok(Some(c)) => Job::Synth(Box::new(sc), c, t0),
+                    Ok(None) => Job::Final(Box::new(sc)),
+                    Err(e) => {
+                        if sc.status == "ok" {
                             sc.status = "error".into();
-                            sc.error = Some(format!("ffmpeg encode failed: {other:?}"));
                         }
+                        sc.error = Some(format!("{e:#}"));
+                        Job::Final(Box::new(sc))
+                    }
+                };
+                if prep_tx.send(job).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        let writer = sc_scope.spawn(move || -> Result<(Vec<(usize, serde_json::Value)>, usize, usize, usize, f64)> {
+            let (mut n_ok, mut n_skip, mut n_bad, mut audio_total) = (0usize, 0usize, 0usize, 0.0f64);
+            let mut entries = vec![];
+            for msg in out_rx {
+                match msg {
+                    Out::Resumed(line, e, d) => {
+                        n_skip += 1;
+                        audio_total += d;
+                        entries.push((line, e));
+                    }
+                    Out::Write(mut sc, audio, t0) => {
+                        let line = sc.line;
+                        let (wav_path, json_path) = (out_r.join(name(line, "wav")), out_r.join(name(line, "json")));
+                        match audio {
+                            Some(audio) => {
+                                let enc = wav::encode(&audio, SAMPLE_RATE as u32, format);
+                                wav::write_atomic(&wav_path, &enc.bytes)?;
+                                sc.wav = Some(name(line, "wav"));
+                                sc.audio_sha256 = Some(sha256_bytes(&enc.bytes));
+                                sc.samples = audio.len();
+                                sc.duration_s = audio.len() as f64 / SAMPLE_RATE as f64;
+                                sc.clipped_samples = enc.clipped;
+                                audio_total += sc.duration_s;
+                                if let Some(ext) = enc_r {
+                                    let dst = out_r.join(name(line, ext));
+                                    let st = Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-i"]).arg(&wav_path).arg(&dst).status();
+                                    match st {
+                                        Ok(s) if s.success() => {
+                                            sc.encoded_sha256 = Some(sha256_file(&dst)?);
+                                            sc.encoded = Some(name(line, ext));
+                                        }
+                                        other => {
+                                            sc.status = "error".into();
+                                            sc.error = Some(format!("ffmpeg encode failed: {other:?}"));
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                let _ = std::fs::remove_file(&wav_path);
+                            }
+                        }
+                        sc.elapsed_s = t0.elapsed().as_secs_f64();
+                        let done = sc.status == "ok" || (sc.status == "blank" && blank_lines == BlankLines::Skip);
+                        if done {
+                            n_ok += 1;
+                        } else {
+                            n_bad += 1;
+                            eprintln!("line {line}: {} — {}", sc.status, sc.error.as_deref().unwrap_or(""));
+                        }
+                        wav::write_atomic(&json_path, serde_json::to_string_pretty(&*sc)?.as_bytes())?;
+                        entries.push((line, serde_json::json!({"line": line, "status": sc.status, "resumed": false, "wav": sc.wav, "sidecar": name(line, "json"),
+                            "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s, "error": sc.error})));
                     }
                 }
             }
-            Err(e) => {
-                if sc.status == "ok" {
-                    sc.status = "error".into();
+            Ok((entries, n_ok, n_skip, n_bad, audio_total))
+        });
+        // GPU stage on this thread (the engine is not shared). With --batch-phonemes > 0, chunks
+        // are collected in a window and synthesized as length-bucketed batches; each line is sent
+        // to the writer only after all of its chunks are joined in order.
+        let policy = BatchPolicy { max_phonemes: common.batch_phonemes, max_items: common.batch_items.max(1) };
+        let batching = common.batch_phonemes > 0;
+        let mut pending: Vec<(Box<Sidecar>, Vec<String>, Instant)> = vec![];
+        let mut pending_chunks = 0usize;
+        let flush = |engine: &mut Engine, pending: &mut Vec<(Box<Sidecar>, Vec<String>, Instant)>, out_tx: &std::sync::mpsc::SyncSender<Out>| -> bool {
+            let mut reqs = vec![];
+            for (sc, chunks, _) in pending.iter() {
+                for (k, c) in chunks.iter().enumerate() {
+                    reqs.push((c.clone(), mix_seed(seed, (sc.line as u64) << 16 | k as u64)));
                 }
-                sc.error = Some(format!("{e:#}"));
-                let _ = std::fs::remove_file(&wav_path);
+            }
+            let mut res = engine.synth_batch(&reqs, &common.voice, common.speed, policy).into_iter();
+            for (mut sc, chunks, t0) in pending.drain(..) {
+                let mut audio = vec![];
+                let mut err = None;
+                for _ in 0..chunks.len() {
+                    match res.next().expect("result per chunk") {
+                        Ok(s) if err.is_none() => {
+                            sc.dropped_phoneme_chars.extend(s.dropped.iter().map(|ch| ch.to_string()));
+                            audio.extend_from_slice(&s.audio);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            if err.is_none() {
+                                err = Some(format!("{e:#}"));
+                            }
+                        }
+                    }
+                }
+                let msg = match err {
+                    None => Out::Write(sc, Some(audio), t0),
+                    Some(e) => {
+                        sc.status = "error".into();
+                        sc.error = Some(e);
+                        Out::Write(sc, None, t0)
+                    }
+                };
+                if out_tx.send(msg).is_err() {
+                    return false;
+                }
+            }
+            true
+        };
+        for job in prep_rx {
+            let msg = match job {
+                Job::Resumed(line, e, d) => Out::Resumed(line, e, d),
+                Job::Final(sc) => Out::Write(sc, None, Instant::now()),
+                Job::Synth(sc, chunks, t0) if batching => {
+                    pending_chunks += chunks.len();
+                    pending.push((sc, chunks, t0));
+                    if pending_chunks >= common.batch_window {
+                        pending_chunks = 0;
+                        if !flush(&mut engine, &mut pending, &out_tx) {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Job::Synth(mut sc, chunks, t0) => {
+                    let mut audio = vec![];
+                    let mut err = None;
+                    for (k, c) in chunks.iter().enumerate() {
+                        match engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (sc.line as u64) << 16 | k as u64)) {
+                            Ok(s) => {
+                                sc.dropped_phoneme_chars.extend(s.dropped.iter().map(|ch| ch.to_string()));
+                                audio.extend_from_slice(&s.audio);
+                            }
+                            Err(e) => {
+                                err = Some(format!("{e:#}"));
+                                break;
+                            }
+                        }
+                    }
+                    match err {
+                        None => Out::Write(sc, Some(audio), t0),
+                        Some(e) => {
+                            sc.status = "error".into();
+                            sc.error = Some(e);
+                            Out::Write(sc, None, t0)
+                        }
+                    }
+                }
+            };
+            if out_tx.send(msg).is_err() {
+                break;
             }
         }
-        sc.elapsed_s = t0.elapsed().as_secs_f64();
-        let done = sc.status == "ok" || (sc.status == "blank" && blank_lines == BlankLines::Skip);
-        if done {
-            n_ok += 1;
-        } else {
-            n_bad += 1;
-            eprintln!("line {line}: {} — {}", sc.status, sc.error.as_deref().unwrap_or(""));
+        if !pending.is_empty() {
+            flush(&mut engine, &mut pending, &out_tx);
         }
-        wav::write_atomic(&json_path, serde_json::to_string_pretty(&sc)?.as_bytes())?;
-        manifest_lines.push(serde_json::json!({"line": line, "status": sc.status, "resumed": false, "wav": sc.wav, "sidecar": name(line, "json"),
-            "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s, "error": sc.error}));
-    }
+        drop(out_tx);
+        prep.join().map_err(|_| anyhow::anyhow!("prepare stage panicked"))??;
+        let (mut entries, n_ok, n_skip, n_bad, audio_total) = writer.join().map_err(|_| anyhow::anyhow!("writer stage panicked"))??;
+        entries.sort_by_key(|e| e.0);
+        Ok((entries.into_iter().map(|e| e.1).collect::<Vec<_>>(), n_ok, n_skip, n_bad, audio_total))
+    })?;
     let wall = t_all.elapsed().as_secs_f64();
     let complete = n_bad == 0;
     let manifest = serde_json::json!({
@@ -490,22 +639,39 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str::<serde_json::Value>(l).map(|v| v["phonemes"].as_str().unwrap_or("").to_string()))
         .collect::<std::result::Result<_, _>>()?;
+    let policy = BatchPolicy { max_phonemes: common.batch_phonemes, max_items: common.batch_items.max(1) };
+    let reqs: Vec<(String, u64)> = items.iter().enumerate().map(|(i, p)| (p.clone(), i as u64)).collect();
     // warmup: one full uncounted pass
     let mut audio_s = vec![0.0f64; items.len()];
-    for (i, p) in items.iter().enumerate() {
-        audio_s[i] = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?.audio.len() as f64 / SAMPLE_RATE as f64;
+    if common.batch_phonemes > 0 {
+        for (i, r) in engine.synth_batch(&reqs, &common.voice, common.speed, policy).into_iter().enumerate() {
+            audio_s[i] = r?.audio.len() as f64 / SAMPLE_RATE as f64;
+        }
+    } else {
+        for (i, p) in items.iter().enumerate() {
+            audio_s[i] = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?.audio.len() as f64 / SAMPLE_RATE as f64;
+        }
     }
     let mut per = vec![vec![]; items.len()];
     let mut totals = vec![];
     for _ in 0..reps {
         let tr = Instant::now();
-        for (i, p) in items.iter().enumerate() {
-            let t = Instant::now();
-            let s = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?;
-            per[i].push(t.elapsed().as_secs_f64());
-            std::hint::black_box(&s.audio);
+        if common.batch_phonemes > 0 {
+            for r in engine.synth_batch(&reqs, &common.voice, common.speed, policy) {
+                std::hint::black_box(&r?.audio);
+            }
+        } else {
+            for (i, p) in items.iter().enumerate() {
+                let t = Instant::now();
+                let s = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?;
+                per[i].push(t.elapsed().as_secs_f64());
+                std::hint::black_box(&s.audio);
+            }
         }
         totals.push(tr.elapsed().as_secs_f64());
+    }
+    if common.batch_phonemes > 0 {
+        per = vec![vec![0.0]; items.len()]; // per-chunk latency is not defined for batched passes
     }
     let stats = |xs: &[f64]| {
         let mut v = xs.to_vec();
@@ -521,7 +687,7 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
         println!("stage profile (warmup + {reps} reps):\n{prof}");
     }
     let rec = serde_json::json!({
-        "engine": ENGINE_VERSION, "device": format!("{:?}", common.device), "threads": common.threads, "voice": common.voice, "speed": common.speed,
+        "engine": ENGINE_VERSION, "device": format!("{:?}", common.device), "threads": common.threads, "batch_policy": if common.batch_phonemes > 0 { serde_json::json!(policy) } else { serde_json::json!("batch-1") }, "voice": common.voice, "speed": common.speed,
         "reps": reps, "chunks_file": chunks, "chunks_sha256": sha256_file(&chunks)?, "n_chunks": items.len(),
         "model_sha256": engine.model_sha256, "load_s": load_s, "total_s": tot, "audio_s": audio_total,
         "rtf_median": tot["median"].as_f64().unwrap() / audio_total, "peak_rss_mb": peak_rss_mb(),

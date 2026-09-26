@@ -509,3 +509,250 @@ extern "C" __global__ void lstm_seq(const float* gx_f, const float* gx_b, const 
         grid.sync();
     }
 }
+
+// ================================================================ B1: ragged batched layout
+// A domain buffer is [C, L]; item b owns columns [seg_start[b], seg_start[b] + seg_len[b]);
+// col_item[t] = item index or -1 for gap columns. See docs/design/BATCHING.md.
+
+// zero every gap column (applied to conv inputs so per-item zero padding is exact)
+extern "C" __global__ void mask_gaps(float* x, const int* col_item, int C, int L) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)C * L) return;
+    if (col_item[i % L] < 0) x[i] = 0.0f;
+}
+
+// per (item, channel) mean / rstd over the item's span (f64 accumulation, as chan_stats).
+// grid (C, B), 256 threads. Output [B, C].
+extern "C" __global__ void chan_stats_seg(const float* x, int L, const int* seg_start, const int* seg_len,
+                                          float eps, float* mean_out, float* rstd_out, int C) {
+    __shared__ double sh[256];
+    int c = blockIdx.x, b = blockIdx.y;
+    const float* row = x + (long)c * L + seg_start[b];
+    int T = seg_len[b];
+    double s = 0.0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) s += (double)row[t];
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
+        __syncthreads();
+    }
+    float mean = (float)(sh[0] / (double)T);
+    __syncthreads();
+    double v = 0.0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+        double d = (double)(row[t] - mean);
+        v += d * d;
+    }
+    sh[threadIdx.x] = v;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        float var = (float)(sh[0] / (double)T);
+        mean_out[b * C + c] = mean;
+        rstd_out[b * C + c] = 1.0f / sqrtf(var + eps);
+    }
+}
+
+// AdaIN apply with per-item statistics and per-item gamma/beta (gb [B, 2C]); gap columns -> 0.
+extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* col_item, const float* mean,
+                                           const float* rstd, const float* nw, const float* nb, const float* gb,
+                                           const float* alpha, int C, int L, int act, float slope) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)C * L) return;
+    int c = (int)(i / L);
+    int b = col_item[i % L];
+    if (b < 0) {
+        y[i] = 0.0f;
+        return;
+    }
+    float v = (x[i] - mean[b * C + c]) * rstd[b * C + c];
+    float g1 = 1.0f + gb[(long)b * 2 * C + c];
+    v = g1 * (v * nw[c] + nb[c]) + gb[(long)b * 2 * C + C + c];
+    if (act == 1) {
+        if (v < 0.0f) v = v * slope;
+    } else if (act == 2) {
+        float a = alpha[c];
+        float inv = 1.0f / a;
+        float sn = sinf(a * v);
+        v = v + inv * (sn * sn);
+    }
+    y[i] = v;
+}
+
+// AdaLayerNorm rows with per-row item index (gb [B, 2d]); gap rows (row_item < 0) -> 0.
+extern "C" __global__ void adaln_rows_seg(float* x, const int* row_item, const float* gb, int d, float eps) {
+    __shared__ double sh[256];
+    int b = row_item[blockIdx.x];
+    float* row = x + (long)blockIdx.x * d;
+    if (b < 0) {
+        for (int j = threadIdx.x; j < d; j += blockDim.x) row[j] = 0.0f;
+        return;
+    }
+    double s = 0.0;
+    for (int j = threadIdx.x; j < d; j += blockDim.x) s += (double)row[j];
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
+        __syncthreads();
+    }
+    float mean = (float)(sh[0] / (double)d);
+    __syncthreads();
+    double v = 0.0;
+    for (int j = threadIdx.x; j < d; j += blockDim.x) {
+        double c = (double)(row[j] - mean);
+        v += c * c;
+    }
+    sh[threadIdx.x] = v;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
+        __syncthreads();
+    }
+    float inv = 1.0f / sqrtf((float)(sh[0] / (double)d) + eps);
+    const float* g = gb + (long)b * 2 * d;
+    for (int j = threadIdx.x; j < d; j += blockDim.x) {
+        float o = (row[j] - mean) * inv;
+        row[j] = (1.0f + g[j]) * o + g[d + j];
+    }
+}
+
+// out [R, d + sd]: row r = concat(x[r], styles[row_item[r]]); gap rows -> 0
+extern "C" __global__ void cat_style_rows_seg(const float* x, const float* styles, const int* row_item, float* out,
+                                              int R, int d, int sd) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    int w = d + sd;
+    if (i >= (long)R * w) return;
+    int r = (int)(i / w), j = (int)(i % w);
+    int b = row_item[r];
+    out[i] = b < 0 ? 0.0f : (j < d ? x[(long)r * d + j] : styles[(long)b * sd + (j - d)]);
+}
+
+// gather rows / cols through a source table (src < 0 -> zeros)
+extern "C" __global__ void gather_rows(const float* src, const int* tab, float* out, int R, int d) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)R * d) return;
+    int s = tab[i / d];
+    out[i] = s < 0 ? 0.0f : src[(long)s * d + (i % d)];
+}
+
+extern "C" __global__ void gather_cols(const float* src, int Ls, const int* tab, float* out, int C, int L) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)C * L) return;
+    int s = tab[i % L];
+    out[i] = s < 0 ? 0.0f : src[(long)(i / L) * Ls + s];
+}
+
+// Batched BiLSTM: one cooperative launch for all items. Items occupy rows
+// [seg_start[b], seg_start[b] + seg_len[b]) of gx/out ([R, 4H] / [R, 2H]); step s processes
+// items with s < len. Same per-item arithmetic as lstm_seq (warp dot order, gate math).
+// hbuf [2][B][2H] (double buffered), c_state [B][2H]. grid (H, 2), 128 threads.
+extern "C" __global__ void lstm_seq_batched(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
+                                            const float* bhh_f, const float* bhh_b, float* hbuf, float* c_state,
+                                            float* out, const int* seg_start, const int* seg_len, int B, int maxT, int H) {
+    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
+    int j = blockIdx.x, dir = blockIdx.y;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const float* gx = dir == 0 ? gx_f : gx_b;
+    const float* whh = dir == 0 ? whh_f : whh_b;
+    const float* bhh = dir == 0 ? bhh_f : bhh_b;
+    __shared__ float gates[4][64];
+    int r = warp * H + j;
+    const float* w = whh + (long)r * H;
+    for (int step = 0; step < maxT; step++) {
+        const float* hcur = hbuf + (long)(step & 1) * B * 2 * H;
+        float* hnxt = hbuf + (long)((step + 1) & 1) * B * 2 * H;
+        for (int b0 = 0; b0 < B; b0 += 64) {
+            int nb = min(64, B - b0);
+            for (int bi = 0; bi < nb; bi++) {
+                int b = b0 + bi;
+                if (step >= seg_len[b]) continue;
+                int t = dir == 0 ? step : seg_len[b] - 1 - step;
+                const float* h = hcur + (long)b * 2 * H + dir * H;
+                float acc = 0.0f;
+                for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
+                for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
+                if (lane == 0) gates[warp][bi] = gx[(long)(seg_start[b] + t) * 4 * H + r] + (acc + bhh[r]);
+            }
+            __syncthreads();
+            for (int bi = threadIdx.x; bi < nb; bi += blockDim.x) {
+                int b = b0 + bi;
+                if (step >= seg_len[b]) continue;
+                int t = dir == 0 ? step : seg_len[b] - 1 - step;
+                float ig = 1.0f / (1.0f + expf(-gates[0][bi]));
+                float fg = 1.0f / (1.0f + expf(-gates[1][bi]));
+                float gg = tanhf(gates[2][bi]);
+                float og = 1.0f / (1.0f + expf(-gates[3][bi]));
+                float c = fg * c_state[(long)b * 2 * H + dir * H + j] + ig * gg;
+                c_state[(long)b * 2 * H + dir * H + j] = c;
+                float hn = og * tanhf(c);
+                hnxt[(long)b * 2 * H + dir * H + j] = hn;
+                out[(long)(seg_start[b] + t) * 2 * H + dir * H + j] = hn;
+            }
+            __syncthreads();
+        }
+        grid.sync();
+    }
+}
+
+// Reflection pad (1,0) per item on the stage-1 layout: out[s] = in[s+1]; out[s+1+j] = in[s+j].
+// Items: seg_start (stage-1 domain), n_in (item length before padding). Other columns -> 0.
+extern "C" __global__ void reflect_pad_left1_seg(const float* x, float* y, const int* col_item, const int* seg_start,
+                                                 int C, int L) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)C * L) return;
+    int o = (int)(i % L);
+    int b = col_item[o];
+    if (b < 0) {
+        y[i] = 0.0f;
+        return;
+    }
+    long row = (i / L) * (long)L;
+    int local = o - seg_start[b];
+    y[i] = local == 0 ? x[row + seg_start[b] + 1] : x[row + o - 1];
+}
+
+// strided variants of the STFT kernels: ld = row stride of the [22, *] spectrum buffer
+extern "C" __global__ void stft20_ld(const float* x, int L, float* out, int F, int ld, const double* tw, const float* c_win) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= F) return;
+    double buf[20];
+    for (int n = 0; n < 20; n++) {
+        int p = f * 5 + n - 10;
+        int src = p < 0 ? -p : (p >= L ? 2 * L - 2 - p : p);
+        buf[n] = (double)(x[src] * c_win[n]);
+    }
+    for (int k = 0; k < 11; k++) {
+        double re = 0.0, im = 0.0;
+        for (int n = 0; n < 20; n++) {
+            re += buf[n] * C_COS(k, n);
+            im -= buf[n] * C_SIN(k, n);
+        }
+        if (k == 0 || k == 10) im = 0.0;
+        float rf = (float)re, imf = (float)im;
+        out[(long)k * ld + f] = hypotf(rf, imf);
+        out[(long)(11 + k) * ld + f] = atan2f(imf, rf);
+    }
+}
+
+extern "C" __global__ void istft_frames_ld(const float* post, int F, int ld, double* fr, const double* tw, const float* c_win) {
+    int f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f >= F) return;
+    double re[11], im[11];
+    for (int k = 0; k < 11; k++) {
+        float m = expf(post[(long)k * ld + f]);
+        float p = sinf(post[(long)(11 + k) * ld + f]);
+        re[k] = (double)(m * cosf(p));
+        im[k] = (double)(m * sinf(p));
+    }
+    for (int n = 0; n < 20; n++) {
+        double v = re[0] + re[10] * ((n % 2 == 0) ? 1.0 : -1.0);
+        for (int k = 1; k < 10; k++) v += 2.0 * (re[k] * C_COS(k, n) - im[k] * C_SIN(k, n));
+        v = v / 20.0;
+        fr[(long)f * 20 + n] = v * (double)c_win[n];
+    }
+}

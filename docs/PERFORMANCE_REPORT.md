@@ -5,6 +5,12 @@
 > all stage seams pass on 15/15 fixture cases; 8 enforced end-to-end original-gate rows fail on the
 > CUDA path (1 owner-accepted by listening, DISC-003; 7 open, DISC-004).
 
+## Benchmark policy (owner #13)
+Headline = the ORIGINAL pinned production Python usage (kokoro 0.9.4 KPipeline, one line at a time,
+production defaults incl. cuDNN TF32) vs the FASTEST Rust configuration (batching, host parallelism,
+fusion, CUDA tuning). Unequal batching / host scheduling is intended. Matched-precision runs are
+supporting diagnostics only. Deployed-wrapper overhead is not measured unless stated.
+
 ## CURRENT CHECKPOINT (2026-09-26)
 
 **Identity.** Rust tree `5581c57` (clean), binary sha256 `3fea4c20…f5a0ae`; reference = production pins

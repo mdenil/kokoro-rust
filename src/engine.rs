@@ -157,3 +157,108 @@ pub fn mix_seed(seed: u64, index: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     z ^ (z >> 31)
 }
+
+/// Batching budget for `synth_batch` (length-bucketed microbatches).
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct BatchPolicy {
+    /// Max total phoneme characters per microbatch (proxy for frames / VRAM).
+    pub max_phonemes: usize,
+    /// Max items per microbatch.
+    pub max_items: usize,
+}
+
+impl Default for BatchPolicy {
+    fn default() -> Self {
+        Self { max_phonemes: 4000, max_items: 64 }
+    }
+}
+
+/// Plan microbatches: sort by phoneme length (length bucketing), then greedily fill each batch up
+/// to the policy budget. Returns batches of indices into `lens`.
+pub fn plan_batches(lens: &[usize], p: BatchPolicy) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lens.len()).collect();
+    order.sort_by_key(|&i| (lens[i], i));
+    let mut out: Vec<Vec<usize>> = vec![];
+    let mut cur = vec![];
+    let mut sum = 0;
+    for i in order {
+        if !cur.is_empty() && (cur.len() >= p.max_items || sum + lens[i] > p.max_phonemes) {
+            out.push(std::mem::take(&mut cur));
+            sum = 0;
+        }
+        sum += lens[i];
+        cur.push(i);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+impl Engine {
+    /// Synthesize many phoneme chunks; results are returned in input order. On the CUDA device the
+    /// chunks run as length-bucketed batches (per-item semantics unchanged; each item keeps its own
+    /// seed-keyed noise stream); a failing batch is split in half down to single items (OOM safety).
+    pub fn synth_batch(&mut self, reqs: &[(String, u64)], voice: &str, speed: f32, policy: BatchPolicy) -> Vec<Result<Synth>> {
+        #[cfg(feature = "cuda")]
+        if self.gpu.is_some() {
+            return self.synth_batch_gpu(reqs, voice, speed, policy);
+        }
+        let _ = policy;
+        reqs.iter().map(|(p, seed)| self.synth_phonemes(p, voice, speed, *seed)).collect()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn synth_batch_gpu(&mut self, reqs: &[(String, u64)], voice: &str, speed: f32, policy: BatchPolicy) -> Vec<Result<Synth>> {
+        let mut results: Vec<Option<Result<Synth>>> = (0..reqs.len()).map(|_| None).collect();
+        // validate + prepare per item (identical rules to synth_phonemes)
+        let mut prepared: Vec<(usize, Vec<i64>, Vec<char>, Vec<f32>)> = vec![];
+        for (i, (p, _)) in reqs.iter().enumerate() {
+            let n = p.chars().count();
+            let r: Result<()> = (|| {
+                if n == 0 {
+                    bail!("empty phoneme string");
+                }
+                if n > MAX_PHONEMES {
+                    bail!("oversize: {n} phoneme chars > {MAX_PHONEMES}");
+                }
+                let (ids, dropped) = self.model.phonemes_to_ids(p);
+                let ref_s = self.voice(voice)?.ref_s(n)?.to_vec();
+                prepared.push((i, ids, dropped, ref_s));
+                Ok(())
+            })();
+            if let Err(e) = r {
+                results[i] = Some(Err(e));
+            }
+        }
+        let lens: Vec<usize> = prepared.iter().map(|x| x.1.len()).collect();
+        let mut stack: Vec<Vec<usize>> = plan_batches(&lens, policy).into_iter().rev().collect();
+        while let Some(batch) = stack.pop() {
+            let items: Vec<crate::gpu::BatchItem> = batch
+                .iter()
+                .map(|&k| {
+                    let (i, ids, _, ref_s) = &prepared[k];
+                    crate::gpu::BatchItem { ids, ref_s, speed, noise: crate::gpu::ItemNoise::Counter(reqs[*i].1) }
+                })
+                .collect();
+            match self.gpu.as_ref().unwrap().forward_batch(&self.model, &items) {
+                Ok(outs) => {
+                    for (&k, o) in batch.iter().zip(outs) {
+                        let (i, _, dropped, _) = &prepared[k];
+                        results[*i] = Some(Ok(Synth { audio: o.audio, pred_dur: o.pred_dur, dropped: dropped.clone() }));
+                    }
+                }
+                Err(e) if batch.len() > 1 => {
+                    let mid = batch.len() / 2;
+                    eprintln!("batch of {} failed ({e:#}); splitting", batch.len());
+                    stack.push(batch[mid..].to_vec());
+                    stack.push(batch[..mid].to_vec());
+                }
+                Err(e) => {
+                    results[prepared[batch[0]].0] = Some(Err(e));
+                }
+            }
+        }
+        results.into_iter().map(|r| r.unwrap_or_else(|| Err(anyhow::anyhow!("internal: missing batch result")))).collect()
+    }
+}
