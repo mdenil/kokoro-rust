@@ -83,6 +83,11 @@ fn drift(a: &[f32], b: &[f32]) -> (f64, f64, f64) {
 /// Returns violations (empty = within bounds) for a batch evaluated against single-item outputs.
 fn check(cs: &[&Case], outs: &[Output], singles: &std::collections::HashMap<String, Output>, bounds: &serde_json::Value, label: &str) -> Vec<String> {
     let mut v = vec![];
+    // cardinality first: never let zip() silently drop a missing or extra output
+    if outs.len() != cs.len() {
+        v.push(format!("{label}: {} outputs for {} inputs", outs.len(), cs.len()));
+        return v;
+    }
     for (c, o) in cs.iter().zip(outs) {
         let s = &singles[&c.name];
         if o.pred_dur != s.pred_dur {
@@ -202,6 +207,7 @@ fn diag_batch_vs_reference() {
     let dir = data().join("fixtures/cpu-t1");
     let all: Vec<&Case> = cases.iter().collect();
     let outs = batch(&m, &gm, &all);
+    assert_eq!(outs.len(), cases.len(), "batched output count");
     let spec_gate = {
         let t1 = st::load(&dir.join("s02_fox__af_heart__s1.0/fixture.safetensors")).unwrap()["audio"].f32().unwrap().to_vec();
         let t8 = st::load(&data().join("fixtures/f64/s02_fox__af_heart__s1.0/f64.safetensors")).unwrap()["audio_f32_t8"].f32().unwrap().to_vec();
@@ -225,6 +231,8 @@ fn diag_batch_vs_reference() {
     for (c, o) in cases.iter().zip(&outs) {
         let want = st::load(&dir.join(&c.name).join("fixture.safetensors")).unwrap()["audio"].f32().unwrap().to_vec();
         let s = single(&m, &gm, c);
+        assert_eq!(o.audio.len(), want.len(), "{}: batched sample count", c.name);
+        assert_eq!(s.audio.len(), want.len(), "{}: single sample count", c.name);
         let (rs, ms, ss) = drift(&s.audio, &want);
         let (rb, mb, sb) = drift(&o.audio, &want);
         let (cs, cb) = (corr(&s.audio, &want), corr(&o.audio, &want));
@@ -266,4 +274,66 @@ fn export_batch_worst_listening() {
     }
     std::fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
     println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
+}
+
+/// Owner listening escalation (owner #11): worst FMA-build peak vs the reference (s03_moon/am_adam).
+/// reference cpu-t1, Rust strict (approved pinned baseline audio), Rust current build (FMA).
+#[test]
+#[ignore = "export for owner listening; run explicitly"]
+fn export_fma_worst_listening() {
+    let (m, gm, cases, _) = setup();
+    let c = cases.iter().find(|c| c.name == "s03_moon__am_adam__s1.0").unwrap();
+    let want = st::load(&data().join("fixtures/cpu-t1").join(&c.name).join("fixture.safetensors")).unwrap()["audio"].f32().unwrap().to_vec();
+    let strict: Vec<f32> = std::fs::read(data().join(format!("evidence/pinned-baseline/{}.f32le", c.name))).unwrap()
+        .chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+    let cur = single(&m, &gm, c);
+    let dir = data().join("evidence/listening/fma-worst-s03_moon_am_adam");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut manifest = serde_json::json!({"case": c.name, "kernel_rounding": kokoro::gpu::KERNEL_ROUNDING,
+        "note": "owner escalation: FMA build peak vs reference 0.054 > accepted 0.046; not an acceptance artifact",
+        "format": "RIFF WAVE IEEE float32 mono 24 kHz, raw"});
+    for (name, audio) in [("reference-cpu-t1", &want), ("rust-cuda-strict-approved", &strict), ("rust-cuda-fma", &cur.audio)] {
+        let enc = kokoro::wav::encode(audio, 24000, kokoro::wav::Format::Float32);
+        std::fs::write(dir.join(format!("{name}.wav")), &enc.bytes).unwrap();
+        let (r, mx, sp) = drift(audio, &want);
+        manifest[name] = serde_json::json!({"sha256": kokoro::engine::sha256_bytes(&enc.bytes), "vs_reference": {"rel": r, "max": mx, "spec_db": sp}});
+    }
+    std::fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+    println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
+}
+
+
+/// Mapping negative controls: the checker must catch a missing output, a duplicated output and a
+/// swapped (misattributed) output — i.e. batch result -> item mapping errors.
+#[test]
+fn batch_mapping_negative_controls_are_detected() {
+    let (m, gm, cases, bounds) = setup();
+    let singles: std::collections::HashMap<String, Output> = cases.iter().map(|c| (c.name.clone(), single(&m, &gm, c))).collect();
+    let three: Vec<&Case> = cases.iter().filter(|c| c.name.ends_with("af_heart__s1.0")).take(3).collect();
+    assert_eq!(three.len(), 3);
+    let _ = &bounds;
+    let outs = batch(&m, &gm, &three);
+    // Mapping is a DISCRETE property: count, per-item durations and sample counts must match the
+    // single-item run exactly (waveform bounds are a separate, escalated question).
+    let mapping = |outs: &[Output]| -> Vec<String> {
+        let mut v = vec![];
+        if outs.len() != three.len() {
+            return vec![format!("{} outputs for {} inputs", outs.len(), three.len())];
+        }
+        for (c, o) in three.iter().zip(outs) {
+            let s = &singles[&c.name];
+            if o.pred_dur != s.pred_dur || o.audio.len() != s.audio.len() {
+                v.push(format!("{}: output does not belong to this item", c.name));
+            }
+        }
+        v
+    };
+    assert!(mapping(&outs).is_empty(), "control mapping must be exact: {:?}", mapping(&outs));
+    let clone = |o: &Output| Output { audio: o.audio.clone(), pred_dur: o.pred_dur.clone() };
+    let missing: Vec<Output> = outs.iter().take(2).map(clone).collect();
+    assert!(!mapping(&missing).is_empty(), "missing output NOT detected");
+    let dup: Vec<Output> = vec![clone(&outs[0]), clone(&outs[0]), clone(&outs[2])];
+    assert!(!mapping(&dup).is_empty(), "duplicate/misassigned output NOT detected");
+    let swapped: Vec<Output> = vec![clone(&outs[1]), clone(&outs[0]), clone(&outs[2])];
+    assert!(!mapping(&swapped).is_empty(), "swapped outputs NOT detected");
 }

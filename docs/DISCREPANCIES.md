@@ -87,7 +87,7 @@ Rules:
 - Receipt `ladder-gpu-1790426627.json`: v1 max FAIL on s02_fox/am_adam/s0.8 (0.0398),
   s03_moon/am_adam (0.0353), s04_alice/am_adam (0.0411), s05_word/am_adam (0.0395); G-SPEC FAIL
   on s02_fox/af_heart/s0.8 (0.147 dB), s03_moon/af_heart (0.143 dB), s06_long/af_heart (0.202 dB)
-  vs gate 0.1395 dB. All 150 stage seams PASS on all 15 cases; ids/durations/sample counts exact.
+  vs gate 0.1395 dB. All 135 stage-seam rows (9 × 15) PASS [corrected from '150']; ids/durations/sample counts exact.
 - Evidence (docs/conformance/TOLERANCE_HISTORY.md #9): exact-f64 reference fails v1 on all 7;
   production torch CUDA fails v1 on 6/7 (passes s05_word/am_adam).
 - Resolution: OPEN — failures stand; escalate to owner (audition or other decision). Not waived.

@@ -756,3 +756,42 @@ extern "C" __global__ void istft_frames_ld(const float* post, int F, int ld, dou
         fr[(long)f * 20 + n] = v * (double)c_win[n];
     }
 }
+
+// Tiled direct Conv1d (PL-004): identical per-output arithmetic order to conv_direct
+// (acc = bias; for k: s = sum_ci w*x (ci ascending); acc += s), but each block stages the input
+// window for 64 consecutive outputs x all Cin in shared memory and computes 16 output channels,
+// so the input is read from DRAM once per block instead of once per output channel.
+// grid (ceil(Tout/64), ceil(Cout/16)), block 64. Requires Cin * ((64-1)*stride + K) <= 12288.
+#define CT_O 64
+#define CT_C 16
+extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, const float* b, float* y,
+                                             int Cin, int T, int Cout, int K, int stride, int pad, int Tout) {
+    extern __shared__ float sh[];
+    int o0 = blockIdx.x * CT_O, co0 = blockIdx.y * CT_C;
+    int win = (CT_O - 1) * stride + K;
+    int base = o0 * stride - pad;
+    for (int i = threadIdx.x; i < Cin * win; i += blockDim.x) {
+        int ci = i / win, j = i % win;
+        int t = base + j;
+        sh[i] = (t >= 0 && t < T) ? x[(long)ci * T + t] : 0.0f;
+    }
+    __syncthreads();
+    int o = o0 + threadIdx.x;
+    if (o >= Tout) return;
+    int ncout = min(CT_C, Cout - co0);
+    float acc[CT_C];
+    for (int c = 0; c < ncout; c++) acc[c] = b ? b[co0 + c] : 0.0f;
+    for (int k = 0; k < K; k++) {
+        int t = o * stride + k - pad;
+        if (t < 0 || t >= T) continue;  // same skip rule as conv_direct
+        int j = threadIdx.x * stride + k;
+        float s[CT_C];
+        for (int c = 0; c < ncout; c++) s[c] = 0.0f;
+        for (int ci = 0; ci < Cin; ci++) {
+            float xv = sh[ci * win + j];
+            for (int c = 0; c < ncout; c++) s[c] = s[c] + w[((long)(co0 + c) * Cin + ci) * K + k] * xv;
+        }
+        for (int c = 0; c < ncout; c++) acc[c] = acc[c] + s[c];
+    }
+    for (int c = 0; c < ncout; c++) y[(long)(co0 + c) * Tout + o] = acc[c];
+}

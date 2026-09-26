@@ -18,6 +18,8 @@ use std::sync::Arc;
 type Buf = CudaSlice<f32>;
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
+/// Kernel rounding mode baked in at build time ("fma" default, or "strict(-fmad=false)").
+pub const KERNEL_ROUNDING: &str = env!("KOKORO_KERNEL_ROUNDING");
 
 macro_rules! kernels {
     ($($name:ident),* $(,)?) => {
@@ -36,7 +38,7 @@ kernels!(
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
-    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled,
 );
 
 macro_rules! launch {
@@ -270,6 +272,23 @@ impl GConv {
         let tout = crate::ops::conv1d_out_len(t, self.k, self.stride, self.pad, self.dil);
         let mut y = g.alloc(self.cout * tout)?;
         let null = 0u64;
+        let win = (64 - 1) * self.stride + self.k;
+        let tiled_ok = self.dil == 1 && self.cin * win <= 12288;
+        if self.direct && tiled_ok && std::env::var("KOKORO_CONV_TILED").map(|v| v != "0").unwrap_or(true) {
+            // LEVER PL-004 (kill switch KOKORO_CONV_TILED=0): same arithmetic order, shared-memory tile
+            let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];
+            let cfg = LaunchConfig {
+                grid_dim: (tout.div_ceil(64) as u32, self.cout.div_ceil(16) as u32, 1),
+                block_dim: (64, 1, 1),
+                shared_mem_bytes: (self.cin * win * 4) as u32,
+            };
+            let null = 0u64;
+            match &self.b {
+                Some(b) => launch!(g, conv_direct_tiled, cfg, x, &self.wt, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
+                None => launch!(g, conv_direct_tiled, cfg, x, &self.wt, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
+            }
+            return Ok((y, tout));
+        }
         if self.direct {
             let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];
             match &self.b {

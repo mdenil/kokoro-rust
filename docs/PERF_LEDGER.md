@@ -65,3 +65,31 @@ the frozen baseline is not.
   acceptance requirement per owner clarification 1553392534095527999).
 - A/B (quiet host, ABBA n=5, whole process, bench --reps 3): 14.102 s → 13.818 s (1.021×, B faster
   4/5, cv 2.2%/2.0%); inference receipts 2.541 s → 2.477 s (evidence/rust/cuda-lstmpersist{0,1}-*.json). Keep.
+
+### PL-003 — B1 batched forward (length-bucketed, ragged gap layout)   [2026-09-26 | PROVISIONAL, opt-in]
+- `--batch-phonemes N --batch-items M` (default 0 = batch-1). Exploratory (Alice 69 chunks, in-process
+  pass): before PL-004 batching was 2.40–2.78 s vs batch-1 2.465 s (bigger batches SLOWER: naive
+  conv_direct lost L2 reuse, 0.17 → 0.57 s/pass); after PL-004: 2.30–2.32 s vs 2.43 s (~5%).
+- Correctness: masking/noise/style negative controls detected; F0 batch-vs-single rel ≤ 1.6e-6
+  (reorder level); waveform drift exceeds RB-1 on several cases (phase amplification); distance to
+  the reference equivalent to batch-1 (mean rel .0121 vs .0118; binding-gate fails 5/15 vs 8/15);
+  worst peak s04_alice/am_adam 0.041 → 0.071 vs reference ESCALATED to owner (listening triple in
+  evidence/listening/batch-worst-s04_alice_am_adam). Stays opt-in until the owner hears it.
+
+### PL-004 — tiled direct conv (shared-memory input window, 16 out-channels per block)   [2026-09-26 | WIN]
+- Same per-output arithmetic order as conv_direct → BITWISE identical (gpu_regression_bounded 15/15).
+  Kill switch `KOKORO_CONV_TILED=0`.
+- ABBA n=5 whole process: batch-1 14.01 → 14.06 s (0.997×, 2/5: neutral); batched(8000) 15.19 → 13.70 s
+  (1.109×, 5/5, cv 2.9%/0.5%). Keep (enables batching; neutral single-item).
+
+### PL-005 — FMA contraction in CUDA kernels (drop -fmad=false; owner #11)   [2026-09-26 | speed WIN; quality PROVISIONAL; opt-in]
+- Opt-in build `KOKORO_FMA=1` (default stays strict -fmad=false, the owner-accepted baseline). Engine identity
+  records the rounding mode (`cuda f32 kernels=fma|strict`), so resume never mixes builds.
+- Quality: all 135 GPU stage-seam rows pass; mean distance to the reference similar (rel .0123 vs
+  .0118, spectral .096 vs .090 dB). Binding-gate FAILURE SET CHANGED (count 8 → 8 rows): s03_moon/
+  am_adam G-SPEC NEWLY FAILS; s05_word/am_adam v1 resolves (ladder-gpu-1790435169 vs -1790426627).
+  Authoritative RB-1 vs the owner-accepted strict baseline FAILS: 9 drift violations + the new
+  (s03_moon/am_adam, G-SPEC) failure. Worst peak s03_moon/am_adam 0.0542 vs strict 0.0353
+  (rel .0198 vs .0149) → listening triple evidence/listening/fma-worst-s03_moon_am_adam, ESCALATED.
+  A separate FMA snapshot exists only as a labelled PROVISIONAL diagnostic (never parity/approval).
+- Speed: ABBA n=5 whole process 13.948 → 13.730 s (1.016×, 5/5); batched in-process 2.318 → 2.285 s.

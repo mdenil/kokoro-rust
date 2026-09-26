@@ -101,6 +101,17 @@ impl Engine {
         })
     }
 
+    /// Numerical identity of this engine instance (part of output provenance / resume keys).
+    pub fn identity(&self) -> String {
+        match self.device {
+            Device::Cpu => "cpu f32".into(),
+            #[cfg(feature = "cuda")]
+            Device::Cuda => format!("cuda f32 kernels={}", crate::gpu::KERNEL_ROUNDING),
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda => "cuda (unavailable)".into(),
+        }
+    }
+
     /// Voice by name (voices/<name>.pt), explicit .pt path, or comma-separated mean of several
     /// (reference: torch.mean(torch.stack(packs), dim=0), pipeline.py:166).
     pub fn voice(&mut self, spec: &str) -> Result<&Voice> {

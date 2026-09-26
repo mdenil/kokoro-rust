@@ -56,7 +56,7 @@ Not measured: the deployed openclaw wrapper's own overhead.
 
 ### Where the Rust time goes (nsys, current tree, per 69-chunk pass; profiled pass 2.674 s)
 
-GPU kernel time 2.324 s + memcpy 0.061 s ≈ 97% of the unprofiled 2.462 s wall (88 k launches/pass):
+Summed kernel durations 2.324 s + memcpy 0.061 s per pass in the PROFILED run (88 k launches/pass). [Corrected: an earlier version divided these by the wall time of a different, unprofiled run to claim "≈97% busy"; that comparison is invalid and was removed.]
 cuBLAS SGEMM 1.466 s (63%; almost all generator convolutions issued as one GEMM per tap) ·
 `lstm_seq` 0.234 s (10%; 82,132 sequential steps/pass ≈ 2.85 µs/step) · `conv_direct` 0.173 s (7%;
 the stride-6 noise conv, naive kernel) · `chan_stats` 0.165 s (7%; AdaIN statistics, one block per
@@ -73,7 +73,7 @@ went to DRAM; the measured 1.47 s is consistent, with L2 absorbing part of it). 
 why im2col (NE-003, which materializes the same bytes) did not help.
 
 Theoretical bounds (warm core; NOT expected to be reached):
-- Amdahl on removable host/launch idle: GPU busy ≈ 97% → removing all idle gives ≤ ~1.03×.
+- (Removed: an Amdahl bound on host/launch idle derived from summed profiled kernel durations vs a different unprofiled wall. GPU idle fraction is UNMEASURED; a trace-timeline busy/idle measurement is needed before any such bound.)
 - Compute roofline, full f32 on CUDA cores (assumptions: 128 SMs × 128 FP32 lanes × 2 × ~2.7 GHz
   observed SM clock ≈ 88 TFLOP/s, 100% efficiency, FLOP model exact, elementwise/LSTM free):
   ≥ 0.41 s → ≤ ~6× over current Rust, ≤ ~17× over the production reference. Adding the sequential
@@ -96,6 +96,29 @@ hydrated weights / skip or cache hashing), which would put native-phoneme cold r
 text path stays bridge-bound (~7 s) until a native G2P exists, a large separate task (misaki parity).
 Warm-core gains above translate to end-to-end only through the synth-loop share (≈ 3–4 s here).
 
+
+## Private chapter baseline (aggregate numbers only; completed 2026-09-26 15:40)
+
+Workload: the approved private chapter (316 lines, sha256 8129112a…; text never in Git), 317 chunks,
+phoneme lengths min 14 / median 134 / p90 280 / max 501, one line split into 2 chunks. Evidence:
+/data/mdenil/code/kokoro-rust/evidence/private/chapter-baseline/20260926-145712/ (private).
+Rust = strict (-fmad=false) build, batch-1, pre-PL-004 — i.e. BEFORE the later levers.
+
+| scope | production Python (unchanged, TF32) | torch full-f32 (diag) | Rust CUDA | production / Rust |
+|---|---|---|---|---|
+| warm core, af_heart (2915 s audio) | 50.17 s (cv 4.7%, n=3) | 46.89 s | 10.95 s (cv 1.0%) | 4.58× |
+| warm core, am_adam (2837 s) | 49.01 s (cv 10.5%, n=2 → provisional) | 46.75 s | 10.71 s (cv 0.5%) | 4.58× (provisional) |
+| cold file → 316 WAVs, af_heart | 65.66 s (import 5.82 + load 3.16 + synth/write 55.40) | — | 30.28 s with the DEV-ONLY Python G2P bridge (bridge startup ≈6.3 s, G2P 1.3 s) | 2.17× |
+| cold, pre-phonemized chunks (NOT text→WAV) | — | — | 21.12 s (317 WAVs) | — |
+
+Scope: "production Python" = pinned kokoro 0.9.4 KPipeline through bench/bench_reference.py (the
+library path production uses), NOT the deployed openclaw wrapper. Rust's total audio (2915.025 s)
+equals full-f32 torch exactly; production TF32 is 0.05 s longer (duration differences somewhere).
+
+## Lever receipts after the checkpoint (Alice 69 chunks, public; exploratory subset per owner #12)
+Raw ABBA outputs: evidence/ab/ (see PERF_LEDGER PL-001..005). In-process pass (bench --reps 3):
+batch-1 strict 2.465 s → +PL-004 tiled conv 2.426 s → batched(8000)+PL-004 2.298 s → +FMA (opt-in,
+provisional) 2.285 s. Batching and FMA are opt-in pending owner listening (quality provisional).
 
 ## Method (applies to the checkpoint)
 

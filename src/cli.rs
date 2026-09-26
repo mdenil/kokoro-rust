@@ -327,7 +327,7 @@ fn synth(
         _ => None,
     };
     let cfg = Config {
-        engine: ENGINE_VERSION.into(),
+        engine: format!("{ENGINE_VERSION} [{}]", engine.identity()),
         model_sha256: engine.model_sha256.clone(),
         config_sha256: engine.config_sha256.clone(),
         voice: common.voice.clone(),
@@ -687,7 +687,7 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
         println!("stage profile (warmup + {reps} reps):\n{prof}");
     }
     let rec = serde_json::json!({
-        "engine": ENGINE_VERSION, "device": format!("{:?}", common.device), "threads": common.threads, "batch_policy": if common.batch_phonemes > 0 { serde_json::json!(policy) } else { serde_json::json!("batch-1") }, "voice": common.voice, "speed": common.speed,
+        "engine": format!("{ENGINE_VERSION} [{}]", engine.identity()), "device": format!("{:?}", common.device), "threads": common.threads, "batch_policy": if common.batch_phonemes > 0 { serde_json::json!(policy) } else { serde_json::json!("batch-1") }, "voice": common.voice, "speed": common.speed,
         "reps": reps, "chunks_file": chunks, "chunks_sha256": sha256_file(&chunks)?, "n_chunks": items.len(),
         "model_sha256": engine.model_sha256, "load_s": load_s, "total_s": tot, "audio_s": audio_total,
         "rtf_median": tot["median"].as_f64().unwrap() / audio_total, "peak_rss_mb": peak_rss_mb(),

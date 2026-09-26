@@ -294,19 +294,60 @@ fn read_f32_wav(p: &std::path::Path) -> Vec<f32> {
 /// Per case, a candidate CUDA output may drift from the approved baseline output by at most
 ///   min(reference arithmetic sensitivity of that case, owner-accepted listened divergence)
 /// on rel-L2, max|Δ| and spectral mean|ΔdB|; discrete outputs exact; the set of cases failing the
-/// binding original gates (v1 / G-SPEC) may not grow. Bit identity is reported, never required.
+/// binding original gates may not gain any (case, gate) pair. Bit identity is reported, never required.
 /// One-time setup: KOKORO_PIN_BOUNDS=1 (refuses to overwrite).
 #[test]
 fn gpu_regression_bounded() {
     use sha2::{Digest, Sha256};
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/pinned");
-    let (pin_path, bounds_path) = (root.join("gpu_envelope.json"), root.join("regression_bounds.json"));
-    let base_dir = data_root().join("evidence/pinned-baseline");
+    // AUTHORITATIVE: always the owner-accepted strict baseline, whatever the build's rounding mode. An
+    // FMA build may FAIL this truthfully (owner #11 authorizes FMA exploration, not approval of its
+    // deltas). KOKORO_DIAG_FMA_SNAPSHOT=1 instead compares against the PROVISIONAL FMA snapshot
+    // (diagnostic only; never parity, never approval).
+    let diag = std::env::var("KOKORO_DIAG_FMA_SNAPSHOT").map(|v| v == "1").unwrap_or(false);
+    let (pin_path, bounds_path) = if diag {
+        (root.join("gpu_envelope_fma_PROVISIONAL_diagnostic.json"), root.join("regression_bounds.json"))
+    } else {
+        (root.join("gpu_envelope.json"), root.join("regression_bounds.json"))
+    };
+    let base_dir = data_root().join(if diag { "evidence/pinned-snapshot-fma-PROVISIONAL-diagnostic" } else { "evidence/pinned-baseline" });
+    println!("RB-1 reference: {} (build kernels={})", if diag { "PROVISIONAL FMA snapshot (diagnostic)" } else { "owner-accepted strict baseline (authoritative)" }, kokoro::gpu::KERNEL_ROUNDING);
+    let pin_baseline = false; // baselines are pinned once; no re-pinning from this test
     let snap = data_root().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987");
     let w = Weights::load_pth(&snap.join("kokoro-v1_0.pth")).unwrap();
     let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(snap.join("config.json")).unwrap()).unwrap();
     let m = Kokoro::from_weights(&w, &cfg).unwrap();
     let gm = GpuKokoro::new(&m, 0).unwrap();
+    if pin_baseline {
+        // One-time pin of the approved baseline for this rounding build (refuses to overwrite).
+        assert!(!pin_path.exists() && !base_dir.exists(), "refusing to overwrite an existing baseline pin");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let spec_gate = {
+            let c = common_gates::FLOOR_CASE;
+            let t1 = st::load(&data_root().join(format!("fixtures/cpu-t1/{c}/fixture.safetensors"))).unwrap()["audio"].f32().unwrap().to_vec();
+            let t8 = st::load(&data_root().join(format!("fixtures/f64/{c}/f64.safetensors"))).unwrap()["audio_f32_t8"].f32().unwrap().to_vec();
+            2.0 * common_gates::spec_mean_abs_db(&t1, &t8)
+        };
+        let _ = spec_gate;
+        let mut cases = serde_json::Map::new();
+        for fx in fixtures() {
+            let (ids, _) = m.phonemes_to_ids(fx.meta["phonemes"].as_str().unwrap());
+            let rand_ini: [f32; HARMONICS] = fx.f("noise.rand_ini").try_into().unwrap();
+            let out = gm.forward_ids(&m, &ids, &fx.f("ref_s"), fx.meta["speed"].as_f64().unwrap() as f32, &mut FixedNoise { rand_ini, sine_noise: fx.f("noise.sine") }).unwrap();
+            let want = fx.f("audio");
+            let (r, mx, co) = rel(&out.audio, &want);
+            let sp = common_gates::spec_mean_abs_db(&out.audio, &want);
+            let bytes: Vec<u8> = out.audio.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+            std::fs::write(base_dir.join(format!("{}.f32le", fx.name)), &bytes).unwrap();
+            cases.insert(fx.name.clone(), serde_json::json!({"rel_l2": r, "max_abs": mx, "corr": co, "spec_db": sp, "audio_f32le_sha256": sha}));
+        }
+        std::fs::write(&pin_path, serde_json::to_string_pretty(&serde_json::json!({
+            "pinned": format!("2026-09-26 baseline for kernel rounding '{}' (owner #11); fixtures cpu-t1; FixedNoise", kokoro::gpu::KERNEL_ROUNDING),
+            "cases": cases})).unwrap()).unwrap();
+        println!("pinned {} + {}", pin_path.display(), base_dir.display());
+        return;
+    }
     let pin: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pin_path).unwrap()).unwrap();
     let setup = std::env::var("KOKORO_PIN_BOUNDS").map(|v| v == "1").unwrap_or(false);
     let listened_ref = read_f32_wav(&data_root().join("evidence/listening/worst-peak-reference.wav"));
@@ -319,7 +360,8 @@ fn gpu_regression_bounded() {
         let t8 = st::load(&data_root().join(format!("fixtures/f64/{c}/f64.safetensors"))).unwrap()["audio_f32_t8"].f32().unwrap().to_vec();
         2.0 * common_gates::spec_mean_abs_db(&t1, &t8)
     };
-    let binding_fail = |r: f64, mx: f64, co: f64, sp: f64| !(r <= 0.019 && mx <= 0.033 && co >= 0.9995) || sp > spec_gate;
+    // per-gate verdicts: (v1 waveform fails, G-SPEC fails)
+    let binding_fail = |r: f64, mx: f64, co: f64, sp: f64| (!(r <= 0.019 && mx <= 0.033 && co >= 0.9995), sp > spec_gate);
     if setup {
         assert!(!bounds_path.exists(), "refusing to overwrite {}", bounds_path.display());
         std::fs::create_dir_all(&base_dir).unwrap();
@@ -371,8 +413,12 @@ fn gpu_regression_bounded() {
         let sp = common_gates::spec_mean_abs_db(&out.audio, &want);
         let p = &pin["cases"][&c];
         let was_fail = binding_fail(p["rel_l2"].as_f64().unwrap(), p["max_abs"].as_f64().unwrap(), p["corr"].as_f64().unwrap(), p["spec_db"].as_f64().unwrap());
-        if binding_fail(r, mx, co, sp) && !was_fail {
-            new_binding_fails.push(c.clone());
+        let now = binding_fail(r, mx, co, sp);
+        if now.0 && !was_fail.0 {
+            new_binding_fails.push(format!("{c}/v1"));
+        }
+        if now.1 && !was_fail.1 {
+            new_binding_fails.push(format!("{c}/G-SPEC"));
         }
         println!("{c:<32} drift rel {dr:.2e} max {dm:.2e} spec {ds:.4} dB | vs ref max {mx:.4} (base {:.4})", p["max_abs"].as_f64().unwrap());
         n += 1;

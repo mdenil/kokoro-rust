@@ -3,7 +3,7 @@
 ## Where we are (2026-09-26)
 - Deliverable: **native Rust + CUDA on RTX 4090 (GPU-first, owner decision)**. CPU path = oracle/debug baseline.
 - Correctness: **NOT ACCEPTED as a whole.** Binding original gates (HERMES_BRIEF owner log #2).
-  CUDA ladder `ladder-gpu-1790426627`: all 150 stage seams PASS on 15/15 cases; ids/durations/
+  CUDA ladder `ladder-gpu-1790426627`: all 135 stage-seam rows (9 seams × 15 cases) PASS; ids/durations/
   sample counts exact; **8 enforced E2E rows FAIL** (v1 max ×5, G-SPEC ×3).
   - s02_fox/am_adam/s1.0: **OWNER-ACCEPTED by listening (DISC-003)**.
   - 7 others: OPEN, unaccepted (DISC-004) — escalate to owner; do not self-authorize.
@@ -19,6 +19,12 @@
 - NEW SCOPE (owner #6): native English text frontend, Python-free shipped path — roadmap in
   COMPREHENSIVE_PLAN_FOR_kokoro.md (F0–F4). Open owner decision: espeak-ng OOV fallback is GPL-3.
   Next single action: F0 frontend truth pack + oracle token/chunk dump.
+- Levers since checkpoint: PL-004 tiled conv (bit-identical, KEEP); PL-003 batching (opt-in, ~5%,
+  quality PROVISIONAL, escalated: evidence/listening/batch-worst-s04_alice_am_adam); PL-005 FMA (opt-in
+  build KOKORO_FMA=1, +1.6%, authoritative RB-1 FAILS: 9 drift + new s03_moon/am_adam G-SPEC; escalated:
+  evidence/listening/fma-worst-s03_moon_am_adam). Default build = strict (owner-accepted baseline).
+  Authoritative regression test = gpu_regression_bounded vs the STRICT baseline; FMA snapshot is a
+  PROVISIONAL diagnostic only. ABBA receipts: evidence/ab/ (scripts/ab.sh tees raw output).
 - Owner #13: headline = original production Python (unchanged) vs fastest Rust; no Python optimization.
 - Owner #12: representative subsets OK for fast iteration (label them); full-chapter runs for milestones.
 - Owner #11: speed + close match that sounds good; FMA contraction allowed (strict -fmad=false = optional diagnostic build).
