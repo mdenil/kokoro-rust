@@ -38,7 +38,7 @@ kernels!(
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
-    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm,
 );
 
 macro_rules! launch {
@@ -91,6 +91,11 @@ impl Gpu {
         if crate::prof::enabled() {
             let _ = self.stream.synchronize();
         }
+    }
+
+    /// Public alias of the KOKORO_PROFILE device sync (no-op unless profiling).
+    pub fn prof_sync_pub(&self) {
+        self.prof_sync();
     }
 
     pub fn device_name(&self) -> String {
@@ -236,8 +241,16 @@ impl GLinear {
     }
 }
 
+/// Shape policy: the fused kernel wins where per-tap GEMMs are memory-bound (small Cin); wider
+/// layers stay on cuBLAS (measured, PL-008). KOKORO_CONV_IGEMM_MAX_CIN overrides for A/B.
+static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_MAX_CIN").ok().and_then(|v| v.parse().ok()).unwrap_or(128));
+static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
+
 pub struct GConv {
     wt: Buf, // [K][Cout][Cin] per-tap transposed (stride 1) or original [Cout][Cin][K] (direct)
+    /// [Cin][K][Cout] for the fused implicit-GEMM kernel (stride-1, non-direct convs)
+    w_ig: Option<Buf>,
     b: Option<Buf>,
     cin: usize,
     cout: usize,
@@ -264,7 +277,20 @@ impl GConv {
             }
             wt
         };
-        Ok(Self { wt: g.up(&wt)?, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct })
+        let w_ig = if !direct && c.stride == 1 {
+            let mut v = vec![0.0f32; c.w.len()];
+            for co in 0..c.cout {
+                for ci in 0..c.cin {
+                    for kk in 0..c.k {
+                        v[(ci * c.k + kk) * c.cout + co] = c.w[(co * c.cin + ci) * c.k + kk];
+                    }
+                }
+            }
+            Some(g.up(&v)?)
+        } else {
+            None
+        };
+        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct })
     }
 
     fn fwd(&self, g: &Gpu, x: &Buf, t: usize) -> Result<(Buf, usize)> {
@@ -296,6 +322,22 @@ impl GConv {
                 None => launch!(g, conv_direct, cfg1(self.cout * tout), x, &self.wt, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
             }
             return Ok((y, tout));
+        }
+        if let Some(w_ig) = &self.w_ig {
+            if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN {
+                // LEVER PL-008 (kill switch KOKORO_CONV_IGEMM=0): fused implicit-GEMM conv
+                let xw = 128 + (self.k - 1) * self.dil;
+                let smem = (8 * xw + 8 * self.k * 64) * 4;
+                if smem <= 48 * 1024 {
+                    let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+                    let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                    match &self.b {
+                        Some(b) => launch!(g, conv1d_igemm, cfg, x, w_ig, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                        None => launch!(g, conv1d_igemm, cfg, x, w_ig, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                    }
+                    return Ok((y, tout));
+                }
+            }
         }
         let (ci, ti) = (self.cout as i32, tout as i32);
         match &self.b {

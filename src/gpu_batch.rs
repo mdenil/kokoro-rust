@@ -208,6 +208,7 @@ impl GpuKokoro {
             emb[tstart[b] * albert::EMB..(tstart[b] + tlen[b]) * albert::EMB].copy_from_slice(&e);
         }
         let emb = g.up(&emb)?;
+        let p_front = crate::prof::scope("gpub.albert+duration");
         let bert = self.albert_b(&emb, &dt)?;
         let d_en = self.bert_encoder.fwd(g, &bert, rows)?;
         // duration encoder
@@ -236,6 +237,7 @@ impl GpuKokoro {
             pred.push(model::durations_from_logits(lg, tlen[b], it.speed));
         }
 
+        drop(p_front);
         // ---- frame layout (N domain) and derived domains
         let nfs: Vec<usize> = pred.iter().map(|p| p.iter().sum::<i64>() as usize).collect();
         let mut a = vec![];
@@ -267,6 +269,7 @@ impl GpuKokoro {
         let (li, ddi) = (ln as i32, dd as i32);
         launch!(g, gather_rows, cfg1(ln * dd), &d, &src_row_d, &mut en, &li, &ddi)?;
         // F0 / N
+        let p_f0 = crate::prof::scope("gpub.f0n+textenc");
         let sh = self.lstm_b(&self.shared, &en, &dn)?;
         let sh = g.transpose(&sh, ln, HIDDEN)?;
         let run = |blocks: &[GResBlk], proj: &GConv| -> Result<Buf> {
@@ -293,7 +296,10 @@ impl GpuKokoro {
         let (ci, lti) = (HIDDEN as i32, rows as i32);
         launch!(g, gather_cols, cfg1(HIDDEN * ln), &t_en, &lti, &src_row_d, &mut asr, &ci, &li)?;
 
+        g.prof_sync_pub();
+        drop(p_f0);
         // ---- decoder (pre-generator)
+        let p_dec = crate::prof::scope("gpub.decoder");
         let (f0n, _) = self.f0_conv.fwd(g, &f0, 2 * ln)?;
         let (nn_, _) = self.n_conv.fwd(g, &ncur, 2 * ln)?;
         let mut xcat = g.cat_channels(&[&asr, &f0n, &nn_])?;
@@ -313,7 +319,10 @@ impl GpuKokoro {
         }
         ensure!(t_is_2n, "decoder did not upsample");
 
+        g.prof_sync_pub();
+        drop(p_dec);
         // ---- harmonic source + STFT per item (own noise stream per item)
+        let p_src = crate::prof::scope("gpub.source+stft");
         let ls = 600 * ln;
         let mut har_src = g.stream.alloc_zeros::<f32>(ls)?;
         let mut spec = g.stream.alloc_zeros::<f32>(22 * l120)?;
@@ -352,9 +361,12 @@ impl GpuKokoro {
             launch!(g, stft20_ld, cfg1(frames), &hv, &si, &mut sv, &fi, &ldi, &g.tw, &g.win)?;
         }
 
+        g.prof_sync_pub();
+        drop(p_src);
         // ---- generator on the scaled layouts
         let mut xg = xd;
         for i in 0..2 {
+            let _pg = crate::prof::scope(if i == 0 { "gpub.gen.stage0 (256ch)" } else { "gpub.gen.stage1 (128ch)" });
             let (din, dout) = if i == 0 { (&d2, &d20) } else { (&d20, &d120) };
             g.leaky(&mut xg, 0.1)?;
             let mut har_in = g.stream.clone_dtod(&spec)?;
@@ -397,8 +409,10 @@ impl GpuKokoro {
             let (n, three) = (acc.len() as i64, 3.0f32);
             launch!(g, div_inplace, cfg1(acc.len()), &mut acc, &three, &n)?;
             xg = acc;
+            g.prof_sync_pub();
         }
         g.leaky(&mut xg, 0.01)?;
+        let _pp = crate::prof::scope("gpub.post+istft");
         let post = self.conv_b(&self.conv_post, &mut xg, &d120)?;
         let mut outs = Vec::with_capacity(nb);
         for b in 0..nb {

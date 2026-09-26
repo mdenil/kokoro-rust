@@ -164,3 +164,31 @@ the frozen baseline is not.
   - Found and fixed on the way: an f() error could be raised before the earlier items were
     emitted. It surfaced in 4/20 runs. Errors are now raised at their ordered position (0/30
     failures afterwards).
+
+### PL-008 — fused implicit-GEMM dilated conv1d (Cin ≤ 128)   [2026-09-27 | KEEP; approximately lossless]
+- Measured bottleneck: the batched GPU forward, per-stage profile (KOKORO_PROFILE scopes added to
+  forward_batch). Generator stage 1 (128 ch, 120× frame length) was 58% and stage 0 (256 ch) 22%.
+  It was dominated by CUTLASS SIMT SGEMM, issued as one GEMM per conv tap: each tap re-reads and
+  re-writes the full output, so it is memory-bound at K = Cin = 128.
+- Lever: kernel `conv1d_igemm`.
+  - 64 out-ch × 128 time tile, 128 threads × (8×8) register block; the input window with halo
+    for 8 input channels is loaded once per chunk; all taps accumulate in registers; the output is
+    written once with bias.
+  - Explicit `__fmaf_rn`, like the cuBLAS path it replaces; the strict build's -fmad=false still
+    governs every other kernel. Without explicit FMA the kernel was only 2.7% faster.
+  - Shape policy: Cin ≤ 128 only. Measured: all shapes 1.942 s, ≤256 1.913 s, ≤128 1.888 s vs off
+    2.291 s. The wider layers are still better on cuBLAS.
+  - Kill switch KOKORO_CONV_IGEMM=0; KOKORO_CONV_IGEMM_MAX_CIN for A/B.
+- Correctness (summation order differs; approximately lossless):
+  - all 135 GPU stage seams pass (max rel 1.42e-5, gate 1e-4);
+  - original-gate fail set IDENTICAL (the same 8 historical rows, ladder-gpu-1790465810);
+  - RB-1 vs the strict baseline: 0 drift violations (drift rel ≈ 6–9e-6), no new binding-gate
+    failures;
+  - GPU negative controls detected;
+  - batched-vs-reference diagnostic unchanged to 4 digits (mean rel 0.0121 batched / 0.0118
+    single; gate fails 5/15 / 8/15);
+  - the batch-vs-single RB-1 test fails exactly as before (accepted PL-003);
+  - cli_linefile 5/5 and cli_text_native 7/7 incl. the private chapter and the fuzz corpus.
+- A/B (same binary, kill switch; sealed `/data/mdenil/code/kokoro-rust/evidence/ab/20260927-004628-L8-igemm-alice`): Alice warm pass 2.567 → 2.137 s (**1.20×**, cv
+  0.6% / 1.2%); cold 4.862 → 4.532 s (1.07×, cv 8.4% / 7.1% → provisional). In-process forward
+  (bench, Alice 69 chunks): 2.291 → 1.888 s.

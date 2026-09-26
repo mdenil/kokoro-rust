@@ -795,3 +795,69 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
     }
     for (int c = 0; c < ncout; c++) y[(long)(co0 + c) * Tout + o] = acc[c];
 }
+
+// ---- LEVER PL-008: fused implicit-GEMM dilated conv1d (stride 1), all taps accumulated in
+// registers (output written once). Y[co,t] = b[co] + sum_k sum_ci W[ci][k][co] * X[ci, t + k*dil - pad]
+// (zero outside [0,T)). f32 throughout; summation order differs from the per-tap GEMM path
+// (approximately lossless, not bitwise). Tile: 64 out-channels x 128 time steps, 128 threads, each
+// 8 channels x 8 time steps (time interleaved by 16 -> conflict-free smem reads, coalesced stores).
+#define IG_BM 64
+#define IG_BN 128
+#define IG_BK 8
+extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
+                                                               const float* __restrict__ b, float* __restrict__ y,
+                                                               int Cin, int T, int Cout, int K, int dil, int pad) {
+    extern __shared__ float smem[];
+    const int xw = IG_BN + (K - 1) * dil;
+    float* xs = smem;                   // [IG_BK][xw]
+    float* ws = smem + IG_BK * xw;      // [IG_BK][K][IG_BM]
+    const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
+    const int tx = threadIdx.x & 15, ty = threadIdx.x >> 4;
+    float acc[8][8];
+#pragma unroll
+    for (int i = 0; i < 8; i++)
+#pragma unroll
+        for (int j = 0; j < 8; j++) acc[i][j] = 0.0f;
+    for (int c0 = 0; c0 < Cin; c0 += IG_BK) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < IG_BK * xw; i += 128) {
+            int c = i / xw, j = i - c * xw;
+            int ci = c0 + c, t = t0 - pad + j;
+            xs[i] = (ci < Cin && t >= 0 && t < T) ? x[(long)ci * T + t] : 0.0f;
+        }
+        const int nw = IG_BK * K * IG_BM;
+        for (int i = threadIdx.x; i < nw; i += 128) {
+            int co = i & (IG_BM - 1), ck = i >> 6;
+            int k = ck % K, c = ck / K;
+            int ci = c0 + c;
+            ws[i] = (ci < Cin && co0 + co < Cout) ? w[((long)ci * K + k) * Cout + co0 + co] : 0.0f;
+        }
+        __syncthreads();
+        for (int c = 0; c < IG_BK; c++) {
+            for (int k = 0; k < K; k++) {
+                const float* wp = ws + (c * K + k) * IG_BM + ty * 8;
+                const float* xp = xs + c * xw + k * dil + tx;
+                float a[8], bv[8];
+#pragma unroll
+                for (int i = 0; i < 8; i++) a[i] = wp[i];
+#pragma unroll
+                for (int j = 0; j < 8; j++) bv[j] = xp[16 * j];
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], bv[j], acc[i][j]);  // explicit FMA, like the cuBLAS path it replaces
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int co = co0 + ty * 8 + i;
+        if (co >= Cout) continue;
+        float bias = b ? b[co] : 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            int t = t0 + tx + 16 * j;
+            if (t < T) y[(long)co * T + t] = acc[i][j] + bias;
+        }
+    }
+}

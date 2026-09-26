@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--config", action="append", required=True, help="NAME=extra synth args")
     ap.add_argument("--bin", action="append", default=[], help="NAME=binary path (default target/release/kokoro)")
     ap.add_argument("--cold", action="store_true", help="also time cold single-pass processes")
+    ap.add_argument("--env", action="append", default=[], help="NAME=VAR=VALUE extra environment for one config (e.g. a kill switch)")
     ap.add_argument("--label", action="append", default=[], help="NAME=human description (e.g. 'same binary, single-worker ablation')")
     a = ap.parse_args()
     cfgs = dict(c.split("=", 1) for c in a.config)
@@ -54,7 +55,7 @@ def main():
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True).stdout.splitlines()
     (out / "identity.json").write_text(json.dumps({
         "git": git, "git_dirty_tracked": dirty, "corpus": str(corpus), "corpus_sha256": sc.sha256_file(corpus),
-        "corpus_lines": corpus.read_text(encoding="utf-8").count("\n"), "configs": cfgs, "labels": dict(l.split("=", 1) for l in a.label),
+        "corpus_lines": corpus.read_text(encoding="utf-8").count("\n"), "configs": cfgs, "env": a.env, "labels": dict(l.split("=", 1) for l in a.label),
         "binaries": {k: {"path": v, "sha256": sc.sha256_file(v)} for k, v in bins.items()}, "rounds": a.rounds, "passes": a.passes,
         "started": time.strftime("%Y-%m-%d %H:%M:%S"), "host_start": sc.host_state()}, indent=1))
     raw = open(out / "raw.jsonl", "a")
@@ -71,9 +72,15 @@ def main():
                 cmd = [bins[k], "synth", "--model-dir", str(SNAP), "--input", a.corpus, "--out-dir", str(work), "--timeline", str(tl)]
                 cmd += (["--bench-passes", str(a.passes)] if mode == "warm" else []) + shlex.split(cfgs[k])
                 host_before, waited = sc.wait_quiet()
+                run_env = dict(env)
+                for e in a.env:
+                    name, kv = e.split("=", 1)
+                    if name == k:
+                        var, val = kv.split("=", 1)
+                        run_env[var] = val
                 t = time.perf_counter()
                 with open(out / "logs" / f"{tag}.stdout", "wb") as so, open(out / "logs" / f"{tag}.stderr", "wb") as se:
-                    rc = subprocess.run(cmd, env=env, stdout=so, stderr=se).returncode
+                    rc = subprocess.run(cmd, env=run_env, stdout=so, stderr=se).returncode
                 wall = time.perf_counter() - t
                 host_after = sc.host_state()
                 d = json.loads(tl.read_text())
