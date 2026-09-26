@@ -107,8 +107,8 @@ pub struct AdaIn1d {
 impl AdaIn1d {
     pub fn load(w: &Weights, prefix: &str, style_dim: usize, c: usize) -> Result<Self> {
         Ok(Self {
-            norm_w: w.get(&format!("{prefix}.norm.weight"), &[c])?,
-            norm_b: w.get(&format!("{prefix}.norm.bias"), &[c])?,
+            norm_w: w.get_instance_norm_affine(&format!("{prefix}.norm.weight"), c, 1.0)?,
+            norm_b: w.get_instance_norm_affine(&format!("{prefix}.norm.bias"), c, 0.0)?,
             fc: Linear::load(w, &format!("{prefix}.fc"), style_dim, 2 * c, true)?,
             c,
         })

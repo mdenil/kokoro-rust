@@ -18,9 +18,11 @@ fn data_root() -> PathBuf {
 fn model() -> &'static Kokoro {
     static M: OnceLock<Kokoro> = OnceLock::new();
     M.get_or_init(|| {
-        let root = data_root().join("models");
-        let w = Weights::load(&root.join("raw_state.safetensors")).expect("raw_state.safetensors (run oracle/dump_weights.py)");
-        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join("config.json")).unwrap()).unwrap();
+        // Product loading path: the upstream checkpoint read natively (bitwise-equal to the
+        // reference's loaded state; tests/native_load.rs).
+        let snap = data_root().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987");
+        let w = Weights::load_pth(&snap.join("kokoro-v1_0.pth")).expect("kokoro-v1_0.pth");
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(snap.join("config.json")).unwrap()).unwrap();
         Kokoro::from_weights(&w, &cfg).expect("model hydrate")
     })
 }

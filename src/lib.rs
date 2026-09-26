@@ -2,14 +2,16 @@
 #![deny(unsafe_code)]
 
 pub mod albert;
+pub mod cli;
+pub mod engine;
 pub mod model;
 pub mod nn;
 #[allow(unsafe_code)]
 pub mod ops;
 pub mod st;
+pub mod torchpt;
 pub mod vocoder;
+pub mod wav;
 pub mod weights;
 
-pub fn cli_main() -> anyhow::Result<()> {
-    anyhow::bail!("CLI not implemented yet")
-}
+pub use cli::cli_main;

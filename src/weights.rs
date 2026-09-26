@@ -15,6 +15,24 @@ impl Weights {
         Ok(Self { map: st::load(path)? })
     }
 
+    /// Load directly from the upstream PyTorch checkpoint (kokoro-v1_0.pth), no conversion step.
+    pub fn load_pth(path: &Path) -> Result<Self> {
+        let pt = crate::torchpt::load_kmodel_checkpoint(path)?;
+        let map = pt
+            .into_iter()
+            .map(|(k, t)| (k, st::Tensor { shape: t.shape, data: st::Data::F32(t.data) }))
+            .collect();
+        Ok(Self { map })
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.map.keys()
+    }
+
+    pub fn raw(&self, name: &str) -> Option<&st::Tensor> {
+        self.map.get(name)
+    }
+
     pub fn from_map(map: TensorMap) -> Self {
         Self { map }
     }
@@ -49,6 +67,20 @@ impl Weights {
         let v = self.get(&format!("{prefix}.weight_v"), shape)?;
         let g = self.get(&format!("{prefix}.weight_g"), &[shape[0], 1, 1])?;
         Ok(ops::weight_norm(&v, &g))
+    }
+
+    /// AdaIN1d's InstanceNorm1d(affine=True) parameters are absent from kokoro-v1_0.pth (the
+    /// upstream enables affine only as an ONNX-export workaround); the reference's non-strict
+    /// load leaves them at torch's deterministic init (weight 1, bias 0). Only these names may
+    /// default; every other missing tensor stays a hard error.
+    pub fn get_instance_norm_affine(&self, name: &str, c: usize, init: f32) -> Result<Vec<f32>> {
+        if self.map.contains_key(name) {
+            return self.get(name, &[c]);
+        }
+        if !(name.ends_with(".norm.weight") || name.ends_with(".norm.bias")) {
+            bail!("missing tensor {name}");
+        }
+        Ok(vec![init; c])
     }
 
     pub fn has(&self, name: &str) -> bool {
