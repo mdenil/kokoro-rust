@@ -127,3 +127,10 @@ Sequence (sole coder; CUDA work interleaved at natural boundaries):
    padding-contamination and cross-item negative controls, reorder invariance, tail batches.
 4. Native frontend F0–F4 continues interleaved (required for the headline number).
 5. CUDA kernel levers re-profiled under batching (Tier A/B reassessed).
+
+### Publication policy (owner #9)
+Open-sourcing is a possible future step (not authorized yet; license undecided). Required before any
+release: public corpus only (bench/CORPUS.md provenance + notices), dependency/data license
+inventory (frontend: espeak-ng GPL-3 decision, num2words avoided, lexicon provenance), private
+fixtures and derivatives absent from tree AND history (scripts/check_private_leaks.py on every push;
+a history-wide scan before any publication).

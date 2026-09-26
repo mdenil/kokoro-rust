@@ -114,3 +114,12 @@ Load the named skill. Inspect available toolchains/storage and public reference.
    vs production Python/CUDA on the same file/voice/speed/precision, vs Rust batch-1. Reference-
    derived phonemes may support labelled core-batching experiments; the headline needs true native
    text-file -> audio-files. Reassess headroom under batching (single-item ceilings do not carry over).
+9. PUBLICATION POLICY (Misha, 1553403193109778493): the repo may eventually be open-sourced (NOT
+   authorized now; no license chosen or changed by me). Keep the small redistributable public corpus
+   (Alice ch. 1 text + phoneme chunks) tracked with provenance, transformations and source/legal
+   notices; online availability != redistributable. The private In Over Our Heads chapter and every
+   derivative (text, phonemes, audio, text-bearing logs) must NEVER be published; it stays local
+   under /data. Before every push run the CONTENT audit `python3 scripts/check_private_leaks.py`
+   (tracked + staged, worktree + index); ignore rules alone are not an audit. Generic stats / hashes /
+   names are fine; no passages. Public corpus + generic reproduction commands must suffice for
+   open-source users; the private chapter benchmark stays optional.

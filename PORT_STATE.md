@@ -33,7 +33,7 @@
 - Data root: /data/mdenil/code/kokoro-rust (relocated; docs/RELOCATION_2026-09-26.md).
 - Cargo target: /home/mdenil/code/kokoro-rust/target. CUDA build: `cargo build --release --features cuda`
   (nvcc 12.9 → PTX compute_89, -fmad=false). `CUDA_VISIBLE_DEVICES=0` (RTX 4090; never GPU 1).
-- Push via SSH origin. Shell `grep` is a ugrep wrapper honoring .gitignore; use `command grep`.
+- Push via SSH origin, ALWAYS after `python3 scripts/check_private_leaks.py` passes (owner #9). Shell `grep` is a ugrep wrapper honoring .gitignore; use `command grep`.
 - serde_json needs `float_roundtrip` (default parser was 1-ulp lossy — caught by the pin test).
 
 ## Pins
