@@ -82,6 +82,14 @@ impl Gpu {
         Ok(Self { k: Kernels::load(&module)?, ctx, stream, blas, tw, win })
     }
 
+    /// With KOKORO_PROFILE=1, block until queued GPU work finishes so stage scopes measure
+    /// device time instead of launch time. No-op otherwise.
+    fn prof_sync(&self) {
+        if crate::prof::enabled() {
+            let _ = self.stream.synchronize();
+        }
+    }
+
     pub fn device_name(&self) -> String {
         self.ctx.name().unwrap_or_else(|_| "unknown".into())
     }
@@ -466,6 +474,7 @@ impl GLstm {
 
     /// x [t, din] -> [t, 2h]
     fn fwd(&self, g: &Gpu, x: &Buf, t: usize) -> Result<Buf> {
+        g.prof_sync();
         let _p = crate::prof::scope("gpu/lstm");
         let gf = self.wih[0].fwd(g, x, t)?;
         let gbk = self.wih[1].fwd(g, x, t)?;
@@ -483,6 +492,7 @@ impl GLstm {
                 launch!(g, lstm_step, cfg, &gf, &gbk, &self.whh[0], &self.whh[1], &self.bhh[0], &self.bhh[1], &hb, &mut ha, &mut c, &mut out, &ti, &hi, &si)?;
             }
         }
+        g.prof_sync();
         Ok(out)
     }
 }
@@ -774,7 +784,9 @@ impl GpuKokoro {
             launch!(g, div_inplace, cfg1(acc.len()), &mut acc, &three, &n)?;
             x = acc;
             t = ty;
+            g.prof_sync();
         }
+        let _p = crate::prof::scope("gpu.gen.post+istft");
         g.leaky(&mut x, 0.01)?;
         let (post, tp) = self.conv_post.fwd(g, &x, t)?;
         // SAFETY: fully written by istft_frames before istft_ola reads it.
@@ -797,13 +809,22 @@ impl GpuKokoro {
         let t = ids.len();
         let s_dec = g.up(&ref_s[..STYLE_DIM])?;
         let s = g.up(&ref_s[STYLE_DIM..])?;
-        let _p = crate::prof::scope("gpu.prosody");
-        let emb = g.up(&m.albert.embeddings(ids)?)?;
-        let bert = self.albert.fwd(g, &emb, t)?;
-        let d_en = self.bert_encoder.fwd(g, &bert, t)?;
-        let d = self.duration_encoder(&d_en, t, &s)?;
-        let x = self.pred_lstm.fwd(g, &d, t)?;
-        let logits = g.down(&self.dur_proj.fwd(g, &x, t)?)?;
+        let bert = {
+            let _p = crate::prof::scope("gpu.albert");
+            let emb = g.up(&m.albert.embeddings(ids)?)?;
+            let b = self.albert.fwd(g, &emb, t)?;
+            g.prof_sync();
+            b
+        };
+        let (d, logits) = {
+            let _p = crate::prof::scope("gpu.duration");
+            let d_en = self.bert_encoder.fwd(g, &bert, t)?;
+            let d = self.duration_encoder(&d_en, t, &s)?;
+            let x = self.pred_lstm.fwd(g, &d, t)?;
+            let logits = g.down(&self.dur_proj.fwd(g, &x, t)?)?;
+            (d, logits)
+        };
+        let _p = crate::prof::scope("gpu.f0n+text");
         let pred_dur = model::durations_from_logits(&logits, t, speed);
         let aln: Vec<i32> = model::alignment(&pred_dur).into_iter().map(|v| v as i32).collect();
         let nf = aln.len();
@@ -817,16 +838,22 @@ impl GpuKokoro {
         let mut asr = g.alloc(HIDDEN * nf)?;
         let (ci, ti) = (HIDDEN as i32, t as i32);
         launch!(g, expand_cols, cfg1(HIDDEN * nf), &t_en, &aln_d, &mut asr, &ci, &ti, &nfi)?;
+        g.prof_sync();
         drop(_p);
         let (x, t2) = {
             let _p = crate::prof::scope("gpu.decoder.pre");
-            self.pre_generator(&asr, nf, &f0, &n, &s_dec)?
+            let r = self.pre_generator(&asr, nf, &f0, &n, &s_dec)?;
+            g.prof_sync();
+            r
         };
         let (har, frames) = {
             let _p = crate::prof::scope("gpu.gen.source");
-            self.har(&f0, 2 * nf, noise)?
+            let r = self.har(&f0, 2 * nf, noise)?;
+            g.prof_sync();
+            r
         };
         let audio = self.generator(&x, t2, &s_dec, &har, frames)?;
+        let _p = crate::prof::scope("gpu.download");
         let audio = g.down(&audio)?;
         Ok(Output { audio, pred_dur })
     }
