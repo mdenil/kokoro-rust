@@ -12,9 +12,14 @@
 - Performance: levers PL-001 (device noise, 1.39× process wall) and PL-002 (persistent LSTM, bit-identical,
   −2.5% inference) KEPT; NE-003 (im2col) reverted. Regression policy RB-1 (bounded variation, owner
   clarification) in force: `gpu_regression_bounded`; bounds fixed in tests/pinned/regression_bounds.json.
-- **Optimization PAUSED** for the owner-requested interim comparison (HERMES_BRIEF owner log #5).
-- Next single action: run the interim Rust-CUDA vs production torch CUDA comparison, write
-  docs/PERFORMANCE_REPORT.md CURRENT CHECKPOINT, then STOP for review.
+- Interim checkpoint DONE (docs/PERFORMANCE_REPORT.md CURRENT CHECKPOINT; evidence
+  /data/mdenil/code/kokoro-rust/evidence/interim-comparison/20260926-141335/, sealed SHA256SUMS):
+  warm core Rust 2.462 s vs production torch 6.986 s (2.84×, af_heart; 3.09× am_adam; reference cv
+  7–11% → PROVISIONAL); cold text→WAV 25.10 s vs 14.84 s (Rust uses DEV-ONLY Python bridge).
+- Optimization continues (owner follow-up): next = Tier A levers under RB-1 — tiled conv_direct,
+  multi-block chan_stats, cheaper LSTM step, elementwise fusions; then Tier B implicit-GEMM conv.
+- Process lesson: never wait with `pgrep -f <pattern>` from a shell whose own command line contains
+  the pattern (self-match hung a waiter); wait on the tracked background task instead.
 
 ## Environment (ALWAYS `source scripts/env.sh` first)
 - Data root: /data/mdenil/code/kokoro-rust (relocated; docs/RELOCATION_2026-09-26.md).
