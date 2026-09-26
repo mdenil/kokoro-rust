@@ -105,6 +105,8 @@ def run(rec_file, logs, name, cmd, env, out, engine, passes):
             rec["record"] = json.loads(stdout.splitlines()[-1])
         except Exception as e:  # noqa: BLE001
             rec["record_error"] = repr(e)
+        dirs = [out] if passes == 0 else [out / f"pass{k}" for k in range(passes + 1)]
+        rec["coverage"] = [dict(zip(("wav_files", "digest_of_wav_hashes"), wav_digest(d)), dir=d.name) for d in dirs]
     else:
         tlp = logs / f"{name}.timeline.json"
         if tlp.exists():

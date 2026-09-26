@@ -100,3 +100,35 @@ the frozen baseline is not.
   (accepted variation, not erased); the strict baseline remains the regression reference.
   A separate FMA snapshot exists only as a labelled PROVISIONAL diagnostic (never parity/approval).
 - Speed: ABBA n=5 whole process 13.948 → 13.730 s (1.016×, 5/5); batched in-process 2.318 → 2.285 s.
+
+### PL-006 — whole-system pipeline: parallel frontend + parallel writers + fsync off + concurrent load   [2026-09-27 | KEEP]
+- Measured bottleneck (whole-system baseline, owner #21): the Rust warm pass was serial.
+  - frontend 6.4 s on 1 thread, with the GPU starved 6.25 s behind the 256-chunk batch window;
+  - GPU 10.1 s;
+  - writer 3.7 s, dominated by two fsyncs per line on ZFS;
+  - cold start: model load, frontend load and weight hashing all serial.
+- Lever (one structural change to the host pipeline; GPU numerics untouched):
+  - `--prep-threads` (default half the CPUs, at most 16) with an in-order sequencer and a bounded
+    look-ahead window (4×threads; stop flag on any exit);
+  - `--write-threads 4`;
+  - fsync off by default (`--fsync` restores; durability tradeoff in PERFORMANCE_REPORT);
+  - model load concurrent with frontend load; weight sha256 on a helper thread.
+- Correctness:
+  - WAVs bit-identical to the pre-change binary (Alice, 65/65, 2 passes);
+  - cli_linefile 5/5 and cli_text_native 7/7, incl. the private chapter, the fuzz corpus through
+    the binary and the 15 output negative controls.
+  - The exec audit was fixed to count strace "resumed" continuation lines once: parallel ffmpeg
+    execs produced them, and it was a test artifact, not an extra process.
+- A/B, sealed (`/data/mdenil/code/kokoro-rust/evidence/ab/20260926-235743-L1-sealed-alice`): Alice, 4 interleaved rounds; identities, host/GPU state and coverage digests
+  per run.
+  - warm pass: base (commit 6e306b7) 4.766 s → new 2.575 s (**1.85×**, cv 1.6%);
+  - cold process: 9.749 s → 5.504 s (**1.77×**);
+  - same-binary single-worker ablation: warm 5.037 s, cold 7.410 s.
+  - Earlier exploratory rounds under a concurrent root `zfs receive`: fsync amplified write
+    stalls up to 27 s; with fsync off, the remaining fsync (on the manifest) stalled 2–4 s, so the
+    manifest now follows `--fsync` too.
+- Baseline binaries:
+  - $KOKORO_DATA/bin/kokoro-6e306b7 (sha256 3fdd8374…, used in the A/B);
+  - target/baseline-6e306b7/release/kokoro (b1bb54cd…).
+  They are the same commit built from different checkout paths; debuginfo paths make the builds
+  not byte-reproducible across locations.

@@ -10,10 +10,10 @@ Modes (each invocation is ONE process; the driver runs cold replicates as separa
   --attribute  add per-call timers (g2p, inference incl. its .cpu() sync, WAV write) for stage
                attribution. Timers only; the calls and their order are unchanged. Clean headline
                runs omit this.
-Prints one JSON record (raw per-pass times) on stdout.
+Prints one JSON record (raw per-pass times) on stdout. Output hashing/coverage is done OUTSIDE this
+process by the driver (so it is not inside the timed process for either engine).
 """
 import argparse
-import hashlib
 import json
 import os
 import pathlib
@@ -98,23 +98,13 @@ def main():
         for p in range(args.passes + 1):
             passes.append(dict(one_pass(base / f"pass{p}"), pass_=p, warmup=p == 0))
     t_end = time.perf_counter()
-    # output coverage: every line has a WAV; hash them (identity of outputs, no content printed)
-    cov = []
-    for p in passes:
-        d = base if args.passes == 0 else base / f"pass{p['pass_']}"
-        files = sorted(d.glob("*.wav"))
-        h = hashlib.sha256()
-        for f in files:
-            h.update(f.name.encode())
-            h.update(hashlib.sha256(f.read_bytes()).digest())
-        cov.append({"pass": p["pass_"], "wav_files": len(files), "digest_of_wav_hashes": h.hexdigest()})
     print(json.dumps({
         "engine": "production python: kokoro 0.9.4 KPipeline(lang_code='a') per line + soundfile.write",
         "torch": torch.__version__, "torch_threads": torch.get_num_threads(), "cuda": torch.cuda.is_available(),
         "device": str(pipe.model.device) if pipe.model is not None else None, "attribute": args.attribute,
         "voice": args.voice, "speed": args.speed, "input": args.input, "input_lines": len(lines),
         "pid": os.getpid(), "import_s": t_import - T0, "load_s": t_load - t_import, "process_body_s": t_end - T0,
-        "passes": passes, "coverage": cov,
+        "passes": passes,
     }))
 
 

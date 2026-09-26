@@ -74,6 +74,11 @@ impl Engine {
     pub fn load_on(model_dir: &Path, device: Device, cuda_ordinal: usize) -> Result<Self> {
         let weights = model_dir.join("kokoro-v1_0.pth");
         let config = model_dir.join("config.json");
+        // hash the checkpoint on a helper thread while it is parsed/uploaded (identical result)
+        let hash = std::thread::spawn({
+            let weights = weights.clone();
+            move || sha256_file(&weights)
+        });
         let w = Weights::load_pth(&weights)?;
         let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?)?;
         let model = Kokoro::from_weights(&w, &cfg)?;
@@ -95,7 +100,7 @@ impl Engine {
             gpu,
             device,
             model_dir: model_dir.to_path_buf(),
-            model_sha256: sha256_file(&weights)?,
+            model_sha256: hash.join().map_err(|_| anyhow::anyhow!("weight hashing thread panicked"))??,
             config_sha256: sha256_file(&config)?,
             voices: HashMap::new(),
         })

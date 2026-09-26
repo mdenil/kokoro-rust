@@ -5,18 +5,12 @@
 > all stage seams pass on 15/15 fixture cases; 8 enforced end-to-end original-gate rows fail on the
 > CUDA path (1 owner-accepted by listening, DISC-003; 7 open, DISC-004).
 
-> **Historical vs current (reconciled at the single-binary milestone, owner #15).** Every timing in
-> this report was measured BEFORE that milestone, on earlier trees, and is historical. At those
-> times the Rust text path used the DEV-ONLY Python misaki bridge, batching was opt-in and the
-> default Rust run was batch-1.
-> The CURRENT binary is different:
-> - native frontend, Python-free, with the bridge removed from the binary;
-> - `synth` batches by default (`--batch-phonemes 8000`; `0` = batch-1);
-> - CUDA is the default device;
-> - the strict build is the default, and FMA is an accepted opt-in build.
-> That current binary has NOT been benchmarked. Speed work is paused (owner #15/#20), and the next
-> performance phase is whole-system file→WAVs (owner #16). The numbers below are kept as receipts;
-> none of them is a headline for the current binary.
+> **Which numbers are current.**
+> - The WHOLE-SYSTEM BASELINE section below measures the current native binary (tree 6e306b7) and
+>   later lever receipts.
+> - Everything after "Benchmark policy" (the interim checkpoint, the private-chapter baseline, the
+>   lever receipts) is HISTORICAL. It was measured on earlier trees, when the text path used the
+>   DEV-ONLY Python bridge and batch-1 was the default.
 
 ## WHOLE-SYSTEM BASELINE — current native binary vs ORIGINAL production Python (owner #21; 2026-09-26 ~23:30)
 
@@ -45,6 +39,20 @@ Scope: prepared line file -> ALL per-line WAVs.
 | Alice ch.1 (65 lines, 656 s audio) | cold process wall | 25.16 s (cv 5.4%) | 9.94 s (cv 6.8%) | 9.91 s (cv 2.4%) | 2.53× |
 | Alice ch.1 | warm resident pass | 8.10 s (cv 7.5%) | 4.70 s (cv 1.7%) | 4.80 s (cv 7.6%) | 1.73× |
 
+Scope and noise disclosures for this baseline:
+- Harness scope. The Python cold wall contains everything outside its timed body: interpreter
+  start, the harness's own in-process WAV hashing for coverage, and exit. That adds 1.2–1.8 s per
+  process (raw: wall_s − record.process_body_s). The Rust run's coverage hashing happened outside
+  the process, in the driver; Rust's own sidecar hashes are part of the product and included.
+  From now on the Python harness no longer hashes in-process: the driver hashes both engines
+  externally.
+- Output format is identical: both write PCM_16 24 kHz mono WAV (verified with soundfile.info on
+  actual outputs). Rust also writes sidecars and a manifest.
+- Noise. Ratios are provisional where cv > 5%: Python chapter cold cv 8.4%, Alice warm cv 7.5%;
+  Rust FMA warm cv 5.7–7.6%.
+- Host. Other users' jobs were active (load avg 4–16), including a root `zfs receive` writing to the
+  same ZFS pool as the outputs from ~23:10. They were recorded, not disturbed.
+
 Attribution, private chapter.
 - Python warm pass 54.2 s = g2p 1.5 + inference 50.6 (incl. its `.cpu()` sync) + WAV write 1.7
   + rest. Cold adds import 5.5 s + load 3.2 s.
@@ -57,6 +65,17 @@ Attribution, private chapter.
 - Rust cold = 0.64 s outside main + model load 4.1 s + frontend load 0.6 s (serial) + pass 19.1 s.
 - FMA vs strict is within noise at the whole-system level; the GPU kernels are not the only
   bottleneck.
+
+## Durability tradeoff (lever L1, fsync)
+From L1 on, `synth` no longer fsyncs each WAV, sidecar and manifest; `--fsync` restores that.
+- Files are still written to `<name>.partial` and atomically renamed, so after a PROCESS crash no
+  reader sees a partial file.
+- An atomic rename is NOT power-loss durability. After a power loss or OS crash, recently written
+  files may be empty or missing.
+- Resume re-verifies every WAV against the audio sha256 recorded in its sidecar, and every sidecar
+  must parse and match the line, text and config. So such files are detected and re-synthesized;
+  they are never trusted.
+- The production Python path (`soundfile.write`) never fsyncs either.
 
 ## Benchmark policy (owner #13)
 Headline = the ORIGINAL pinned production Python usage (kokoro 0.9.4 KPipeline, one line at a time,

@@ -64,7 +64,9 @@ fn synth_path(input: &Path, out: &Path, extra: &[&str], path: &str) -> Run {
         .args(extra)
         .output()
         .expect("run strace + kokoro");
-    let execs = std::fs::read_to_string(&log).unwrap_or_default().lines().filter(|l| l.contains("execve")).map(String::from).collect();
+    // one entry per exec call: concurrent execs are split by strace into "<unfinished ...>" +
+    // "<... execve resumed>" lines; count the call line only
+    let execs = std::fs::read_to_string(&log).unwrap_or_default().lines().filter(|l| l.contains("execve(") && !l.contains("resumed>")).map(String::from).collect();
     Run { code: o.status.code().unwrap_or(-1), stderr: String::from_utf8_lossy(&o.stderr).into_owned(), execs }
 }
 

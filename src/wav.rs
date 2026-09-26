@@ -58,11 +58,18 @@ pub fn encode(audio: &[f32], sample_rate: u32, fmt: Format) -> Encoded {
 
 /// Write atomically (temp file + rename) so a crash never leaves a truncated WAV behind.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_opt(path, bytes, true)
+}
+
+/// Write to `<path>.partial` then rename (readers never see a partial file); `sync` = fsync first.
+pub fn write_atomic_opt(path: &Path, bytes: &[u8], sync: bool) -> Result<()> {
     let tmp = path.with_extension("partial");
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
