@@ -53,3 +53,31 @@ change requires a DISCREPANCIES entry and re-measured floor evidence.
 
 Rust CUDA (later) vs oracle cuda: same discrete gates; continuous gates re-derived from a
 CUDA-specific floor measurement (TF32 on/off pair) before any GPU claim.
+
+## Revision 1 (2026-09-26) — per-case floor; PRECOMMITTED before per-case floors were measured
+
+**What happened under the original gates (recorded, not erased).** Ladder receipt
+`evidence/ladder/ladder-cpu-t1-1790423348.json`: every stage-isolated seam passed on all 16
+cases, but the E2E waveform failed the original gates on 5/16 cases (s02_fox am_adam s0.8
+rel 2.01% / max 4.5e-2; s02_fox am_adam s1.0, s03_moon am_adam, s04_alice am_adam,
+s06_long af_heart: max 4.0–4.7e-2 > 3.3e-2). Correlation ≥ 0.9998 everywhere.
+
+**Attribution (earliest divergent seam).** `cargo test --release --test parity e2e_attribution_f0`:
+running the native pipeline with ONLY the oracle's F0/N curves substituted collapses E2E
+error on every case by 30–200× (rel 5.9e-5…7.2e-4, max ≤ 1.1e-3). `F0_pred` itself matches
+at rel ~2.5e-7 (arithmetic-reorder level). SineGen integrates F0 into phases up to ~9.4e4
+rad (harmonic 9), so a 1e-7 relative F0 difference becomes ~1e-2 rad of phase late in the
+utterance: the amplification is intrinsic to the model and grows with utterance length and
+pitch — exactly the cases that failed (am_adam, long).
+
+**Flaw in the original gate.** It was derived from ONE case's reorder floor, but the
+amplification is case-dependent. Revised rule (fixed before measuring per-case floors):
+
+- Per case, run the pinned reference with the fixture's injected noise at torch thread counts
+  {2, 4, 8} and compare each to the frozen cpu-t1 fixture. floor_rel(case) = max rel_l2,
+  floor_max(case) = max max|Δ| over those three reorders. (`oracle/floor_all.py`)
+- **G-E2E-v2**: subject rel_l2 ≤ 2·floor_rel(case) AND subject max|Δ| ≤ 2·floor_max(case)
+  AND corr ≥ 0.9995. Discrete gates unchanged (ids, durations, sample count EXACT).
+- The original G-WAVE gates remain reported alongside (not deleted) so the change is auditable.
+- Whatever the per-case floors show, the result is reported as measured; if the subject
+  exceeds 2× its own case floor anywhere, that is a FAIL to investigate, not a re-gate.
