@@ -5,14 +5,11 @@ pub mod albert;
 pub mod cli;
 pub mod engine;
 pub mod frontend;
-#[cfg(feature = "cuda")]
 #[allow(unsafe_code)]
 pub mod gpu;
 pub mod model;
 pub mod nn;
 pub mod ordered;
-pub mod prof;
-#[allow(unsafe_code)]
 pub mod ops;
 pub mod st;
 pub mod timeline;

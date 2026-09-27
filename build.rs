@@ -4,9 +4,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=kernels/kokoro.cu");
     println!("cargo:rerun-if-env-changed=NVCC");
-    if std::env::var_os("CARGO_FEATURE_CUDA").is_none() {
-        return;
-    }
     let nvcc = std::env::var("NVCC").unwrap_or_else(|_| "/usr/local/cuda/bin/nvcc".into());
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kokoro.ptx");
     let status = std::process::Command::new(&nvcc)

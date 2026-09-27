@@ -38,60 +38,7 @@ extern "C" __global__ void residual_scale(float* r, const float* sc, long n, flo
     if (i < n) r[i] = (r[i] + sc[i]) * s;
 }
 
-// Per-channel mean / 1/sqrt(var+eps) over time of x [C, T] (biased var, f64 accumulation;
-// mirrors ops::instance_norm). One block (256 threads) per channel.
-extern "C" __global__ void chan_stats(const float* x, int T, float eps, float* mean_out, float* rstd_out) {
-    __shared__ double sh[256];
-    const float* row = x + (long)blockIdx.x * T;
-    double s = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) s += (double)row[t];
-    sh[threadIdx.x] = s;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    float mean = (float)(sh[0] / (double)T);
-    __syncthreads();
-    double v = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double c = (double)(row[t] - mean);
-        v += c * c;
-    }
-    sh[threadIdx.x] = v;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        float var = (float)(sh[0] / (double)T);
-        mean_out[blockIdx.x] = mean;
-        rstd_out[blockIdx.x] = 1.0f / sqrtf(var + eps);
-    }
-}
 
-// AdaIN1d apply: y = (1+gamma)*((x-mean)*rstd*nw + nb) + beta, then optional activation:
-// act 0 = none, 1 = leaky relu(slope), 2 = snake(alpha). gb = fc(s) = [gamma(C), beta(C)].
-extern "C" __global__ void adain_apply(const float* x, float* y, const float* mean, const float* rstd,
-                                       const float* nw, const float* nb, const float* gb, const float* alpha,
-                                       int C, int T, int act, float slope) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * T) return;
-    int c = (int)(i / T);
-    float v = (x[i] - mean[c]) * rstd[c];
-    float g1 = 1.0f + gb[c];
-    v = g1 * (v * nw[c] + nb[c]) + gb[C + c];
-    if (act == 1) {
-        if (v < 0.0f) v = v * slope;
-    } else if (act == 2) {
-        float a = alpha[c];
-        float inv = 1.0f / a;
-        float sn = sinf(a * v);
-        v = v + inv * (sn * sn);
-    }
-    y[i] = v;
-}
 
 // LayerNorm over the last dim of [rows, d]; optional affine (g, b may be null). Block per row.
 // mode 1: AdaLayerNorm: out = (1 + gb[j]) * ln + gb[d + j]   (no affine)
@@ -187,30 +134,8 @@ extern "C" __global__ void transpose(const float* x, float* y, int R, int C) {
     }
 }
 
-// out [T, d + sd] = concat(x[T, d], s[sd]) per row
-extern "C" __global__ void cat_style_rows(const float* x, const float* s, float* out, int T, int d, int sd) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    int w = d + sd;
-    if (i >= (long)T * w) return;
-    int t = (int)(i / w), j = (int)(i % w);
-    out[i] = j < d ? x[(long)t * d + j] : s[j - d];
-}
 
-// out[f, :] = d[aln[f], :]  (frame expansion of token rows, width dd)
-extern "C" __global__ void expand_rows(const float* d, const int* aln, float* out, int nf, int dd) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)nf * dd) return;
-    int f = (int)(i / dd), j = (int)(i % dd);
-    out[i] = d[(long)aln[f] * dd + j];
-}
 
-// out[c, f] = x[c, aln[f]]  (frame expansion of channel-major [C, T] -> [C, nf])
-extern "C" __global__ void expand_cols(const float* x, const int* aln, float* out, int C, int T, int nf) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * nf) return;
-    int c = (int)(i / nf), f = (int)(i % nf);
-    out[i] = x[(long)c * T + aln[f]];
-}
 
 
 // Nearest x2 along time: y [C, 2T]
@@ -258,13 +183,6 @@ extern "C" __global__ void convT_gather(const float* Z, const float* b, float* y
     y[idx] = acc;
 }
 
-// y [C, T+1]: y[:, 0] = x[:, 1], y[:, 1:] = x   (ReflectionPad1d((1, 0)))
-extern "C" __global__ void reflect_pad_left1(const float* x, float* y, int C, int T) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * (T + 1)) return;
-    int c = (int)(i / (T + 1)), o = (int)(i % (T + 1));
-    y[i] = o == 0 ? x[(long)c * T + 1] : x[(long)c * T + o - 1];
-}
 
 // ---------------------------------------------------------------- harmonic source (SineGen)
 
@@ -340,47 +258,7 @@ extern "C" __global__ void sine_har_source(const float* f0c, int L, int S, int D
 #define C_COS(k, n) tw[(k) * 20 + (n)]
 #define C_SIN(k, n) tw[220 + (k) * 20 + (n)]
 
-// out [22, F]: rows 0..10 magnitude, 11..21 phase (atan2); center=True reflect padding.
-extern "C" __global__ void stft20(const float* x, int L, float* out, int F, const double* tw, const float* c_win) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= F) return;
-    double buf[20];
-    for (int n = 0; n < 20; n++) {
-        int p = f * 5 + n - 10;  // index into unpadded signal
-        int src = p < 0 ? -p : (p >= L ? 2 * L - 2 - p : p);
-        buf[n] = (double)(x[src] * c_win[n]);
-    }
-    for (int k = 0; k < 11; k++) {
-        double re = 0.0, im = 0.0;
-        for (int n = 0; n < 20; n++) {
-            re += buf[n] * C_COS(k, n);
-            im -= buf[n] * C_SIN(k, n);
-        }
-        if (k == 0 || k == 10) im = 0.0;
-        float rf = (float)re, imf = (float)im;
-        out[(long)k * F + f] = hypotf(rf, imf);
-        out[(long)(11 + k) * F + f] = atan2f(imf, rf);
-    }
-}
 
-// frame time signals: fr[f, n] = irfft(exp(post[0..11]) * e^{i sin(post[11..22])})[n] * w[n] (f64)
-extern "C" __global__ void istft_frames(const float* post, int F, double* fr, const double* tw, const float* c_win) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= F) return;
-    double re[11], im[11];
-    for (int k = 0; k < 11; k++) {
-        float m = expf(post[(long)k * F + f]);
-        float p = sinf(post[(long)(11 + k) * F + f]);
-        re[k] = (double)(m * cosf(p));
-        im[k] = (double)(m * sinf(p));
-    }
-    for (int n = 0; n < 20; n++) {
-        double v = re[0] + re[10] * ((n % 2 == 0) ? 1.0 : -1.0);
-        for (int k = 1; k < 10; k++) v += 2.0 * (re[k] * C_COS(k, n) - im[k] * C_SIN(k, n));
-        v = v / 20.0;
-        fr[(long)f * 20 + n] = v * (double)c_win[n];
-    }
-}
 
 // overlap-add gather (frames ascending, like the CPU scatter) / window envelope, trim 10.
 extern "C" __global__ void istft_ola(const double* fr, int F, float* out, int len, const float* c_win) {
@@ -422,43 +300,6 @@ extern "C" __global__ void gen_noise(unsigned long long seed, float* out, long n
     if (2 * i + 1 < n) out[2 * i + 1] = r * sinf(th);
 }
 
-// Whole-sequence BiLSTM in ONE cooperative launch: identical per-step arithmetic to lstm_step
-// (same warp dot order, same gate math); grid-wide sync between steps. grid (H, 2), 128 threads.
-extern "C" __global__ void lstm_seq(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
-                                    const float* bhh_f, const float* bhh_b, float* hbuf, float* c_state,
-                                    float* out, int T, int H) {
-    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
-    int j = blockIdx.x, dir = blockIdx.y;
-    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const float* gx = dir == 0 ? gx_f : gx_b;
-    const float* whh = dir == 0 ? whh_f : whh_b;
-    const float* bhh = dir == 0 ? bhh_f : bhh_b;
-    __shared__ float gates[4];
-    int r = warp * H + j;
-    const float* w = whh + (long)r * H;
-    for (int step = 0; step < T; step++) {
-        int t = dir == 0 ? step : T - 1 - step;
-        const float* h = hbuf + (step & 1) * 2 * H + dir * H;
-        float* h_nxt = hbuf + ((step + 1) & 1) * 2 * H;
-        float acc = 0.0f;
-        for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
-        for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
-        if (lane == 0) gates[warp] = gx[(long)t * 4 * H + r] + (acc + bhh[r]);
-        __syncthreads();
-        if (threadIdx.x == 0) {
-            float ig = 1.0f / (1.0f + expf(-gates[0]));
-            float fg = 1.0f / (1.0f + expf(-gates[1]));
-            float gg = tanhf(gates[2]);
-            float og = 1.0f / (1.0f + expf(-gates[3]));
-            float c = fg * c_state[dir * H + j] + ig * gg;
-            c_state[dir * H + j] = c;
-            float hn = og * tanhf(c);
-            h_nxt[dir * H + j] = hn;
-            out[(long)t * 2 * H + dir * H + j] = hn;
-        }
-        grid.sync();
-    }
-}
 
 // ================================================================ B1: ragged batched layout
 // A domain buffer is [C, L]; item b owns columns [seg_start[b], seg_start[b] + seg_len[b]);
@@ -475,7 +316,7 @@ extern "C" __global__ void mask_gaps(float* x, const int* col_item, int C, int L
 // AdaIN apply with per-item statistics and per-item gamma/beta (gb [B, 2C]); gap columns -> 0.
 extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* col_item, const float* mean,
                                            const float* rstd, const float* nw, const float* nb, const float* gb,
-                                           const float* alpha, int C, int L, int act, float slope) {
+                                           int C, int L, float slope) {
     long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
     if (i >= (long)C * L) return;
     int c = (int)(i / L);
@@ -487,14 +328,7 @@ extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* 
     float v = (x[i] - mean[b * C + c]) * rstd[b * C + c];
     float g1 = 1.0f + gb[(long)b * 2 * C + c];
     v = g1 * (v * nw[c] + nb[c]) + gb[(long)b * 2 * C + C + c];
-    if (act == 1) {
-        if (v < 0.0f) v = v * slope;
-    } else if (act == 2) {
-        float a = alpha[c];
-        float inv = 1.0f / a;
-        float sn = sinf(a * v);
-        v = v + inv * (sn * sn);
-    }
+    if (v < 0.0f) v = v * slope;  // leaky ReLU
     y[i] = v;
 }
 
@@ -830,8 +664,8 @@ extern "C" __global__ void bf16_layout_a(const unsigned short* __restrict__ w, u
 //   to BF16 and transposed (time rows, channel columns; each tap's B operand is a row offset).
 // - Epilogue through a per-warp 16x16 f32 tile.
 // - Optional AdaIN + Snake prologue (`pro` non-null): the input is the RAW AdaIN input and staging
-//   applies exactly adain_apply_seg's float expression (Snake activation); gap columns
-//   (col_item < 0) -> 0.
+//   applies the AdaIN expression of adain_apply_seg followed by Snake, x + sin(a x)^2 / a;
+//   gap columns (col_item < 0) -> 0.
 struct AdainPro {
     const int* col_item;
     const float *mean, *rstd, *nw, *nb, *gb, *alpha;

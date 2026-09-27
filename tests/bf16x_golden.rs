@@ -28,13 +28,17 @@ fn sha256_file(p: &Path) -> String {
 
 /// Render `input` with the binary under test; returns line -> WAV sha256.
 fn render(input: &Path, voice: &str, args: &[String], out: &Path) -> BTreeMap<usize, String> {
+    render_env(input, voice, args, out, &[])
+}
+
+fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &[(&str, &str)]) -> BTreeMap<usize, String> {
     let _ = std::fs::remove_dir_all(out);
     let o = Command::new(bin())
         .env_clear()
+        .envs(env.iter().copied())
         .env("PATH", "/nonexistent")
         .env("CUDA_VISIBLE_DEVICES", "0")
         .env("KOKORO_FRONTEND_DIR", data().join("frontend"))
-        .env("KOKORO_PRECISION", "bf16x")
         .args(["synth", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
@@ -119,6 +123,20 @@ fn golden_checker_negative_controls() {
     assert_eq!(diff(&missing, &want).len(), 1);
     let extra: BTreeMap<usize, String> = [(1, "a".repeat(64)), (2, "b".repeat(64)), (3, "d".repeat(64))].into();
     assert_eq!(diff(&extra, &want).len(), 1);
+}
+
+/// Negative control for the product comparison: with the batch gap masking disabled (fault hook
+/// KOKORO_BATCH_NEGCTL_NOMASK), activations leak across batch items; the golden check must see it.
+#[test]
+fn golden_detects_cross_item_leakage() {
+    let table: serde_json::Value = serde_json::from_str(include_str!("pinned/bf16x_golden.json")).unwrap();
+    let c = &table["cases"]["edge_af"];
+    let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(c["input"].as_str().unwrap());
+    let args: Vec<String> = c["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect();
+    let got = render_env(&input, c["voice"].as_str().unwrap(), &args, &data().join("tmp/bf16x_golden_negctl"), &[("KOKORO_BATCH_NEGCTL_NOMASK", "1")]);
+    let d = diff(&got, c["wav_sha256"].as_object().unwrap());
+    println!("edge_af with gap masking disabled: {} of {} lines differ", d.len(), c["lines"]);
+    assert!(!d.is_empty(), "cross-item leakage was not detected by the golden comparison");
 }
 
 /// Private chapter (316 lines, both voices) vs the accepted artifact; hashes and text stay under

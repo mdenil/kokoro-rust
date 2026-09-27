@@ -25,7 +25,7 @@ fn synth(input: &Path, out: &Path, extra: &[&str]) -> (i32, String) {
     let o = Command::new(env!("CARGO_BIN_EXE_kokoro"))
         .env_clear()
         .env("PATH", "/nonexistent")
-        .args(["synth", "--device", "cpu", "--threads", "4", "--input-format", "phonemes", "--model-dir"])
+        .args(["synth", "--input-format", "phonemes", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
         .arg(input)

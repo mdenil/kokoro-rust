@@ -66,8 +66,45 @@ Evidence: `$KOKORO_DATA/evidence/release-cleanup/inventory/`.
 | `KOKORO_GPU_HOST_NOISE` | test hook (host noise, batch-1) | off | REMOVED (A) |
 | `KOKORO_PREFETCH_FRONTEND`, `KOKORO_SKIP_TEARDOWN` | kill switches (PL-015 / PL-013) | on | REMOVED (A); behavior kept |
 
+| `--device cpu|cuda` | runtime backend selector | cuda | REMOVED (B); CUDA is the only backend. The `cuda` cargo feature is gone and `cudarc` is required |
+| `--threads` (CPU math threads; `rayon`, `matrixmultiply`) | CPU backend option | n/a | REMOVED (B) with the CPU backend and both dependencies |
+| `--batch-phonemes 0` (batch-1 single-item forward) | alternate GPU implementation | not used (8000) | REMOVED (B): values < 1 are refused. OOM safety is unchanged: failing batches still split down to one item through the same batched path, and `--batch-items 1` runs one chunk per batch |
+| `KOKORO_PROFILE` (synchronizing stage profiler, `src/prof.rs`) | diagnostic plumbing | off | REMOVED (B). `--timeline` (non-intrusive span log) stays |
+| `KOKORO_DEBUG_F0_DIR` | diagnostic dump | unset | REMOVED (B) |
+| `KOKORO_BATCH_NEGCTL_NOMASK` | test fault hook (disables batch gap masking) | unset | KEPT: used by the golden negative control `golden_detects_cross_item_leakage` |
+
+## Backend / implementation inventory
+| implementation | disposition |
+|---|---|
+| CPU f32 model forward (`nn`/`model`/`albert`/`vocoder` forwards, `ops` CPU kernels incl. the `unsafe` matrixmultiply facade, CPU STFT/iSTFT/SineGen) | REMOVED (B). Kept: layer weight structs + loaders (weight-norm resolution), ALBERT host embedding lookup + LayerNorm, duration rounding, noise seeding, constants. `ops` no longer contains `unsafe` |
+| GPU single-item forward (`forward_ids`, per-layer `fwd`, `seam_*` oracle entry points) | REMOVED (B), with its 9 kernels (adain_apply, cat_style_rows, chan_stats, expand_rows/cols, istft_frames, lstm_seq, reflect_pad_left1, stft20) |
+| GPU batched forward (`forward_batch`) | the product |
+| `ItemNoise::Fixed` (replayed reference noise) | KEPT: feeds the reference-fixture diagnostic |
+
+Kernels after cleanup: 36, down from 74. Every one is launched by the product (the Step-A set of 45
+minus the 9 single-item kernels).
+
+## Tests
+| test | disposition |
+|---|---|
+| `bf16x_golden` (new) | byte equality vs the accepted artifact: 11 public cases + private chapter (ignored), checker negative controls, cross-item-leakage negative control |
+| `bf16x_reference` (new) | exact data pins vs the 15 Python fixtures (input ids, style vectors); ignored diagnostic: product forward with the reference's noise vs the reference audio (printed, no thresholds) |
+| `cli_text_native` | kept; `--device` dropped. `batched_and_batch1_agree_on_structure` replaced by `one_item_per_batch_is_complete_and_mapped`: under BF16x, batch shape changes predicted durations (11/65 edge lines), so sample counts / correlation across compositions are not an invariant; both compositions are pinned by the golden test. `long_lines_are_complete` uses one chunk per batch in both runs |
+| `cli_linefile` | kept; now runs on the GPU product (was `--device cpu`) |
+| frontend suites, `hashing`, `native_load` | unchanged |
+| `parity` (CPU f32 ladder, attribution, truth distance, perturbation) | RETIRED with the CPU backend |
+| `gpu_parity` (f32 single-item seam ladder, CPU/GPU noise stream, seam negative controls, RB-1 vs strict baseline) | RETIRED with the f32 path and the seam entry points |
+| `gpu_batch` (batched vs single-item RB-1 bounds, batching/mapping negative controls, owner listening exports) | RETIRED with the single-item path; mapping is covered by per-line byte equality, leakage by the new negative control |
+| `diag_source` (CPU source diagnostic) | RETIRED |
+| example `listening_pair` (CPU model) | RETIRED; `load_breakdown` updated |
+
+Historical outcomes of the retired f32 tests stay in the evidence (docs/conformance, `$KOKORO_DATA/evidence/ladder`, phase-1 receipts); they describe the f32 engine, not the product.
+
 ## Commits
 - 781b910: scope persisted (brief/state).
 - 6968945: goldens and golden test, passing on the unmodified accepted code.
 - Step A: precision matrix, alternative kernels and kill switches removed. Golden: 0 differences on
   all 11 public cases and the private chapter (both voices).
+- Step B: CPU backend, single-item GPU forward, profiling/debug plumbing and the `cuda` feature
+  removed; tests repointed/retired. Golden: 0 differences (11 public cases + private chapter);
+  leakage negative control detects 65/65 lines.
