@@ -111,7 +111,7 @@ enum Cmd {
         /// Output writer threads (WAV encode + hash + sidecar).
         #[arg(long, default_value_t = 4)]
         write_threads: usize,
-        /// fsync every WAV/sidecar/manifest before its atomic rename. Off by default (like the production
+        /// fsync every WAV/sidecar/manifest before its atomic rename. Off by default (like the reference
         /// Python path): resume re-verifies every output against its recorded audio sha256, so a file
         /// lost to a power failure is re-synthesized; renames still keep partial files invisible.
         #[arg(long)]

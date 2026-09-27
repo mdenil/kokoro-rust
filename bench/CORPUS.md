@@ -10,8 +10,8 @@ uppercase letter/opening quote, one utterance per line, Gutenberg `_emphasis_` u
 removed. Text is otherwise exact (curly quotes, em-dashes, parentheses kept).
 
 65 utterances, 8–596 characters (median 142). Long lines exceed 510 phonemes and exercise the
-reference's waterfall chunking. sha256 of the file after underscore removal is recorded in
-the benchmark receipts.
+reference's waterfall chunking. sha256 of the file after underscore removal is recorded
+with each benchmark result.
 
 ## Legal / provenance notes
 - Project Gutenberg's eBook #11 page states the work is in the public domain in the USA. Users
@@ -19,5 +19,5 @@ the benchmark receipts.
   text or trademark and is distributed as a transformed public-domain excerpt (transformations above).
 - `corpus_alice_ch1.chunks.jsonl` holds phoneme chunks derived from that excerpt with the pinned
   misaki 0.9.4 frontend (Apache-2.0).
-- The optional private-chapter benchmark (not in this repository) uses copyrighted text that must
-  never be committed; `scripts/check_private_leaks.py` audits tracked/staged content before pushes.
+- Some performance figures (docs/VALIDATION.md) come from a private long-form text that is not in
+  this repository.

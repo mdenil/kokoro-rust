@@ -1,6 +1,6 @@
 # Portability and configuration
 
-## Supported scope (initial)
+## Supported scope
 | | tested | notes |
 |---|---|---|
 | OS / CPU | Linux x86_64 (Ubuntu) | other platforms unverified |
@@ -57,6 +57,12 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
 | `KOKORO_BIN` | optional binary under test (default: this crate's) |
 | `KOKORO_ESPEAK_REFERENCE_DIR` | the eSpeak NG 1.52.0 copy the Python reference ships (library + `espeak-ng-data/`), used by the tests that compare with the reference fixtures (default `<frontend dir>/espeak-ng-1.52.0`, staged by `scripts/stage_espeak.sh` from the reference environment) |
 
+- The test data root is not distributed. `frontend/` and the model come from the setup scripts
+  in README.md (the tests expect the model under `hf/hub/models--hexgrad--Kokoro-82M/snapshots/<rev>/`
+  unless `KOKORO_MODEL_DIR` is set). `fixtures/` and `models/` are generated from the Python
+  reference by the tools in `oracle/` (reference environment: `scripts/setup_reference_env.sh`), and
+  the reference eSpeak NG copy is staged with `scripts/stage_espeak.sh`. Building a complete test
+  data root from scratch is not yet a documented, exercised procedure.
 - Scratch output goes to cargo's per-project `CARGO_TARGET_TMPDIR` (inside `target/`).
 - Host tools the tests need:
   - `strace` on PATH (execve audit);
