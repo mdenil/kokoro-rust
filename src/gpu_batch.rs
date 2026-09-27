@@ -151,6 +151,17 @@ impl GpuKokoro {
         let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable(g) && blk.convs2[i].igemm_applicable(g));
         let lp_fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].wmma_ok(d.l, d.l) && blk.convs2[i].wmma_ok(d.l, d.l));
         for i in 0..3 {
+            if lp_fuse && blk.convs1[i].wmma_pro_ok(d.l) && blk.convs2[i].wmma_pro_ok(d.l) {
+                // PHASE 2 (P2-L4, kill switch KOKORO_LP_PROLOGUE=0): AdaIN + Snake applied inside the
+                // conv's input staging; only the statistics are computed separately.
+                let (a1, a2) = (&blk.adain1[i], &blk.adain2[i]);
+                let (gb, mean, rstd) = self.adain_stats(a1, &x, d, styles)?;
+                let mut h = g.alloc(blk.convs1[i].cout * d.l)?;
+                blk.convs1[i].fwd_wmma_pro(g, &x, d.l, &mut h, false, &d.col_item, &mean, &rstd, &a1.nw, &a1.nb, &gb, &blk.alpha1[i])?;
+                let (gb, mean, rstd) = self.adain_stats(a2, &h, d, styles)?;
+                blk.convs2[i].fwd_wmma_pro(g, &h, d.l, &mut x, true, &d.col_item, &mean, &rstd, &a2.nw, &a2.nb, &gb, &blk.alpha2[i])?;
+                continue;
+            }
             if lp_fuse {
                 // PHASE 2: tensor-core convs; AdaIN output has zero gaps (no mask); conv2 accumulates
                 // into x in its epilogue.

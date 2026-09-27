@@ -29,6 +29,24 @@ Honest notes:
   converts and transposes each conv input once per call. Both costs are inside the measured times.
 - **No speed inference from dtype:** only measured wall times count.
 
+## Phase-2 kernel levers (after the matrix; half levels only; each bitwise identical to its predecessor)
+Measured with the in-process bench (`kokoro bench`, Alice ch. 1 chunks, af_heart, fp16). Timings are
+interleaved rounds of 5 reps, total median, cv ≤ 0.5%. Bitwise identity was checked on Alice ch. 1
+× {af_heart, am_adam} × {fp16, bf16}: 65/65 WAVs byte-identical each.
+
+| lever | change | fp16 forward | verdict |
+|---|---|---|---|
+| (matrix binary) | v1 fused WMMA conv | 1.105 s | baseline |
+| P2-L2 | v2 WMMA conv: A fragments straight from a pre-laid-out global weight buffer (no weight smem staging); 32 input channels per __syncthreads pair; 2×2 warp layout (32 co × 64 t per warp: 2 A + 4 B loads per 8 MMAs); per-warp 16×16 epilogue tile instead of 32 KB block staging. Kill switch KOKORO_LP_WMMA2=0 | 0.933 s (1.18×) | KEEP |
+| P2-L3 | v2 with 128-co blocks (8 warps): each staged input window feeds twice the MMAs; the 128-ch stage stages its input once. Kill switch KOKORO_LP_WMMA2W=0 | 0.915 → 0.895 s (−2.2%) | KEEP |
+| P2-L4 | AdaIN + Snake applied inside the v2 conv's input staging (exactly adain_apply_seg's float expression; `-fmad=false` build) instead of a separate apply kernel: saves one activation write + read per AdaIN in every Snake block. Kill switch KOKORO_LP_PROLOGUE=0 | 0.895 → 0.855 s (−4.5%) | KEEP |
+| (neutral) | v2 staging with each warp streaming whole channel rows (no per-element divides, unrolled loads) | 0.933 vs 0.931 s | NEUTRAL, reverted |
+
+- Cumulative fp16 forward: 1.105 → 0.855 s (1.29×). fp16 output is bitwise identical to the matrix
+  binary's, so every quality number above still applies to fp16/bf16 unchanged.
+- Hardware counters after P2-L2 (ncu, same method as above): tensor pipe 30–36% active (v1 ~20%),
+  DRAM 48–57%, warps active ~31% (98 registers/thread), top stall long-scoreboard (global loads).
+
 ## Attempted and rejected
 - **Half WMMA for any Cin/Cout** (KOKORO_LP_WMMA_ANY=1: route the decoder convs, Cin 514 / 1090,
   and conv_post through the fused kernel instead of the per-tap fallback; the kernel already

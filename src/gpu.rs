@@ -44,6 +44,9 @@ kernels!(
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
     cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s, chan_stats_seg1,
     lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb, conv1d_wmma_f16_res, conv1d_wmma_bf16_res, conv1d_wmma_s8_res,
+    lp_layout_a, conv1d_wmma2_f16, conv1d_wmma2_f16_res, conv1d_wmma2_bf16, conv1d_wmma2_bf16_res,
+    conv1d_wmma2w_f16, conv1d_wmma2w_f16_res, conv1d_wmma2w_bf16, conv1d_wmma2w_bf16_res,
+    conv1d_wmma2w_f16_pro, conv1d_wmma2w_f16_pro_res, conv1d_wmma2w_bf16_pro, conv1d_wmma2w_bf16_pro_res,
     conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
 );
 
@@ -420,6 +423,12 @@ static WMMA_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env
 /// e.g. the decoder convs (Cin 514 / 1090) to the per-tap fallback. Opt-in KOKORO_LP_WMMA_ANY=1:
 /// measured NEUTRAL (fp16 Alice forward 1.106 -> 1.100 s, 3 interleaved rounds), so off by default.
 static WMMA_ANY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA_ANY").map(|v| v == "1").unwrap_or(false));
+/// PHASE 2 lever P2-L2: second-generation fused WMMA conv for half types (kill switch KOKORO_LP_WMMA2=0).
+static WMMA2_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA2").map(|v| v != "0").unwrap_or(true));
+/// PHASE 2 (P2-L3 candidate): v2 WMMA conv with 128-co blocks (8 warps) instead of 64-co (4 warps).
+static WMMA2W_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA2W").map(|v| v != "0").unwrap_or(true));
+/// PHASE 2 (P2-L4 candidate): AdaIN + Snake applied inside the v2 WMMA conv's input staging.
+static WMMA_PRO_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_PROLOGUE").map(|v| v != "0").unwrap_or(true));
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -438,6 +447,8 @@ pub struct GConv {
     tier: u8,
     /// PHASE 2: low-precision weights for this conv under the engine's precision (None = f32)
     lp: Option<LpWeights>,
+    /// PHASE 2 lever P2-L2: half weights in the v2 WMMA A-fragment layout [cot][slice][k][64][16]
+    lp_a: Option<CudaSlice<u16>>,
 }
 
 /// PHASE 2: per-conv low-precision operands, layout [K][Cout][Cin] like `wt`.
@@ -477,7 +488,7 @@ impl GConv {
         } else {
             None
         };
-        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct, tier: 0, lp: None })
+        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct, tier: 0, lp: None, lp_a: None })
     }
 
     /// Whether the fused implicit-GEMM path applies to a same-length conv over length `t`.
@@ -496,6 +507,15 @@ impl GConv {
                 launch!(g, lp_cvt_f16, cfg1(n), &self.wt, &mut h, &nn)?;
             } else {
                 launch!(g, lp_cvt_bf16, cfg1(n), &self.wt, &mut h, &nn)?;
+            }
+            if *WMMA2_ON {
+                let (ns, ct) = (self.cin.div_ceil(16), self.cout.div_ceil(64));
+                let na = ct * ns * self.k * 1024;
+                // SAFETY: fully written by lp_layout_a (every index < na).
+                let mut wa = unsafe { g.stream.alloc::<u16>(na) }?;
+                let (ci, co, kk, nn) = (self.cin as i32, self.cout as i32, self.k as i32, na as i64);
+                launch!(g, lp_layout_a, cfg1(na), &h, &mut wa, &ci, &co, &kk, &nn)?;
+                self.lp_a = Some(wa);
             }
             self.lp = Some(LpWeights::Half(h));
         } else if g.prec == Precision::Int8 {
@@ -637,6 +657,37 @@ impl GConv {
         let grid = (t.div_ceil(tn) as u32, cout.div_ceil(64) as u32, 1);
         let k = &g.k;
         match lp {
+            LpWeights::Half(_) if self.lp_a.is_some() => {
+                let wa = self.lp_a.as_ref().expect("checked");
+                let tw2 = 128 + (self.k - 1) * self.dil;
+                let wide = *WMMA2W_ON;
+                let (cw, co_blk) = if wide { (4usize, 128usize) } else { (2, 64) };
+                let smem = (tw2 * 48 * 2).next_multiple_of(128) + 2 * cw * 256 * 4;
+                let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, cout.div_ceil(co_blk) as u32, 1), block_dim: (64 * cw as u32, 1, 1), shared_mem_bytes: smem as u32 };
+                let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
+                let f = match (wide, f16, res) {
+                    (false, true, false) => &k.conv1d_wmma2_f16,
+                    (false, true, true) => &k.conv1d_wmma2_f16_res,
+                    (false, false, false) => &k.conv1d_wmma2_bf16,
+                    (false, false, true) => &k.conv1d_wmma2_bf16_res,
+                    (true, true, false) => &k.conv1d_wmma2w_f16,
+                    (true, true, true) => &k.conv1d_wmma2w_f16_res,
+                    (true, false, false) => &k.conv1d_wmma2w_bf16,
+                    (true, false, true) => &k.conv1d_wmma2w_bf16_res,
+                };
+                let mut lb = g.stream.launch_builder(f);
+                lb.arg(x).arg(wa);
+                match &self.b {
+                    Some(b) => lb.arg(b),
+                    None => lb.arg(&null),
+                };
+                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
+                // SAFETY: matches conv1d_wmma2_{f16,bf16}[_res](x, wa, b|null, y, Cin, T, Cout, K, dil, pad);
+                // wa holds ceil(Cout/64) * ceil(Cin/16) * K * 1024 halves (the kernel's full index range; in
+                // 128-co blocks, warps of a missing upper 64-co tile skip all loads);
+                // x Cin*T, y Cout*T (callers check sizes); smem = window [TW][48] halves + 4 KB epilogue.
+                unsafe { lb.launch(cfg) }.context("conv1d_wmma2")?;
+            }
             LpWeights::Half(wh) => {
                 let smem = ((tw * 16 + self.k * 64 * 16) * 2).max(64 * tn * 4);
                 let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
@@ -684,6 +735,47 @@ impl GConv {
     pub(crate) fn fwd_wmma_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
         ensure!(self.wmma_ok(t, t) && x.len() == self.cin * t && res.len() == self.cout * t, "wmma residual conv not applicable");
         self.launch_wmma(g, x, t, res, true)
+    }
+
+    /// PHASE 2 (P2-L4): the fused AdaIN+Snake prologue conv applies.
+    pub(crate) fn wmma_pro_ok(&self, t: usize) -> bool {
+        *WMMA_PRO_ON && *WMMA2W_ON && self.lp_a.is_some() && self.wmma_ok(t, t)
+    }
+
+    /// PHASE 2 (P2-L4): y (= or +=) conv(snake(adain(x))) with the AdaIN + Snake applied while
+    /// staging the conv input (exactly adain_apply_seg's arithmetic; gap columns -> 0).
+    /// `x` is the raw AdaIN input [Cin][t]; mean/rstd [B][Cin], gb [B][2 Cin], nw/nb/alpha [Cin].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fwd_wmma_pro(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, res: bool, col_item: &CudaSlice<i32>, mean: &Buf, rstd: &Buf, nw: &Buf, nb: &Buf, gb: &Buf, alpha: &Buf) -> Result<()> {
+        ensure!(self.wmma_pro_ok(t) && x.len() == self.cin * t && y.len() == self.cout * t && col_item.len() >= t, "wmma prologue conv not applicable");
+        ensure!(nw.len() == self.cin && nb.len() == self.cin && alpha.len() == self.cin && mean.len() == rstd.len() && gb.len() == 2 * mean.len(), "prologue parameter shapes");
+        let wa = self.lp_a.as_ref().expect("checked");
+        let (cin, cout) = (self.cin, self.cout);
+        let null = 0u64;
+        let tw2 = 128 + (self.k - 1) * self.dil;
+        let smem = (tw2 * 48 * 2).next_multiple_of(128) + 8 * 256 * 4;
+        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, cout.div_ceil(128) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: smem as u32 };
+        let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
+        let k = &g.k;
+        let f = match (f16, res) {
+            (true, false) => &k.conv1d_wmma2w_f16_pro,
+            (true, true) => &k.conv1d_wmma2w_f16_pro_res,
+            (false, false) => &k.conv1d_wmma2w_bf16_pro,
+            (false, true) => &k.conv1d_wmma2w_bf16_pro_res,
+        };
+        let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+        let mut lb = g.stream.launch_builder(f);
+        lb.arg(x).arg(wa);
+        match &self.b {
+            Some(b) => lb.arg(b),
+            None => lb.arg(&null),
+        };
+        lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
+        lb.arg(col_item).arg(mean).arg(rstd).arg(nw).arg(nb).arg(gb).arg(alpha);
+        // SAFETY: matches conv1d_wmma2w_{f16,bf16}_pro[_res](x, wa, b|null, y, Cin, T, Cout, K, dil, pad,
+        // col_item, mean, rstd, nw, nb, gb, alpha); sizes checked above (col_item[t] in [-1, B)).
+        unsafe { lb.launch(cfg) }.context("conv1d_wmma2w_pro")?;
+        Ok(())
     }
 
     pub(crate) fn igemm_applicable(&self, g: &Gpu) -> bool {

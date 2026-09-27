@@ -1228,3 +1228,175 @@ extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_s8_res(const float
                                                                      const float* absmax, const float* wscale) {
     conv1d_wmma_body<signed char, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, absmax, wscale);
 }
+
+// PHASE 2 lever P2-L2: second-generation fused tensor-core conv (half types only).
+// - A (weights) fragments are loaded straight from a pre-laid-out global buffer
+//   wa[cot][slice][k][64][16] (zero-padded partial tiles), so weights are never staged in smem.
+// - The input window is staged 32 channels (2 slices) per __syncthreads pair.
+// - 4 warps as 2 (co) x 2 (t): each warp computes 32 co x 64 t (2 x 4 fragments), so per tap it
+//   loads 2 A + 4 B fragments for 8 MMAs (v1: 1 + 8 for 8).
+// - Epilogue through a per-warp 16x16 float tile (4 KB total instead of v1's 32 KB block staging).
+// f32 accumulate, same operand rounding as v1; accumulation order differs.
+extern "C" __global__ void lp_layout_a(const unsigned short* __restrict__ w, unsigned short* __restrict__ wa,
+                                       int Cin, int Cout, int K, long n) {
+    const int ns = (Cin + 15) / 16;
+    for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < n; i += (long)gridDim.x * blockDim.x) {
+        int col = i & 15, row = (i >> 4) & 63;
+        long r = i >> 10;
+        int k = r % K;
+        r /= K;
+        int s = r % ns;
+        int cot = r / ns;
+        int co = cot * 64 + row, ci = s * 16 + col;
+        wa[i] = (co < Cout && ci < Cin) ? w[((long)k * Cout + co) * Cin + ci] : (unsigned short)0;
+    }
+}
+// CW = warps along co (2: block = 64 co x 128 t, 128 threads; 4: block = 128 co x 128 t, 256 threads)
+// Optional prologue (P2-L4, `pro` non-null): the input is the RAW AdaIN input; staging applies AdaIN
+// + Snake with exactly adain_apply_seg's float expression (act 2), gaps (col_item < 0) -> 0.
+struct AdainPro {
+    const int* col_item;
+    const float *mean, *rstd, *nw, *nb, *gb, *alpha;
+};
+template <typename HT, bool RES, int CW>
+__device__ __forceinline__ void conv1d_wmma2_body(const float* __restrict__ x, const HT* __restrict__ wa,
+                                                  const float* __restrict__ b, float* __restrict__ y,
+                                                  int Cin, int T, int Cout, int K, int dil, int pad,
+                                                  const AdainPro* pro = nullptr) {
+    using namespace nvcuda;
+    constexpr int TN = 128, XLD = 48;  // XLD * 2 bytes = 96: every row start stays 32-byte aligned
+    extern __shared__ __align__(128) unsigned char smem_raw[];
+    const int TW = TN + (K - 1) * dil;
+    HT* xs = (HT*)smem_raw;  // [TW][XLD], channels 0..31 of the current stage
+    float* stg = (float*)(smem_raw + (((size_t)TW * XLD * sizeof(HT) + 127) / 128) * 128);  // [2*CW warps][256]
+    constexpr int NT = 64 * CW;  // threads
+    const int t0 = blockIdx.x * TN, warp = threadIdx.x >> 5;
+    const int cot = blockIdx.y * (CW / 2) + ((warp >> 1) >> 1), co0 = cot * 64;  // this warp's 64-co tile
+    const int lane = threadIdx.x & 31, wm = (warp >> 1) & 1, wn = warp & 1;
+    const bool live = co0 < Cout;  // CW = 4: the upper tile may not exist
+    const int ns = (Cin + 15) / 16;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
+#pragma unroll
+    for (int m = 0; m < 2; m++)
+#pragma unroll
+        for (int n = 0; n < 4; n++) wmma::fill_fragment(acc[m][n], 0.0f);
+    for (int s0 = 0; s0 < ns; s0 += 2) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < 32 * TW; i += NT) {
+            int ci = i / TW, tt = i - ci * TW;
+            int c = s0 * 16 + ci, t = t0 - pad + tt;
+            float v = (c < Cin && t >= 0 && t < T) ? x[(long)c * T + t] : 0.0f;
+            if (pro && c < Cin && t >= 0 && t < T) {
+                int bi = pro->col_item[t];
+                if (bi < 0) {
+                    v = 0.0f;
+                } else {
+                    v = (v - pro->mean[bi * Cin + c]) * pro->rstd[bi * Cin + c];
+                    float g1 = 1.0f + pro->gb[(long)bi * 2 * Cin + c];
+                    v = g1 * (v * pro->nw[c] + pro->nb[c]) + pro->gb[(long)bi * 2 * Cin + Cin + c];
+                    float a = pro->alpha[c];
+                    float inv = 1.0f / a;
+                    float sn = sinf(a * v);
+                    v = v + inv * (sn * sn);
+                }
+            }
+            xs[tt * XLD + ci] = to_lp<HT>(v, 0.0f);
+        }
+        __syncthreads();
+        const int nj = live ? min(2, ns - s0) : 0;
+        for (int j = 0; j < nj; j++) {
+            const HT* wbase = wa + ((long)(cot * ns + s0 + j) * K) * 1024 + (wm * 32) * 16;
+            for (int k = 0; k < K; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, HT, wmma::row_major> a0, a1;
+                wmma::load_matrix_sync(a0, wbase + k * 1024, 16);
+                wmma::load_matrix_sync(a1, wbase + k * 1024 + 256, 16);
+#pragma unroll
+                for (int n = 0; n < 4; n++) {
+                    wmma::fragment<wmma::matrix_b, 16, 16, 16, HT, wmma::col_major> bf;
+                    wmma::load_matrix_sync(bf, xs + (wn * 64 + n * 16 + k * dil) * XLD + j * 16, XLD);
+                    wmma::mma_sync(acc[0][n], a0, bf, acc[0][n]);
+                    wmma::mma_sync(acc[1][n], a1, bf, acc[1][n]);
+                }
+            }
+        }
+    }
+    if (!live) return;  // after the last __syncthreads
+    float* st = stg + warp * 256;
+#pragma unroll
+    for (int m = 0; m < 2; m++)
+#pragma unroll
+        for (int n = 0; n < 4; n++) {
+            wmma::store_matrix_sync(st, acc[m][n], 16, wmma::mem_row_major);
+            __syncwarp();
+            for (int e = lane; e < 256; e += 32) {
+                int co = co0 + wm * 32 + m * 16 + (e >> 4), t = t0 + wn * 64 + n * 16 + (e & 15);
+                if (co < Cout && t < T) {
+                    long o = (long)co * T + t;
+                    float r = (b ? b[co] : 0.0f) + st[e];
+                    if (RES) y[o] = y[o] + r;
+                    else y[o] = r;
+                }
+            }
+            __syncwarp();
+        }
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_f16(const float* x, const __half* wa, const float* b, float* y,
+                                                                   int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__half, false, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16(const float* x, const __half* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__half, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_f16_res(const float* x, const __half* wa, const float* b, float* y,
+                                                                       int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__half, true, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_res(const float* x, const __half* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__half, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__nv_bfloat16, false, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__nv_bfloat16, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_bf16_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                        int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__nv_bfloat16, true, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma2_body<__nv_bfloat16, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_pro(const float* x, const __half* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                    const int* col_item, const float* mean, const float* rstd,
+                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma2_body<__half, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_pro_res(const float* x, const __half* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                    const int* col_item, const float* mean, const float* rstd,
+                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma2_body<__half, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_pro(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                    const int* col_item, const float* mean, const float* rstd,
+                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma2_body<__nv_bfloat16, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_pro_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                    const int* col_item, const float* mean, const float* rstd,
+                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma2_body<__nv_bfloat16, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+}
