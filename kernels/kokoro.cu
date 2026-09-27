@@ -1119,7 +1119,10 @@ template <> __device__ __forceinline__ signed char to_lp<signed char>(float v, f
     q = fminf(fmaxf(q, -127.0f), 127.0f);
     return (signed char)q;
 }
-template <typename HT>
+#ifndef WMMA_TN
+#define WMMA_TN 64
+#endif
+template <typename HT, bool RES = false>
 __device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, const HT* __restrict__ w,
                                                  const float* __restrict__ b, float* __restrict__ y,
                                                  int Cin, int T, int Cout, int K, int dil, int pad,
@@ -1128,18 +1131,19 @@ __device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, co
     typedef typename WmmaAcc<HT>::T AT;
     constexpr int XLD = sizeof(HT) == 1 ? 32 : 16;  // smem row stride (elements): 32-byte rows
     extern __shared__ __align__(128) unsigned char smem_raw[];
-    const int TW = 64 + (K - 1) * dil;
+    constexpr int TN = WMMA_TN, NF = TN / 16;
+    const int TW = TN + (K - 1) * dil;
     HT* xs = (HT*)smem_raw;                    // [TW][XLD]
     HT* ws = xs + TW * XLD;                    // [K][64][16]
-    const int t0 = blockIdx.x * 64, co0 = blockIdx.y * 64, warp = threadIdx.x >> 5;
+    const int t0 = blockIdx.x * TN, co0 = blockIdx.y * 64, warp = threadIdx.x >> 5;
     float inv = 0.0f;
     if (absmax) {
         float am = absmax[0];
         inv = am > 0.0f ? 127.0f / am : 0.0f;
     }
-    wmma::fragment<wmma::accumulator, 16, 16, 16, AT> acc[4];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, AT> acc[NF];
 #pragma unroll
-    for (int f = 0; f < 4; f++) wmma::fill_fragment(acc[f], (AT)0);
+    for (int f = 0; f < NF; f++) wmma::fill_fragment(acc[f], (AT)0);
     for (int c0 = 0; c0 < Cin; c0 += 16) {
         __syncthreads();
         for (int i = threadIdx.x; i < 16 * TW; i += 128) {
@@ -1157,7 +1161,7 @@ __device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, co
             wmma::fragment<wmma::matrix_a, 16, 16, 16, HT, wmma::row_major> a;
             wmma::load_matrix_sync(a, ws + (k * 64 + warp * 16) * 16, 16);
 #pragma unroll
-            for (int f = 0; f < 4; f++) {
+            for (int f = 0; f < NF; f++) {
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, HT, wmma::col_major> bf;
                 wmma::load_matrix_sync(bf, xs + (f * 16 + k * dil) * XLD, XLD);
                 wmma::mma_sync(acc[f], a, bf, acc[f]);
@@ -1165,16 +1169,19 @@ __device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, co
         }
     }
     __syncthreads();
-    AT* cs = (AT*)smem_raw;  // [64][64] staging (reuses the operand smem)
+    AT* cs = (AT*)smem_raw;  // [64][TN] staging (reuses the operand smem)
 #pragma unroll
-    for (int f = 0; f < 4; f++) wmma::store_matrix_sync(cs + (warp * 16) * 64 + f * 16, acc[f], 64, wmma::mem_row_major);
+    for (int f = 0; f < NF; f++) wmma::store_matrix_sync(cs + (warp * 16) * TN + f * 16, acc[f], TN, wmma::mem_row_major);
     __syncthreads();
     float sx = absmax ? absmax[0] / 127.0f : 1.0f;
-    for (int i = threadIdx.x; i < 64 * 64; i += 128) {
-        int co = co0 + (i >> 6), t = t0 + (i & 63);
+    for (int i = threadIdx.x; i < 64 * TN; i += 128) {
+        int co = co0 + i / TN, t = t0 + i % TN;
         if (co < Cout && t < T) {
             float v = sizeof(HT) == 1 ? (float)cs[i] * (sx * wscale[co]) : (float)cs[i];
-            y[(long)co * T + t] = (b ? b[co] : 0.0f) + v;
+            long o = (long)co * T + t;
+            float r = (b ? b[co] : 0.0f) + v;
+            if (RES) y[o] = y[o] + r;  // residual in place (y already holds the residual branch input)
+            else y[o] = r;
         }
     }
 }
@@ -1204,4 +1211,20 @@ extern "C" __global__ void lp_absmax_mb(const float* __restrict__ x, long n, flo
         __syncthreads();
     }
     if (threadIdx.x == 0) atomicMax((int*)out, __float_as_int(sh[0]));
+}
+
+// PHASE 2: residual-epilogue variants (y += conv), used by the Snake blocks (mask not needed: the
+// AdaIN output already has zero gaps).
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_f16_res(const float* x, const __half* w, const float* b, float* y,
+                                                                      int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma_body<__half, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_bf16_res(const float* x, const __nv_bfloat16* w, const float* b, float* y,
+                                                                       int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma_body<__nv_bfloat16, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_s8_res(const float* x, const signed char* w, const float* b, float* y,
+                                                                     int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                     const float* absmax, const float* wscale) {
+    conv1d_wmma_body<signed char, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, absmax, wscale);
 }

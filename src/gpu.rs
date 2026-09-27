@@ -20,6 +20,7 @@ type Buf = CudaSlice<f32>;
 pub const IG_BK_CU: usize = match usize::from_str_radix(env!("KOKORO_IG_BK"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_IG_BK") };
 /// The embedded PTX (exposed for load-time probes).
 pub const PTX_SRC: &str = PTX;
+pub const WMMA_TN_CU: usize = match usize::from_str_radix(env!("KOKORO_WMMA_TN"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_WMMA_TN") };
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
 /// Kernel rounding mode baked in at build time ("fma" default, or "strict(-fmad=false)").
 pub const KERNEL_ROUNDING: &str = env!("KOKORO_KERNEL_ROUNDING");
@@ -42,7 +43,7 @@ kernels!(
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
     cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s, chan_stats_seg1,
-    lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb,
+    lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb, conv1d_wmma_f16_res, conv1d_wmma_bf16_res, conv1d_wmma_s8_res,
     conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
 );
 
@@ -528,36 +529,8 @@ impl GConv {
         let (cin, cout) = (self.cin, self.cout);
         let mut y = g.alloc(cout * tout)?;
         let null = 0u64;
-        if tout == t && cout % 64 == 0 && cin % 16 == 0 && *WMMA_ON {
-            // PHASE 2: fused tensor-core conv (kill switch KOKORO_LP_WMMA=0 -> per-tap GEMMs)
-            let tw = 64 + (self.k - 1) * self.dil;
-            let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-            let grid = (t.div_ceil(64) as u32, (cout / 64) as u32, 1);
-            match lp {
-                LpWeights::Half(wh) => {
-                    let smem = ((tw * 16 + self.k * 64 * 16) * 2).max(64 * 64 * 4);
-                    let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                    let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
-                    match (&self.b, f16) {
-                        (Some(b), true) => launch!(g, conv1d_wmma_f16, cfg, x, wh, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                        (None, true) => launch!(g, conv1d_wmma_f16, cfg, x, wh, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                        (Some(b), false) => launch!(g, conv1d_wmma_bf16, cfg, x, wh, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                        (None, false) => launch!(g, conv1d_wmma_bf16, cfg, x, wh, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                    }
-                }
-                LpWeights::Int8 { q, scale } => {
-                    let mut am = g.stream.alloc_zeros::<f32>(1)?;
-                    let nx = (cin * t) as i64;
-                    let mb = LaunchConfig { grid_dim: (1024, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                    launch!(g, lp_absmax_mb, mb, x, &nx, &mut am)?;
-                    let smem = (tw * 32 + self.k * 64 * 16).max(64 * 64 * 4);
-                    let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                    match &self.b {
-                        Some(b) => launch!(g, conv1d_wmma_s8, cfg, x, q, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &am, scale)?,
-                        None => launch!(g, conv1d_wmma_s8, cfg, x, q, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &am, scale)?,
-                    }
-                }
-            }
+        if self.wmma_ok(t, tout) {
+            self.launch_wmma(g, x, t, &mut y, false)?;
             return Ok(y);
         }
         let tcfg = LaunchConfig { grid_dim: (t.div_ceil(32) as u32, cin.div_ceil(32) as u32, 1), block_dim: (32, 8, 1), shared_mem_bytes: 0 };
@@ -638,6 +611,72 @@ impl GConv {
             }
         }
         Ok(y)
+    }
+
+    /// PHASE 2: the fused tensor-core conv applies (low-precision weights, same-length output,
+    /// Cout % 64, Cin % 16).
+    pub(crate) fn wmma_ok(&self, t: usize, tout: usize) -> bool {
+        self.lp.is_some() && tout == t && self.cout % 64 == 0 && self.cin % 16 == 0 && *WMMA_ON
+    }
+
+    /// PHASE 2: launch the fused tensor-core conv into `y` (res = accumulate into y).
+    fn launch_wmma(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, res: bool) -> Result<()> {
+        let lp = self.lp.as_ref().expect("lowp weights");
+        let (cin, cout) = (self.cin, self.cout);
+        let null = 0u64;
+        let tn = WMMA_TN_CU;
+        let tw = tn + (self.k - 1) * self.dil;
+        let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+        let grid = (t.div_ceil(tn) as u32, (cout / 64) as u32, 1);
+        let k = &g.k;
+        match lp {
+            LpWeights::Half(wh) => {
+                let smem = ((tw * 16 + self.k * 64 * 16) * 2).max(64 * tn * 4);
+                let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
+                let f = match (f16, res) {
+                    (true, false) => &k.conv1d_wmma_f16,
+                    (true, true) => &k.conv1d_wmma_f16_res,
+                    (false, false) => &k.conv1d_wmma_bf16,
+                    (false, true) => &k.conv1d_wmma_bf16_res,
+                };
+                let mut lb = g.stream.launch_builder(f);
+                lb.arg(x).arg(wh);
+                match &self.b {
+                    Some(b) => lb.arg(b),
+                    None => lb.arg(&null),
+                };
+                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
+                // SAFETY: matches conv1d_wmma_{f16,bf16}[_res](x, w, b|null, y, Cin, T, Cout, K, dil, pad);
+                // x Cin*T, w K*Cout*Cin, y Cout*T (callers check sizes); smem as computed.
+                unsafe { lb.launch(cfg) }.context("conv1d_wmma")?;
+            }
+            LpWeights::Int8 { q, scale } => {
+                let mut am = g.stream.alloc_zeros::<f32>(1)?;
+                let nx = (cin * t) as i64;
+                let mb = LaunchConfig { grid_dim: (1024, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                launch!(g, lp_absmax_mb, mb, x, &nx, &mut am)?;
+                let smem = (tw * 32 + self.k * 64 * 16).max(64 * tn * 4);
+                let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                let f = if res { &k.conv1d_wmma_s8_res } else { &k.conv1d_wmma_s8 };
+                let mut lb = g.stream.launch_builder(f);
+                lb.arg(x).arg(q);
+                match &self.b {
+                    Some(b) => lb.arg(b),
+                    None => lb.arg(&null),
+                };
+                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]).arg(&am).arg(scale);
+                // SAFETY: matches conv1d_wmma_s8[_res](..., absmax, wscale); absmax 1 float, wscale Cout.
+                unsafe { lb.launch(cfg) }.context("conv1d_wmma_s8")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// PHASE 2: res += conv(x) through the fused tensor-core kernel (x already gap-masked).
+    pub(crate) fn fwd_wmma_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
+        ensure!(self.wmma_ok(t, t) && x.len() == self.cin * t && res.len() == self.cout * t, "wmma residual conv not applicable");
+        self.launch_wmma(g, x, t, res, true)
     }
 
     pub(crate) fn igemm_applicable(&self, g: &Gpu) -> bool {

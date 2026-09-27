@@ -149,7 +149,17 @@ impl GpuKokoro {
         let g = &self.gpu;
         let mut x = g.stream.clone_dtod(x)?;
         let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable(g) && blk.convs2[i].igemm_applicable(g));
+        let lp_fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].wmma_ok(d.l, d.l) && blk.convs2[i].wmma_ok(d.l, d.l));
         for i in 0..3 {
+            if lp_fuse {
+                // PHASE 2: tensor-core convs; AdaIN output has zero gaps (no mask); conv2 accumulates
+                // into x in its epilogue.
+                let h = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
+                let (h, _) = blk.convs1[i].fwd(g, &h, d.l)?;
+                let h = self.adain_b(&blk.adain2[i], &h, d, styles, Act::Snake(&blk.alpha2[i]))?;
+                blk.convs2[i].fwd_wmma_res(g, &h, d.l, &mut x)?;
+                continue;
+            }
             if fuse {
                 // LEVER PL-009 (kill switch KOKORO_FUSE_RES_CONV=0): AdaIN+Snake applied separately (its
                 // output already has zero gaps, so no mask is needed); conv2 accumulates into x in its

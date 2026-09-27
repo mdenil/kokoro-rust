@@ -50,6 +50,32 @@ def metrics(x, ref):
             "spec_db": spec_db(x, ref), "len": int(len(x)), "ref_len": int(len(ref))}
 
 
+def check_wav(path, fails, label):
+    """Read a WAV, validating the actual header: 24 kHz, mono, IEEE float32. Returns samples or None."""
+    if not path.exists():
+        fails.append(f"{label}: missing {path.name}")
+        return None
+    try:
+        info = sf.info(path)
+    except Exception as e:  # noqa: BLE001
+        fails.append(f"{label}: unreadable/truncated {path.name} ({e})")
+        return None
+    if info.samplerate != 24000 or info.channels != 1 or info.subtype != "FLOAT":
+        fails.append(f"{label}: {path.name} header {info.samplerate} Hz, {info.channels} ch, {info.subtype} (want 24000 Hz, mono, FLOAT)")
+        return None
+    x, _ = sf.read(path, dtype="float64")
+    if len(x) != info.frames:
+        fails.append(f"{label}: {path.name} truncated ({len(x)} of {info.frames} frames)")
+        return None
+    return x
+
+
+def coverage(d, pattern, n, fails, label):
+    files = sorted(d.glob(pattern))
+    if len(files) != n:
+        fails.append(f"{label}: {len(files)} WAVs for {n} input lines (missing or extra)")
+
+
 def render_rust(binary, level, voice, corpus, out):
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION=level)
     cmd = [binary, "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(out), "--voice", voice, "--format", "float32", "--force"]
@@ -102,7 +128,13 @@ def main():
         if a.python_ref:
             pd = out / "python-reference" / voice
             rc = render_python(voice, corpus, pd)
-            man["results"].setdefault(voice, {})["python-reference"] = {"rc": rc, "dir": str(pd.relative_to(out))}
+            ref_fails = [] if rc == 0 else [f"python reference exit code {rc} (see {pd.name}/stderr.txt)"]
+            coverage(pd, "line_*.wav", len(lines), ref_fails, "python reference")
+            for i in range(1, len(lines) + 1):
+                check_wav(pd / f"line_{i:05d}.wav", ref_fails, "python reference")
+            man["results"].setdefault(voice, {})["python-reference"] = {"rc": rc, "dir": str(pd.relative_to(out)), "failures": ref_fails}
+            if ref_fails:
+                print(voice, "PYTHON REFERENCE FAILURES:", ref_fails[:5], flush=True)
             ref = pd
         ctrl = None
         for level in levels:
@@ -111,26 +143,29 @@ def main():
             rc, cmd = render_rust(a.binary, level, voice, corpus, d)
             rec = {"rc": rc, "cmd": cmd, "dir": str(d.relative_to(out)), "lines": [], "functional_failures": [], "duration_changes": []}
             stem = corpus.stem
+            coverage(d, f"{stem}_*.wav", len(lines), rec["functional_failures"], level)
             for i in range(1, len(lines) + 1):
                 w = d / f"{stem}_{i:05d}.wav"
-                if not w.exists():
-                    rec["functional_failures"].append(f"line {i}: missing WAV")
+                x = check_wav(w, rec["functional_failures"], f"{level} line {i}")
+                if x is None:
                     continue
-                x, sr = sf.read(w, dtype="float64")
                 row = {"line": i, "wav": w.name, "sha256": sha(w), "samples": len(x), "seconds": len(x) / 24000.0,
                        "finite": bool(np.all(np.isfinite(x))), "peak": float(np.max(np.abs(x))) if len(x) else 0.0}
                 if not row["finite"] or len(x) == 0:
                     rec["functional_failures"].append(f"line {i}: non-finite or empty audio")
                 if ctrl is not None:
-                    c, _ = sf.read(ctrl / f"{stem}_{i:05d}.wav", dtype="float64")
+                    c = check_wav(ctrl / f"{stem}_{i:05d}.wav", rec["functional_failures"], f"f32 control line {i}")
+                    if c is None:
+                        continue
                     row["vs_f32"] = metrics(x, c)
                     if len(x) != len(c):
                         # expected when the duration predictor runs in reduced precision: a measured
                         # diagnostic, not a functional failure (every chunk is still synthesized)
                         rec["duration_changes"].append({"line": i, "samples": len(x), "f32_samples": len(c)})
-                if ref is not None and (ref / f"line_{i:05d}.wav").exists():
-                    r, _ = sf.read(ref / f"line_{i:05d}.wav", dtype="float64")
-                    row["vs_reference"] = metrics(x, r)
+                if ref is not None:
+                    r = check_wav(ref / f"line_{i:05d}.wav", rec["functional_failures"], f"python reference line {i}")
+                    if r is not None:
+                        row["vs_reference"] = metrics(x, r)
                 rec["lines"].append(row)
             if level == "f32":
                 ctrl = d
