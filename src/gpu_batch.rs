@@ -57,6 +57,7 @@ impl Dom {
     }
 }
 
+static STATS_1PASS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_STATS_1PASS").map(|v| v != "0").unwrap_or(true));
 static FUSE_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_FUSE_RES_CONV").map(|v| v != "0").unwrap_or(true));
 
 impl GpuKokoro {
@@ -87,7 +88,12 @@ impl GpuKokoro {
         let mut rstd = g.alloc(d.b() * a.c)?;
         let (li, eps, ci) = (d.l as i32, 1e-5f32, a.c as i32);
         let cfg = LaunchConfig { grid_dim: (a.c as u32, d.b() as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
+        if *STATS_1PASS {
+            // LEVER PL-014 (kill switch KOKORO_STATS_1PASS=0): single-pass statistics
+            launch!(g, chan_stats_seg1, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
+        } else {
+            launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
+        }
         Ok((gb, mean, rstd))
     }
 

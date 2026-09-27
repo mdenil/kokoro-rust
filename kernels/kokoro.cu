@@ -892,3 +892,38 @@ extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_res(const float* 
                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
     conv1d_igemm_body<true, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
 }
+
+// LEVER PL-014 candidate: single-pass per-item channel statistics (sum and sum of squares in
+// double, one read of the segment instead of two). Approximately lossless: the variance is
+// E[x^2] - mean^2 in double instead of the mean of squared float deviations from the float mean.
+extern "C" __global__ void chan_stats_seg1(const float* x, int L, const int* seg_start, const int* seg_len,
+                                           float eps, float* mean_out, float* rstd_out, int C) {
+    __shared__ double sh[256];
+    __shared__ double sq[256];
+    int c = blockIdx.x, b = blockIdx.y;
+    const float* row = x + (long)c * L + seg_start[b];
+    int T = seg_len[b];
+    double s = 0.0, s2 = 0.0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+        double v = (double)row[t];
+        s += v;
+        s2 += v * v;
+    }
+    sh[threadIdx.x] = s;
+    sq[threadIdx.x] = s2;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) {
+            sh[threadIdx.x] += sh[threadIdx.x + k];
+            sq[threadIdx.x] += sq[threadIdx.x + k];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double m = sh[0] / (double)T;
+        double var = sq[0] / (double)T - m * m;
+        if (var < 0.0) var = 0.0;
+        mean_out[b * C + c] = (float)m;
+        rstd_out[b * C + c] = 1.0f / sqrtf((float)var + eps);
+    }
+}

@@ -260,3 +260,19 @@ the frozen baseline is not.
 - Correctness: WAVs bitwise identical to PL-012 (Alice 65/65).
 - Sealed A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-015158-L13-coldstart-alice`; PL-012 binary 5f1d371c… vs new): cold 4.031 → 3.399 s (**1.19×**, cv 3.4% /
   1.0%); warm unchanged (1.856 vs 1.863 s).
+
+### PL-014 — single-pass per-item channel statistics (batched AdaIN)   [2026-09-27 | KEEP; approximately lossless]
+- chan_stats_seg read each channel segment twice (mean, then squared deviations): ~10% of batched
+  GPU time.
+- `chan_stats_seg1` accumulates the sum and sum of squares in double in one read; var = E[x²] −
+  mean² in double, clamped at 0. Kill switch KOKORO_STATS_1PASS=0. It changes rounding: the old
+  path averaged squared float deviations from the float mean.
+- Quality (batched path; the single-item path is unchanged):
+  - batched-vs-reference diagnostic: mean rel 0.0121 → 0.0119, max 0.0227 → 0.0230, spec
+    0.0989 → 0.0987 dB, binding-gate failures 5/15 → 5/15 (unchanged);
+  - sample counts identical;
+  - waveform drift vs two-pass: median 3.9e-3, max 9.6e-3 rel — the known F0 phase
+    amplification, smaller than the accepted FMA variation, with no change in distance to the
+    reference.
+- Speed: forward 1.677 / 1.679 → 1.638 / 1.637 s; sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-024207-L14-stats1pass-alice`) Alice warm
+  1.872 → 1.822 s (1.027×).
