@@ -20,9 +20,12 @@ active instruction; the current product and its commands are in README.md.
   test data root.
 
 ## 2. Speed work in f32 (retired engine)
-- Whole-system comparison against the unmodified production Python on a private 316-line long-form
-  text (about 49 minutes of audio): cold process 69.5 → 8.8 s (7.9×), warm resident pass
-  52.3 → 7.3 s (7.1×), with clean run-to-run variation on both sides.
+- Whole-system comparison on a private 316-line long-form text (about 49 minutes of audio)
+  against the Python baseline: the unmodified KPipeline, driven one line at a time by a usage
+  harness (bench/system_reference.py).
+  - This baseline is a usage harness, not a measurement of any deployed service wrapper.
+  - Result: cold process 69.5 → 8.8 s (7.9×), warm resident pass 52.3 → 7.3 s (7.1×), with clean
+    run-to-run variation on both sides.
 - The largest contributions:
   - length-bucketed batched inference over a gap-separated ragged layout, with per-item
     statistics, style and noise (docs/design/BATCHING.md);
@@ -60,8 +63,11 @@ on 130 public lines):
   comparisons, on raw hash-verified WAVs):
   - **bf16x** was selected and its quality accepted: the listeners found it indistinguishable;
   - **INT8 was rejected** for audible hiss.
-- bf16x end to end on the long-form benchmark: warm 4.15 s (1.80× the f32 engine, about 13× the
-  production Python), cold 5.81 s (1.5× / about 12×).
+- bf16x end to end on the long-form benchmark:
+  - Warm: 4.15 s, 1.80× the f32 engine and about 13× the Python KPipeline baseline above.
+  - Cold: 5.81 s, about 1.5× / about 12×. These cold ratios are PROVISIONAL: three replicates per
+    arm, and a later cold re-measurement of the same bf16x artifact had a coefficient of
+    variation above 5%. The warm numbers stand.
 
 ## 4. BF16x-only product
 - Everything but the selected configuration was removed: the other precision levels, the f32
