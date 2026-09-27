@@ -725,6 +725,13 @@ fn synth(
             }
         }
     }
+    let mut manifest_lines = manifest_lines;
+    if per_line && diagnostics {
+        for e in manifest_lines.iter_mut() {
+            let line = e["line"].as_u64().unwrap_or(0) as usize;
+            e["sidecar"] = serde_json::json!(name(line, "json"));
+        }
+    }
     if diagnostics {
         let manifest = serde_json::json!({
             "input_file": inp.display, "input_sha256": inp.sha256, "input_lines": inp.lines.len(),

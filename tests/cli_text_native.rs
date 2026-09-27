@@ -249,9 +249,12 @@ fn output_negative_controls(good: &Path, stem: &str, corpus: &Expected, voice: &
         let d = good.with_file_name(format!("negctl-{}", name.replace(' ', "_")));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
+        // the deliverables only (not the internal .kokoro/ bookkeeping directory)
         for e in std::fs::read_dir(good).unwrap() {
             let e = e.unwrap();
-            std::fs::copy(e.path(), d.join(e.file_name())).unwrap();
+            if e.file_type().unwrap().is_file() {
+                std::fs::copy(e.path(), d.join(e.file_name())).unwrap();
+            }
         }
         damage(&d);
         let r = verify_outputs(&d, stem, corpus, voice);
