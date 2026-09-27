@@ -7,6 +7,105 @@ Owner authority: #23 (HERMES_BRIEF.md) + HERMES_PRECISION_EXPLORATION_BRIEF.md.
 - The f32 control is the phase-1 final code (main 3dc5a35). Its preserved binaries are
   `$KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35`.
 
+## FINAL RESULTS (binary phase2-9b39d48, tree 9b39d48; ALL non-f32 levels UNREVIEWED)
+Binary `$KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a` (sha256 6fde9d88…12ea): the matrix binary
+(c5686da) plus kernel levers P2-L2..L5 (below). Receipt index: `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`
+("final").
+
+Validation:
+- **f32 control unchanged:** bitwise identical to the matrix binary (130/130 public130 lines, both
+  voices). The branch's f32 level is the phase-1 engine.
+- **Test suite:** the recorded invocation (`cargo test --release --features cuda --no-fail-fast --
+  --test-threads=2`), full stdout, exit 101. That is identical to main: every target passes except
+  the three known enforced failures, whose failure sets match the recorded receipts row by row.
+  Private chapter CLI test: exit 0. See `$KOKORO_DATA/evidence/phase2/validation-*/VALIDATION_SUMMARY.md`
+  (includes a disclosed contention failure under default test parallelism).
+- **Functional:** 0 failures at every level for both voices on public130 and the held-out passages
+  (headers, coverage, finiteness); the Python reference also rendered everything.
+
+### Whole system vs the unchanged production Python (fresh matrix, final binary)
+- Evidence: `$KOKORO_DATA/evidence/private/phase2/20260927-061505-final-matrix-chapter` (aggregates only) and
+  `$KOKORO_DATA/evidence/phase2/20260927-061505-final-matrix-alice`.
+- Protocol as before: 3 interleaved cold processes; 2 resident processes × 3 warm passes.
+- Coverage ok and no failed runs for every engine. Host load1 3.9–34.8; the > 15 runs were the first
+  Python cold (67.08 s, within its cv), the first Rust f32 cold (8.98 s) and one bf16 warm process.
+
+Private chapter (316 lines, ~2915 s of audio; medians):
+
+| engine | cold wall | warm pass | vs Rust f32 (cold / warm) | vs Python (cold / warm) |
+|---|---|---|---|---|
+| Python (production) | 68.71 s (cv 1.8%) | 54.31 s (cv 4.0%) | — | — |
+| Rust f32 (phase-1 engine) | 8.69 s (cv 2.2%) | 7.45 s (cv 1.9%) | 1.00 / 1.00 | 7.90× / 7.29× |
+| tf32 | 8.17 s | 6.82 s | 1.06 / 1.09 | 8.41× / 7.96× |
+| **fp16** | **5.79 s** (cv 6.6%) | **4.27 s** (cv 0.8%) | **1.50 / 1.74** | **11.86× / 12.73×** |
+| bf16 | 5.74 s (cv 5.5%) | 4.29 s (cv 2.6%) | 1.51 / 1.74 | 11.97× / 12.66× |
+| fp16x | 5.60 s | 4.24 s | 1.55 / 1.76 | 12.27× / 12.81× |
+| bf16x | 5.81 s | 4.15 s | 1.50 / 1.80 | 11.82× / 13.08× |
+| int8 | 7.27 s | 5.42 s | 1.20 / 1.37 | 9.45× / 10.03× |
+
+Alice ch. 1 (65 lines, 656 s of audio; Python warm cv 9.2%, so Python ratios there are
+PROVISIONAL):
+
+| engine | cold wall | warm pass | vs Rust f32 (cold / warm) | vs Python (cold / warm) |
+|---|---|---|---|---|
+| Python | 25.69 s (cv 6.5%) | 8.20 s (cv 9.2%) | — | — |
+| Rust f32 | 3.35 s | 1.69 s | 1.00 / 1.00 | 7.67× / 4.86× |
+| fp16 | 2.90 s (cv 7.3%) | 1.02 s | 1.16 / 1.66 | 8.85× / 8.01× (provisional) |
+| bf16 | 2.89 s (cv 12.8%) | 1.02 s | 1.16 / 1.66 | 8.89× / 8.05× (provisional) |
+| fp16x | 2.65 s | 1.01 s | 1.26 / 1.67 | 9.69× / 8.12× (provisional) |
+| bf16x | 2.61 s | 0.97 s | 1.28 / 1.74 | 9.84× / 8.45× (provisional) |
+| tf32 | 3.17 s (cv 10%) | 1.58 s | 1.06 / 1.07 | 8.10× / 5.19× (provisional) |
+| int8 | 3.38 s | 1.27 s | 0.99 / 1.33 | 7.59× / 6.46× (provisional) |
+
+- Chapter Python arms have cv ≤ 5% this time, so the chapter Python ratios clear the harness's cv gate.
+- Alice cold is dominated by model load (~1.4–1.9 s of ~3 s): cold differences there are small and
+  noisy.
+- int8's host-side weight quantization adds ~0.5 s to model load.
+
+### Quality, final binary (public130; held-out in parentheses; median mean-|ΔdB|)
+- Evidence: `…/20260927-061505-final-quality-public130` and `…-final-quality-heldout`.
+- The Python reference was re-rendered. Its distance to the (unchanged) Rust f32 moved slightly:
+  am_adam 1.490 → 1.503 dB. That is run-to-run variation of the reference itself.
+
+| level | vs f32: af_heart / am_adam | vs Python ref: af_heart / am_adam | lines with changed duration (af / am) |
+|---|---|---|---|
+| f32 | 0 / 0 | 1.219 / 1.503 (1.283 / 1.632) | — |
+| fp16 | 0.047 / 0.049 (0.054 / 0.081); max 0.11 / 0.11 | 1.219 / 1.502 | 0 / 0 |
+| bf16 | 0.218 / 0.245 (0.247 / 0.291) | 1.243 / 1.528 | 0 / 0 |
+| tf32 (= tf32all) | 1.238 / 1.095 (1.70 / 1.96) | 1.684 / 1.760 | 7 / 5 |
+| fp16x | 1.244 / 1.384 (1.86 / 2.15) | 1.659 / 1.903 | 7 / 5 |
+| bf16x | 2.051 / 2.275 (2.18 / 2.57) | 2.292 / 2.536 | 45 / 41 (held-out 1 / 1) |
+| int8 | 3.324 / 3.363 (3.56 / 3.31) | 3.386 / 3.412 | 0 / 0 |
+
+- vs the matrix binary, fp16/bf16 and every other non-f32 level include P2-L5 (float-partial channel
+  statistics). fp16's median distance from f32 went 0.027–0.032 → 0.047–0.049 dB, max 0.049 → 0.11
+  dB. Its distance to the Python reference is unchanged (1.219 / 1.502 vs f32's 1.219 / 1.503).
+- Scale context only (not a decomposition): the alternate-seed f32 distance is 1.19 / 1.49 dB.
+
+### Recommendation for the owner's listening (UNREVIEWED; no default change)
+- **fp16** is the candidate to listen to first:
+  - chapter warm 1.74× and cold 1.50× over the phase-1 f32 engine (12.7× / 11.9× over production
+    Python);
+  - 0.05 dB from f32, no timing changes, reference distance unchanged.
+- **bf16** is the same speed as fp16 and 5× farther from f32; no reason to prefer it on this GPU.
+- **fp16x / bf16x** add ≤ 3.4% speed over fp16 (chapter) but change durations on 5–45 of 130 lines. Poor trade.
+- **tf32** gains 6–9% at a ~1.1–1.2 dB distance. Poor trade.
+- **int8** is slower than fp16 and farthest from f32. Not recommended without calibration work.
+- Listening pack: `$KOKORO_DATA/evidence/listening/phase2-pack-9b39d48` (README, manifests,
+  SHA256SUMS). Raw float32 files at every level, both voices, Python reference, worst cases,
+  held-out passages, and the PL-014 phase-1 pairs. Status UNREVIEWED.
+
+### Residual opportunities (not pursued; recorded for a later decision)
+- WMMA conv still latency-bound: after P2-L2, ncu showed the tensor pipe 30–36% active, warps
+  active ~31% at 98 registers/thread, top stall global-load latency. Options: an mma.sync/ldmatrix
+  kernel with async (cp.async) f32 staging; tuned tile shapes per layer; fewer registers.
+- FP16 accumulation (2× tensor rate on GeForce): a further lossy tier; unmeasured.
+- Deterministic fused channel statistics in the conv epilogue (removes the stats read pass,
+  ~10% of kernel time at fp16).
+- The f32 LSTM recurrence (~10% of kernel time), launch gaps (~10%), GPU-side int8 weight
+  quantization (load time).
+- Calibrated INT8 (per-channel activation scales from a calibration set).
+
 ## Levels (all selected at load via `--precision` / `KOKORO_PRECISION`; recorded in the engine identity)
 
 | level | what runs in reduced precision | operand dtypes | accumulate / output | kept in f32 |
