@@ -1,5 +1,5 @@
 """Export the tokenizer data, lexeme norms and tok2vec + tagger weights of spaCy's
-en_core_web_sm 3.8.0 model into the directory the native frontend reads
+en_core_web_sm 3.8.0 model, plus spaCy's base norm exceptions, into the directory the native frontend reads
 (<frontend-dir>/spacy-en_core_web_sm-3.8.0/). Data only; the Rust frontend implements the algorithms.
 
 Run inside a Python environment with the pinned packages (scripts/prepare_spacy_assets.sh does this):
@@ -25,6 +25,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     import numpy as np
     import spacy
+    import spacy.lang.norm_exceptions
     from safetensors.numpy import save_file
     from spacy import symbols
     nlp = spacy.load("en_core_web_sm", enable=["tok2vec", "tagger"])
@@ -44,6 +45,8 @@ def main():
     (out / "lookups.json").write_text(json.dumps({k: {str(a): b for a, b in v.items()} for k, v in tables.items()}, ensure_ascii=False))
     # StringStore.add returns the symbol id (not the string hash) for strings in SYMBOLS_BY_STR
     (out / "symbols.json").write_text(json.dumps({k: int(v) for k, v in symbols.IDS.items()}, ensure_ascii=False, sort_keys=True))
+    # spaCy's language-independent norm exceptions (lexeme NORM fallback)
+    (out / "base_norms.json").write_text(json.dumps(spacy.lang.norm_exceptions.BASE_NORMS, ensure_ascii=False))
     # model structure + params
     tagger = nlp.get_pipe("tagger")
     tok2vec = nlp.get_pipe("tok2vec")

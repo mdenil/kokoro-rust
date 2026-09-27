@@ -72,7 +72,8 @@ extract "$DATA/downloads/$MISAKI_WHL" misaki/data/us_silver.json "$DATA/frontend
 echo
 echo "Model:    $DATA/model"
 echo "Frontend: $DATA/frontend (run scripts/prepare_spacy_assets.sh $DATA to add the spaCy data)"
-if ! ldconfig -p 2>/dev/null | grep -q 'libespeak-ng\.so\.1 '; then
+LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig || true)
+if [[ -n "$LDCONFIG" ]] && ! "$LDCONFIG" -p 2>/dev/null | grep -q 'libespeak-ng\.so\.1 '; then
   echo "Note: the system eSpeak NG library (libespeak-ng.so.1) was not found; text input needs it."
   echo "      Debian/Ubuntu: sudo apt install libespeak-ng1"
 fi
