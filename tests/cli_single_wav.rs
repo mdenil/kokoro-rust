@@ -278,3 +278,12 @@ fn changing_flags_leaves_other_files_alone() {
         "earlier per-line WAVs and unrelated files are kept"
     );
 }
+
+#[test]
+fn a_word_the_frontend_cannot_pronounce_stops_the_whole_file() {
+    let (cwd, input) = setup("unresolved", "Hello there.\nThe temperature dropped to -12 degrees overnight.\nGoodbye.\n");
+    let r = kokoro(&cwd, &[input.to_str().unwrap()], "/nonexistent", true);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("line 2: error") && r.stderr.contains("unresolved word"), "{}", r.stderr);
+    assert_eq!(deliverables(&cwd), set(&[]), "no shortened book.wav");
+}
