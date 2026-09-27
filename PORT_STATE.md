@@ -1,45 +1,51 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## CURRENT WORK (owner #26, 2026-09-27): BF16X-ONLY RELEASE CLEANUP on branch release/bf16x-cleanup
-- Scope: HERMES_RELEASE_CLEANUP_BRIEF.md and HERMES_BRIEF #26. Record: docs/RELEASE_CLEANUP.md.
+## CURRENT STATE (owner 1553703276434821171, 2026-09-27): main is canonical — the BF16x-only product
+- main carries the owner-accepted BF16x product. It is a normal merge of the verified cleanup milestone
+  0d1f149 (implementation d83540a), which passed independent supervisor review. Later verified
+  milestones integrate into main, not into a parallel product line.
 - The product is ONE path:
   - native frontend + batched CUDA forward in the owner-accepted BF16x configuration (strict
     -fmad=false build, P2-L2..L5);
   - no precision selector, no CPU backend, no batch-1 forward, no kill switches.
+  - Command and requirements: README.md.
+  - Cleanup record: docs/RELEASE_CLEANUP.md (inventory, validation, pre/post smoke, open
+    questions).
 - Reference artifact (immutable): $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256
   6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea).
-  - Byte-identical outputs after every cleanup step: tests/bf16x_golden.rs, 11 public cases + the
-    private chapter, both voices.
-- Cleaned binary preserved: $KOKORO_DATA/bin/bf16x-cleanup-d83540a-a8d405f1cacd.
-- Commits: 781b910 scope, 6968945 goldens, 5c42c54 step A, cb553b1 step B, d83540a step C.
-- main and experiment/reduced-precision are untouched. No merge, release or deployment; license
-  undecided.
+  - The cleaned code reproduces it byte for byte (tests/bf16x_golden.rs: 11 public cases + the
+    private chapter, both voices).
+  - Cleaned binary preserved: $KOKORO_DATA/bin/bf16x-cleanup-d83540a-a8d405f1cacd.
+- Owner decisions:
+  - #25 (1553678159168151575): BF16x SELECTED, presented quality ACCEPTED (G1-G4 ladder + B1-B5 vs
+    production Python; provenance $KOKORO_DATA/evidence/listening/phase2-owner-decision/).
+  - #24: INT8 REJECTED.
+  - Other levels were not selected.
+  - The accepted BF16x differences are not to be re-escalated.
+- Speed:
+  - Accepted artifact, phase-2 final matrix, private chapter, all arms cv ≤ 5%:
+    - warm 4.15 s = 1.80× vs the phase-1 f32 engine (7.45 s), 13.08× vs production Python;
+    - cold 5.81 s = 1.50× / 11.82×.
+  - Cleaned binary vs accepted (matched smoke): warm Alice 0.990 -> 0.995 s, chapter 4.196 -> 4.136 s.
+    Cold is provisional (one arm with cv > 5%).
+- In progress: the portability/configuration milestone
+  (supervision/portability-milestone.md under the data root).
+  - Unverified work on the local branch portability-wip (9cff7c6), NOT merged.
+  - Patch archived under $KOKORO_DATA/evidence/release-cleanup/portability-wip-preserve.
+- Not done: public release, publication, deployment, license choice, clean-checkout setup validation.
+  The `license` field in Cargo.toml predates any owner decision.
+- Standing: batching/FMA-era variation accepted (#14); private corpus stays under the data root, never
+  in Git; libespeak-ng 1.52 (#19) and ffmpeg (#18) approved.
 
-## CURRENT STATE (owner #25, 2026-09-27): PHASE 2 DECIDED — BF16X SELECTED, presented quality ACCEPTED
-- Branch experiment/reduced-precision. Selected configuration: `--precision bf16x`
-  (KOKORO_PRECISION=bf16x) with kernel levers P2-L2..L5 at their defaults. Final binary
-  $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256 6fde9d88…12ea), tree 9b39d48.
-- Owner #25 (1553678159168151575): BF16x SELECTED and its presented quality ACCEPTED.
-  - Basis: G1-G4 ladder listening plus B1-B5 focused comparisons vs production Python, on
-    hash-verified raw WAVs.
-  - Provenance: $KOKORO_DATA/evidence/listening/phase2-owner-decision/OWNER_DECISION.json.
-  - Accepted differences are not to be re-escalated.
-- Owner #24 (1553673730025197655): INT8 REJECTED (hiss/degradation). PL-014 pairs: no audible
-  difference.
-- Other levels (tf32, tf32all, fp16, bf16, fp16x): heard in ladder listening, not selected. No
-  acceptance is recorded for them.
-- bf16x measured (final matrix, private chapter; all arms cv ≤ 5%):
-  - warm 4.15 s = 1.80× vs the Rust f32 control (7.45 s) and 13.08× vs production Python (54.31 s);
-  - cold 5.81 s = 1.50× vs f32 (8.69 s) and 11.82× vs Python (68.71 s).
-  - Alice warm 0.97 s (1.74× vs f32; its Python ratio is provisional).
-- bf16x diagnostics (accepted; not to be re-escalated): public130 median spectral distance from f32
-  2.05 / 2.28 dB (af_heart / am_adam); durations change on 45 / 41 of 130 lines.
-- NOT done and NOT requested: merge into main, default change, deployment, release. main stays f32
-  (the phase-1 engine frozen at 3dc5a35, plus docs), and the f32 baseline binaries are preserved.
-- Full phase-2 report: docs/PHASE2_PRECISION.md. Phase-1 speed history: main
-  docs/PERFORMANCE_REPORT.md.
-- Standing: batching/FMA variation accepted (#14); private corpus stays under /data only;
-  libespeak-ng 1.52 (#19) and ffmpeg (#18) approved.
+## HISTORY: speed phases (owner #21-#23; superseded by the BF16x product above)
+- Phase 1 (approximately lossless f32), FROZEN at tree 3dc5a35 (owner #22 stopping criterion;
+  docs/PERFORMANCE_REPORT.md, NE-004..NE-010).
+  - Levers PL-006..PL-016.
+  - Private chapter Python / Rust f32: cold 7.90× (69.48 -> 8.79 s), warm 7.13× (52.28 -> 7.33 s).
+  - Binaries preserved: $KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35.
+- Phase 2 (lossy precision ladder) on branch experiment/reduced-precision (preserved at aed6a5e):
+  docs/PHASE2_PRECISION.md; decision above.
+- Release cleanup (owner #26) on branch release/bf16x-cleanup (0d1f149), merged into main as above.
 
 ## Single-binary milestone closeout (2026-09-26; HISTORICAL — superseded by the owner's speed authorization #21)
 - Execution logs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/ (README + SHA256SUMS).

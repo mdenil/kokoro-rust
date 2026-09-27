@@ -313,3 +313,22 @@ Load the named skill. Inspect available toolchains/storage and public reference.
      simplified command.
    - NOT authorized: public release, deployment, license choice, automatic main merge.
    - Preserve the accepted binary, evidence and main.
+27. OWNER AUTHORIZES THE NEXT RELEASE-PREPARATION STAGE (1553681850818502707; scope under the data root in
+   supervision/portability-milestone.md): after supervisor verification of stage 1 (0d1f149 /
+   d83540a), a bounded portability/configuration milestone.
+   - Remove host/user/GPU-index/inherited-environment assumptions from product, build, test and
+     tools.
+   - State the tested scope (Linux x86_64 / RTX 4090 CC 8.9 / CUDA 12.9 / American English).
+   - Verify with an isolated data view and a stripped environment.
+   - No license choice (the prompt suggestion to remove the license field is NOT owner approval), no
+     publication.
+28. OWNER: MERGE VERIFIED CLEANUP INTO MAIN (1553703276434821171): a completed, verified cleanup is
+    merged, not kept as a separate product line.
+    - Integrate 0d1f149 (implementation d83540a) into main with a normal merge; resolve the docs to
+      the current BF16x state.
+    - Keep the unfinished, unverified portability work out of the merge, and preserve it.
+    - Verify, then push main to the existing PRIVATE origin.
+    - No force push, no history rewrite, no visibility/publication/deployment change, no branch
+      deletion.
+    - Main becomes canonical; later verified milestones integrate there. Then continue the
+      portability task.

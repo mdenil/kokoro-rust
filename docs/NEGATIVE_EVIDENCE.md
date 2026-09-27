@@ -168,3 +168,17 @@ cv%>5 rows are noise. Interleaved same-window stage pairs only.
   generator, so reordering differences are amplified through more layers and the F0 phase.
 - Status: available via KOKORO_CONV_IGEMM_MAX_CIN=256; not approximately lossless under RB-1.
   Phase-2 / owner-listening material only; no default change.
+
+## NE-010 — fused-conv input-channel chunk (IG_BK) sweeps, raw values   [2026-09-27 | BK = 4 kept]
+All values: in-process forward, Alice 69 chunks, bench --reps 3 median; recorded to justify the
+kept setting.
+- Single-buffered generic kernel (PL-010): BK 2 / 4 / 8 = 1.845 / 1.766 / 1.828 s (Cin ≤ 128);
+  1.926 / 1.775 / 1.836 s (Cin ≤ 256).
+- cp.async double-buffered (NE-007): BK 2 / 4 / 8 = 1.724 / 1.665 / 2.091 s (≤ 128); 1.760 /
+  1.668 / 2.199 s (≤ 256).
+- Sliding-window kernel (PL-016): BK 2 → 1.572 s, BK 4 → 1.501 s; BK 8 with the ≤ 128 policy
+  → 1.578 s. Cin ≤ 256 at BK 4 → 1.412 s is NE-009 (exceeds RB-1).
+
+## PHASE-1 FREEZE (2026-09-27, tree 3dc5a35)
+Phase 1 (approximately lossless) stopped at the owner-#22 criterion; reasons in
+docs/PERFORMANCE_REPORT.md "Phase-1 stopping decision". Further gains go to phase 2 (lossy, branch).

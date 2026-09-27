@@ -177,3 +177,7 @@ Previously: `--features cuda` at build time plus `KOKORO_PRECISION=bf16x` / `--p
    `cuda precision=bf16x [EXPERIMENTAL, phase 2] ...` to `cuda bf16x kernels=strict(-fmad=false)`.
    Resume therefore re-synthesizes outputs made by the experimental binary once. The audio is
    byte-identical; this is only cache invalidation.
+
+## Integration
+After independent supervisor verification, this milestone (0d1f149, implementation d83540a) was
+merged into main with a normal merge (owner 1553703276434821171). main is the canonical product line.

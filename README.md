@@ -11,8 +11,8 @@ The model runs in the owner-accepted **BF16x** mixed-precision configuration (ow
 - kernels built with strict rounding (`-fmad=false`).
 This is the only numerical mode.
 
-Status: release-preparation branch `release/bf16x-cleanup`. Not released, not published, and no
-license chosen by the owner yet.
+Status: main (canonical). Not released, not published, and no license chosen by the owner yet (the
+`license` field in Cargo.toml predates any owner decision).
 
 ## Requirements
 Tested scope: Linux x86_64, RTX 4090 (compute capability 8.9), CUDA 12.9, American English. Other
