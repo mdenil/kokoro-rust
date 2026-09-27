@@ -80,11 +80,26 @@ For example: `curl -fsSL …/install.sh | KOKORO_VERSION=v0.1.0 bash`.
 The model is not part of the release; the installer downloads it from Hugging Face. eSpeak NG,
 the NVIDIA driver and cuBLAS are not included either.
 
-Releases are built by `.github/workflows/release.yml` when a tag starting with `v` is pushed:
+## Making a release
+`.github/workflows/release.yml` builds the packages on GitHub:
 - the program is compiled in an Ubuntu 22.04 container with CUDA 12.9 `nvcc` and Rust 1.98.1;
 - the frontend data is exported with Python on Ubuntu 24.04;
-- both are packaged by `scripts/package_release.sh` into a draft GitHub release, which is
-  published by hand.
+- `scripts/package_release.sh` packages both and writes `SHA256SUMS`;
+- a smoke job checks the packages and starts the program on a plain Ubuntu 22.04 (no GPU there, so
+  it doesn't synthesize).
+
+To release, push a tag starting with `v` (it can point to any commit):
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
+The workflow then creates a draft GitHub release with the three files. Check it, and publish it by
+hand; the installer only sees published releases.
+
+To test the build without releasing, start the workflow by hand ("Run workflow" on the Actions
+page, or `gh workflow run release.yml --ref <branch>`). It runs the same build, package and smoke
+jobs, keeps the packages as downloadable artifacts of that run (`release-packages`), and creates no
+release. To install such a package, unpack the downloaded artifact into a directory and point the
+installer at it: `KOKORO_VERSION=v0.0.0-build.<run number> KOKORO_RELEASE_URL=file:///that/dir bash install.sh`.
 
 The same script builds the packages locally:
 ```
