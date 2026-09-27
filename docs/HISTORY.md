@@ -79,3 +79,6 @@ on 130 public lines):
   11 public cases, plus a private long-form case run locally.
 - Throughput matched the accepted artifact within 1.5% (warm).
 - Configuration was then made explicit and host-independent (docs/PORTABILITY.md).
+- Later the CUDA kernels were switched from strict rounding (`-fmad=false`) to compiler FMA
+  contraction (`-fmad=true`). Outputs no longer match the strict build byte for byte;
+  tests/strict_reference_diff.rs reports the per-line differences (diagnostic).

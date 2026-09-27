@@ -1,5 +1,6 @@
-// Compiles kernels/kokoro.cu to PTX with the accepted BF16x configuration: strict
-// rounding, no FMA contraction (-fmad=false), compute capability 8.9. The flags are fixed; only the
+// Compiles kernels/kokoro.cu to PTX with the BF16x production configuration: compiler FMA
+// contraction enabled (-fmad=true; no other fast-math options), compute capability 8.9. The flags
+// are fixed; only the
 // location of nvcc is configurable: $NVCC, else $CUDA_HOME/bin/nvcc, else $CUDA_PATH/bin/nvcc,
 // else `nvcc` on PATH, else /usr/local/cuda/bin/nvcc (the CUDA toolkit's default install prefix).
 use std::path::PathBuf;
@@ -32,7 +33,7 @@ fn main() {
     let nvcc = find_nvcc().unwrap_or_else(|e| panic!("{e}. Install the CUDA 12.9 toolkit or set NVCC=/path/to/nvcc (see README)."));
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kokoro.ptx");
     let status = std::process::Command::new(&nvcc)
-        .args(["-ptx", "-arch=compute_89", "-fmad=false", "-O3", "kernels/kokoro.cu", "-o"])
+        .args(["-ptx", "-arch=compute_89", "-fmad=true", "-O3", "kernels/kokoro.cu", "-o"])
         .arg(&out)
         .status()
         .unwrap_or_else(|e| panic!("running {}: {e}", nvcc.display()));

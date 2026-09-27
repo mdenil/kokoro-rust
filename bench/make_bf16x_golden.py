@@ -2,7 +2,7 @@
 
 Every case runs the accepted artifact (phase2-9b39d48, `KOKORO_PRECISION=bf16x`, defaults otherwise)
 on a public input with fixed options, twice, and records the per-line WAV sha256 (both runs must
-agree: determinism). The pinned table tests/pinned/bf16x_golden.json is what tests/bf16x_golden.rs
+agree: determinism). The pinned table tests/pinned/bf16x_golden.json is what tests/strict_reference_diff.rs
 checks the current binary against; the WAVs themselves stay under $KOKORO_DATA (outside Git) for
 diagnosing any difference.
 
