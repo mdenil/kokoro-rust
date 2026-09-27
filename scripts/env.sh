@@ -1,5 +1,5 @@
 # Source me: developer environment for the scripts in this repo (NOT needed by the public
-# build/run/test commands in README.md, which take explicit options or KOKORO_* variables).
+# build/run/test commands in docs/BUILD.md, which take explicit options or KOKORO_* variables).
 # - PROJECT_ROOT: this checkout (derived from this file's location).
 # - KOKORO_DATA: the data root (model snapshot, frontend data, fixtures, evidence), from the caller's
 #   environment, else from the untracked scripts/env.local.sh (e.g. `export KOKORO_DATA=/path`).

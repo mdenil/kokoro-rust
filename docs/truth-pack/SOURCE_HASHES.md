@@ -26,4 +26,4 @@ All 54 voice packs downloaded; per-file hashes = blob symlink targets in the sna
 | misaki-0.9.4.tar.gz | `3960fa3e6de179a90ee8e628446a4a4f6b8c730b6e3410999cf396189f4d9c40` |
 
 Developer re-fetch of the full snapshot with verification: `scripts/fetch_sources.sh --verify`. The
-runtime assets alone: `scripts/fetch_assets.sh` (README.md).
+runtime assets alone: `scripts/fetch_assets.sh` (docs/BUILD.md).
