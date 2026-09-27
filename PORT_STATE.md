@@ -9,26 +9,17 @@
     (69.48 → 8.79 s), warm 7.13× (52.28 → 7.33 s).
   - Alice warm 4.76× is provisional (Python cv 10.1%).
   - Phase-1 binaries preserved: $KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35.
-- PHASE 2 DELIVERED (awaiting owner listening) on branch experiment/reduced-precision, head 2f93a2c
-  (worktree target/worktrees/phase2, from 3dc5a35). NOT merged; main code and defaults unchanged.
-  Every non-f32 level is UNREVIEWED.
-  - Ladder: f32 | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8. Full results, levers and
-    caveats: docs/PHASE2_PRECISION.md on the branch ("FINAL RESULTS").
-  - Final binary: $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a. Its f32 WAVs are byte-identical to
-    the phase-2 matrix binary's on public130 (130/130, both voices). That is the only f32 byte
-    comparison made; it was not byte-compared to the phase-1 binaries.
-  - Private chapter, fp16: warm 7.45 → 4.27 s = 1.74× vs Rust f32 and 12.73× vs production Python
-    (clean: cv fp16 0.8%, f32 1.9%, Python 4.0%).
-  - Cold fp16 1.50× vs f32 and 11.86× vs Python is PROVISIONAL (fp16 cold cv 6.6%; bf16 cold 5.5% is
-    likewise provisional).
-  - Alice Python ratios are provisional (Python warm cv 9.2%).
-  - fp16 quality: 0.047–0.049 dB median spectral distance from f32; no duration changes; distance to
-    the Python reference unchanged.
-  - Listening pack (raw, incl. the PL-014 pairs s03_moon/am_adam and s06_long/af_heart):
-    $KOKORO_DATA/evidence/listening/phase2-pack-9b39d48. Receipts:
-    $KOKORO_DATA/evidence/phase2/RECEIPTS.json.
-  - Quality remains UNREVIEWED. Adoption is solely the owner's decision: listen, then decide. No merge or default change without
-    approval.
+- PHASE 2 DECIDED on branch experiment/reduced-precision (head aed6a5e); NOT merged. main code and
+  defaults are unchanged (f32).
+  - Owner #25 (1553678159168151575): BF16X SELECTED, presented quality ACCEPTED (G1-G4 ladder + B1-B5
+    vs production Python). Exact binary $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256
+    6fde9d88…12ea), tree 9b39d48.
+  - Owner #24: INT8 REJECTED (hiss/degradation).
+  - Details and provenance: the branch's PORT_STATE / HERMES_BRIEF #24-#25 /
+    docs/PHASE2_PRECISION.md; $KOKORO_DATA/evidence/listening/phase2-owner-decision/.
+  - bf16x on the private chapter (all arms cv ≤ 5%): warm 4.15 s = 1.80× vs Rust f32, 13.08× vs
+    production Python; cold 5.81 s = 1.50× / 11.82×.
+  - Merging, making bf16x the default, deployment or release each need a separate owner decision.
 - Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
   RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
   must be escalated.

@@ -111,10 +111,13 @@ Evidence that returns are severely diminishing (not an assumed roofline, not one
   experiment/reduced-precision.
 
 ## PHASE 2 (lossy, branch experiment/reduced-precision) — pointer only; nothing on main changes
-- Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS"; head 2f93a2c). Receipts:
+- Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS", "OWNER DECISION"; head aed6a5e). Receipts:
   `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`.
-- Status: every non-f32 level is EXPERIMENTAL and UNREVIEWED. Adoption, merge or any default change
-  is solely the owner's decision. The numbers below do not change the phase-1 headline above.
+- Status (owner #25, 2026-09-27): BF16X SELECTED and its presented quality ACCEPTED; INT8 REJECTED
+  (#24). Other levels were heard but not selected. Merge, default change and deployment remain
+  separate owner decisions; main is unchanged (f32).
+- bf16x on the private chapter (final matrix; all arms cv ≤ 5%): warm 4.15 s = 1.80× vs Rust f32
+  and 13.08× vs production Python; cold 5.81 s = 1.50× and 11.82×. The numbers below do not change the phase-1 headline above.
 - Headline (fresh whole-system matrix, final binary phase2-9b39d48; private chapter; medians):
   - Clean: WARM fp16 7.45 → 4.27 s = 1.74× vs the Rust f32 control, 12.73× vs production Python
     (cv fp16 0.8%, f32 1.9%, Python 4.0%).
