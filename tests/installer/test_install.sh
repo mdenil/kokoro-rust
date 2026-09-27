@@ -24,8 +24,8 @@ set -uo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 RELEASES=${1:?usage: $0 RELEASES_DIR WORK_DIR}
 WORK=${2:?usage: $0 RELEASES_DIR WORK_DIR}
-V1=v0.1.0-test1
-V2=v0.1.0-test2
+V1=${TEST_V1:-v0.1.0-test1}
+V2=${TEST_V2:-v0.1.0-test2}
 REV=f3ff3571791e39611d31c381e3a41a3af07b4987
 MODEL_COPY=${3:-}
 REAL_LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig)
