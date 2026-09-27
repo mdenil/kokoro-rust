@@ -804,9 +804,10 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
 #define IG_BM 64
 #define IG_BN 128
 #define IG_BK 8
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
-                                                               const float* __restrict__ b, float* __restrict__ y,
-                                                               int Cin, int T, int Cout, int K, int dil, int pad) {
+template <bool RES>
+__device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, const float* __restrict__ w,
+                                                  const float* __restrict__ b, float* __restrict__ y,
+                                                  int Cin, int T, int Cout, int K, int dil, int pad) {
     extern __shared__ float smem[];
     const int xw = IG_BN + (K - 1) * dil;
     float* xs = smem;                   // [IG_BK][xw]
@@ -857,7 +858,23 @@ extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __re
 #pragma unroll
         for (int j = 0; j < 8; j++) {
             int t = t0 + tx + 16 * j;
-            if (t < T) y[(long)co * T + t] = acc[i][j] + bias;
+            if (t < T) {
+                long o = (long)co * T + t;
+                float v = acc[i][j] + bias;
+                if (RES) y[o] = y[o] + v;  // residual in place: same order as add_inplace(res, conv)
+                else y[o] = v;
+            }
         }
     }
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
+                                                               const float* __restrict__ b, float* __restrict__ y,
+                                                               int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_igemm_body<false>(x, w, b, y, Cin, T, Cout, K, dil, pad);
+}
+// LEVER PL-009: residual epilogue variant (y += conv), same order as add_inplace(res, conv).
+extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_res(const float* __restrict__ x, const float* __restrict__ w,
+                                                                   const float* __restrict__ b, float* __restrict__ y,
+                                                                   int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_igemm_body<true>(x, w, b, y, Cin, T, Cout, K, dil, pad);
 }

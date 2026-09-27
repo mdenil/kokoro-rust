@@ -57,6 +57,8 @@ impl Dom {
     }
 }
 
+static FUSE_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_FUSE_RES_CONV").map(|v| v != "0").unwrap_or(true));
+
 impl GpuKokoro {
     fn mask(&self, x: &mut Buf, c: usize, d: &Dom) -> Result<()> {
         // negative-control hook for tests (proves the batch tests detect padding contamination)
@@ -77,8 +79,8 @@ impl GpuKokoro {
         Ok(y)
     }
 
-    /// AdaIN with per-item statistics and per-item style (gb [B, 2C]); gaps -> 0.
-    fn adain_b(&self, a: &GAdaIn, x: &Buf, d: &Dom, styles: &Buf, act: Act) -> Result<Buf> {
+    /// AdaIN statistics: style projection gb [B, 2C] and per-item channel mean / rstd.
+    fn adain_stats(&self, a: &GAdaIn, x: &Buf, d: &Dom, styles: &Buf) -> Result<(Buf, Buf, Buf)> {
         let g = &self.gpu;
         let gb = a.fc.fwd(g, styles, d.b())?;
         let mut mean = g.alloc(d.b() * a.c)?;
@@ -86,6 +88,14 @@ impl GpuKokoro {
         let (li, eps, ci) = (d.l as i32, 1e-5f32, a.c as i32);
         let cfg = LaunchConfig { grid_dim: (a.c as u32, d.b() as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
+        Ok((gb, mean, rstd))
+    }
+
+    /// AdaIN with per-item statistics and per-item style (gb [B, 2C]); gaps -> 0.
+    fn adain_b(&self, a: &GAdaIn, x: &Buf, d: &Dom, styles: &Buf, act: Act) -> Result<Buf> {
+        let g = &self.gpu;
+        let (gb, mean, rstd) = self.adain_stats(a, x, d, styles)?;
+        let (li, ci) = (d.l as i32, a.c as i32);
         let mut y = g.alloc(a.c * d.l)?;
         let null = 0u64;
         match act {
@@ -132,7 +142,18 @@ impl GpuKokoro {
     fn snake_b(&self, blk: &GSnakeBlk, x: &Buf, d: &Dom, styles: &Buf) -> Result<Buf> {
         let g = &self.gpu;
         let mut x = g.stream.clone_dtod(x)?;
+        let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable() && blk.convs2[i].igemm_applicable());
         for i in 0..3 {
+            if fuse {
+                // LEVER PL-009 (kill switch KOKORO_FUSE_RES_CONV=0): AdaIN+Snake applied separately (its
+                // output already has zero gaps, so no mask is needed); conv2 accumulates into x in its
+                // epilogue (x + conv, the add_inplace order) -> bitwise identical to the unfused path
+                let h = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
+                let (h, _) = blk.convs1[i].fwd(g, &h, d.l)?;
+                let h = self.adain_b(&blk.adain2[i], &h, d, styles, Act::Snake(&blk.alpha2[i]))?;
+                blk.convs2[i].fwd_igemm_res(g, &h, d.l, &mut x)?;
+                continue;
+            }
             let mut xt = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
             let xt = self.conv_b(&blk.convs1[i], &mut xt, d)?;
             let mut xt = self.adain_b(&blk.adain2[i], &xt, d, styles, Act::Snake(&blk.alpha2[i]))?;

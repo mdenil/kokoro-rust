@@ -38,7 +38,7 @@ kernels!(
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
-    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res,
 );
 
 macro_rules! launch {
@@ -291,6 +291,26 @@ impl GConv {
             None
         };
         Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct })
+    }
+
+    /// Whether the fused implicit-GEMM path applies to a same-length conv over length `t`.
+    pub(crate) fn igemm_applicable(&self) -> bool {
+        self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (8 * (128 + (self.k - 1) * self.dil) + 8 * self.k * 64) * 4 <= 48 * 1024
+    }
+
+    /// res += conv(x) in place via the fused kernel's residual epilogue (x must already be masked).
+    pub(crate) fn fwd_igemm_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
+        ensure!(self.igemm_applicable() && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
+        let w_ig = self.w_ig.as_ref().unwrap();
+        let smem = (8 * (128 + (self.k - 1) * self.dil) + 8 * self.k * 64) * 4;
+        let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+        let null = 0u64;
+        match &self.b {
+            Some(b) => launch!(g, conv1d_igemm_res, cfg, x, w_ig, b, res, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+            None => launch!(g, conv1d_igemm_res, cfg, x, w_ig, &null, res, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+        }
+        Ok(())
     }
 
     fn fwd(&self, g: &Gpu, x: &Buf, t: usize) -> Result<(Buf, usize)> {

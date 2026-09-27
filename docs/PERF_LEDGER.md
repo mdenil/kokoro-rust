@@ -192,3 +192,17 @@ the frozen baseline is not.
 - A/B (same binary, kill switch; sealed `/data/mdenil/code/kokoro-rust/evidence/ab/20260927-004628-L8-igemm-alice`): Alice warm pass 2.567 → 2.137 s (**1.20×**, cv
   0.6% / 1.2%); cold 4.862 → 4.532 s (1.07×, cv 8.4% / 7.1% → provisional). In-process forward
   (bench, Alice 69 chunks): 2.291 → 1.888 s.
+
+### PL-009 — residual epilogue in the fused conv (snake blocks), mask skip   [2026-09-27 | KEEP, marginal; bitwise identical]
+- In each Snake residual step, conv2 now accumulates into x in its epilogue (x + conv, the
+  add_inplace order). The mask before the snake convs is skipped because the AdaIN output already
+  has zero gaps.
+- Correctness:
+  - WAVs BITWISE identical to the unfused path (Alice 65/65);
+  - batching / mapping negative controls still detected;
+  - the batch-vs-single RB-1 test fails exactly as before (accepted PL-003).
+- Speed:
+  - forward 1.880 / 1.914 → 1.856 / 1.838 s;
+  - sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-010949-L9-resfuse-alice`): Alice warm 2.149 → 2.101 s (1.023×; the "on" arm has one
+    2.331 s outlier, cv 5.6%). Marginal.
+- Also tried and reverted: the AdaIN+Snake prologue fusion (NE-006, slower).

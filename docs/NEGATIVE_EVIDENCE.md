@@ -116,3 +116,33 @@ cv%>5 rows are noise. Interleaved same-window stage pairs only.
 - Do-not-retry unless: a custom implicit-GEMM kernel (no im2col materialization) or a cuBLASLt
   epilogue-fused path is available; plain im2col+SGEMM is dead on this shape set.
 - Tally: W0/L1/N0
+
+## NE-004 — conv1d_igemm with a 128-out-channel tile (256 threads)   [2026-09-27 | REVERTED]
+- Hypothesis: a 128×128 tile halves the input-window loads per FLOP versus 64×128 (PL-008).
+- Result (bench, Alice 69 chunks, in-process forward, 3 reps each):
+  - with the Cin ≤ 128 policy: 64-tile 1.918 s vs 128-tile 2.173 s;
+  - with the Cin ≤ 256 policy: 1.964 s vs 2.217 s.
+  The 128-tile is 13% slower. No spills; likely occupancy-bound (256 threads × 94 regs, up to
+  45 KB smem per block for K = 11 → 1–2 blocks/SM), with no load/compute overlap inside a block.
+- Do-not-retry predicate: a larger tile WITHOUT asynchronous (cp.async) double buffering.
+
+## NE-005 — larger synthesis batches (--batch-phonemes 16000 / 32000)   [2026-09-27 | REJECTED]
+- Private chapter, warm pass (2 rounds × 2 passes, private evidence dir):
+  - 4000 → 9.20 s; 8000 (default) → 9.02 s; 16000 → 12.27 s; 32000 → 15.22 s.
+- Cause of the slowdown: CUDA_ERROR_OUT_OF_MEMORY on the large chapter batches. synth_batch splits
+  the batch and recomputes it, so work is wasted (stderr: "batch of 91 failed … splitting").
+- Even when a batch fits (Alice, 16000 vs 8000), the per-stage GPU profile is equal (2.353 vs
+  2.359 s): larger batches bring no kernel efficiency.
+- Do-not-retry predicate: raising the batch size without first cutting peak activation memory, and
+  even then there is no expected gain beyond ~8000 phonemes on this model.
+
+## NE-006 — AdaIN+Snake fused into the conv1d_igemm prologue   [2026-09-27 | REVERTED; bitwise identical but slower]
+- Idea: compute the conv input (AdaIN with per-item stats/style + Snake) while loading the tile,
+  removing adain_apply's write + re-read.
+- Result: bitwise identical WAVs (Alice 65/65), but the in-process forward was SLOWER:
+  1.907 / 1.920 s vs 1.887 / 1.884 s. Each input element is loaded 2–3× (two out-channel tiles,
+  plus halo overlap), so the prologue recomputes AdaIN + sinf per load and costs more than the
+  memory traffic it saves.
+- Kept instead: the residual epilogue only (PL-009).
+- Do-not-retry predicate: a prologue fusion that recomputes transcendental activations per tile
+  load, without a single-producer staging step.
