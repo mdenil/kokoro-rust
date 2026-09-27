@@ -1,7 +1,7 @@
 # OQ_INDEX — kokoro-rust open questions register
 
 **Hard rule: no kernel ships against an unresolved [OPEN].** Answers cite the INSTALLED pinned
-packages under `/data/mdenil/code/kokoro-rust/reference/venv-prod/lib/python3.12/site-packages/`
+packages under `$KOKORO_DATA/reference/venv-prod/lib/python3.12/site-packages/`
 (`kokoro/` = kokoro 0.9.4, `transformers/…/modeling_albert.py` = transformers 5.12.1).
 
 | OQ | Question | Status | Answer (line-cited) |
@@ -20,7 +20,7 @@ packages under `/data/mdenil/code/kokoro-rust/reference/venv-prod/lib/python3.12
 | OQ-12 | misaki G2P | PARTIAL (frontend-only, non-blocking for core) | `pipeline.py:106-113` en.G2P(trf=False, british=False, fallback=EspeakFallback, unk=''). Detailed misaki spec deferred to frontend milestone (M4). |
 | OQ-13 | Chunking | RESOLVED | text split on `\n+` (`pipeline.py:366`); en_tokenize waterfall chunking at 510 phoneme chars (`:195-221`, `:174-189`); one KModel forward per chunk. |
 | OQ-14 | Name traps | RESOLVED | .pth = dict of 5 sub-state-dicts (bert, bert_encoder, predictor, text_encoder, decoder); keys prefixed `module.` are stripped on fallback (`model.py:68-75`). Post-load `state_dict()` is the ground truth we export (`raw_state.safetensors`, weight_g/weight_v kept; `materialized.safetensors` pre-resolved). |
-| OQ-15 | Nondeterminism floor | RESOLVED | See `docs/conformance/NONDET_FLOOR.md`. |
+| OQ-15 | Nondeterminism floor | RESOLVED | Measured on the reference itself (thread count, f64 re-run) and used to calibrate the end-to-end gates of the original f32 engine; see docs/HISTORY.md. |
 | OQ-16 | Output | RESOLVED | No clamp/normalize in model; f32 audio `.squeeze().cpu()` (`model.py:134`). |
 | OQ-17 | Loaded weights | RESOLVED | Strict load of each sub-dict succeeded or fell back to prefix-strip non-strict; exported census from the loaded module is authoritative. Unused params: `noi_source` path has none; AdaIN InstanceNorm affine params ARE used. |
 | OQ-18 | Licenses | RESOLVED | Weights Apache-2.0 (README front-matter); kokoro + misaki Apache-2.0 (PyPI metadata). Redistribution of converted weights permitted with notice. |

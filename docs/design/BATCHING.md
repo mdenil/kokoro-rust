@@ -1,9 +1,13 @@
-# B1: batched CUDA forward (design; owner #8)
+# Batched CUDA forward (design)
 
 Goal: many chunks per forward on the RTX 4090 without changing per-item semantics.
-Correctness bar: each item's batched output must match its single-item output within the RB-1
-drift bounds (fixed in tests/pinned/regression_bounds.json; for non-fixture items the listened caps
-rel 0.01522 / max 0.04636 / spectral 0.0797 dB), with EXACT ids / durations / sample counts.
+- Correctness bar at design time (the retired f32 engine): each item's batched output matched its
+  single-item output within fixed per-case drift bounds, with EXACT ids / durations / sample
+  counts.
+- In the current BF16x product the predictor runs in BF16, so batch shape can change predicted
+  durations on some lines.
+- Per-item outputs for fixed inputs and batching options are pinned byte for byte by
+  tests/bf16x_golden.rs instead.
 
 ## Ragged layout with zero gaps (no padding-to-max)
 Items are concatenated along time with zero gaps. Two layouts:

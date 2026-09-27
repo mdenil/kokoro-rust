@@ -3,8 +3,8 @@
 //! - Hard check: the phoneme -> input_ids mapping and the voice style vector used by the engine equal
 //!   the reference exactly for every case (data pins).
 //! - Diagnostic (ignored; no thresholds): distances of the product forward, fed the reference's own
-//!   excitation noise, to the reference audio. The owner accepted BF16x by listening (#25), not by a
-//!   numerical gate; the phase-1 f32 conformance gates do not apply to it and are not re-imposed
+//!   excitation noise, to the reference audio. BF16x was accepted by listening review, not by a
+//!   numerical gate; the retired f32 engine's conformance gates do not apply to it and are not re-imposed
 //!   here. Where BF16x predicts different durations than the reference, the replayed noise no longer
 //!   fits and the case is reported as such.
 

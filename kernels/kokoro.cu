@@ -506,7 +506,7 @@ extern "C" __global__ void istft_frames_ld(const float* post, int F, int ld, dou
     }
 }
 
-// Tiled direct Conv1d (PL-004): identical per-output arithmetic order to conv_direct
+// Tiled direct Conv1d: identical per-output arithmetic order to conv_direct
 // (acc = bias; for k: s = sum_ci w*x (ci ascending); acc += s), but each block stages the input
 // window for 64 consecutive outputs x all Cin in shared memory and computes 16 output channels,
 // so the input is read from DRAM once per block instead of once per output channel.

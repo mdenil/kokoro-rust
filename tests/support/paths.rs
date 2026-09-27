@@ -6,6 +6,8 @@
 //! - `KOKORO_FRONTEND_DIR` (optional): frontend data; default `$KOKORO_DATA/frontend`.
 //! - `CUDA_VISIBLE_DEVICES`: passed through unchanged to the binary under test when set; never forced.
 //! - `KOKORO_BIN` (optional): binary under test; default this crate's `kokoro`.
+//! - `KOKORO_PRIVATE_CHAPTER` (optional, private tests only): path of a private long-form text
+//!   (relative to `KOKORO_DATA` or absolute); its sha256 is pinned in the tests. Never in Git.
 //! Scratch output goes under cargo's per-project `CARGO_TARGET_TMPDIR` (inside the ignored target dir).
 #![allow(dead_code)]
 
@@ -29,6 +31,12 @@ pub fn model_dir() -> PathBuf {
 
 pub fn frontend_dir() -> PathBuf {
     env_path("KOKORO_FRONTEND_DIR").unwrap_or_else(|| data().join("frontend"))
+}
+
+/// The optional private long-form text (see module docs). Unset = the private tests fail.
+pub fn private_chapter() -> PathBuf {
+    let p = env_path("KOKORO_PRIVATE_CHAPTER").unwrap_or_else(|| panic!("KOKORO_PRIVATE_CHAPTER is not set: the private tests need the private text (never in Git) - NOT a pass"));
+    if p.is_absolute() { p } else { data().join(p) }
 }
 
 pub fn bin() -> PathBuf {

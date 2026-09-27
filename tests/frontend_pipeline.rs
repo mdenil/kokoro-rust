@@ -83,7 +83,7 @@ fn native_frontend_matches_reference_soup() {
 }
 
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn native_frontend_matches_reference_private() {
     check(&CHAPTER);
 }
@@ -110,13 +110,14 @@ fn fixture_validators_reject_damaged_fixtures() {
 
 /// Same validator negative controls on the private fixtures (local only; hashes pinned, no content).
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn fixture_validators_reject_damaged_fixtures_private() {
     support::validator_negative_controls(&CHAPTER.oracle);
     support::validator_negative_controls(&CHAPTER.spacy_tokens.unwrap());
     support::read_pinned_bytes(&CHAPTER.spacy_seams.unwrap()).unwrap();
-    let input = support::read_pinned_bytes(&support::CHAPTER_INPUT).unwrap();
-    assert_eq!(input.iter().filter(|&&b| b == b'\n').count(), support::CHAPTER_INPUT.records);
+    let pin = support::chapter_input();
+    let input = support::read_pinned_bytes(&pin).unwrap();
+    assert_eq!(input.iter().filter(|&&b| b == b'\n').count(), pin.records);
     println!("private fixtures: pins verified; validator negative controls pass");
 }
 

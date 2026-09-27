@@ -53,7 +53,7 @@ fn fallback_matches_reference_public() {
 }
 
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn fallback_matches_reference_private() {
     check(&CHAPTER);
 }

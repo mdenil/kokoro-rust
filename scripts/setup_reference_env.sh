@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Recreate the pinned production-reference Python environment (oracle side).
-# Pins are the OBSERVED production versions from HERMES_BRIEF.md; the oracle asserts
+# Pins are the versions observed in production use (docs/truth-pack/PINNED_SOURCES.md); the oracle asserts
 # them at runtime. Everything large lives under the data root $KOKORO_DATA.
 # The interpreter must be CPython 3.12.3 (asserted below): $REFERENCE_PYTHON, default python3.12.
 set -euo pipefail

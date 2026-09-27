@@ -1,5 +1,5 @@
-//! Audiobook line-file interface (owner #7) exercised through the ACTUAL `kokoro` binary.
-//! Phoneme-mode input (Python-free today); the text path joins at milestone I1 (native frontend).
+//! Audiobook line-file interface exercised through the ACTUAL `kokoro` binary.
+//! Phoneme-mode input; the native text path is covered by tests/cli_text_native.rs.
 //! Runs the product (CUDA) with short lines; GPU selection comes from the caller's CUDA_VISIBLE_DEVICES.
 
 use std::path::{Path, PathBuf};

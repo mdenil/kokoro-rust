@@ -1,4 +1,4 @@
-// Compiles kernels/kokoro.cu to PTX with the owner-accepted configuration (owner #25): strict
+// Compiles kernels/kokoro.cu to PTX with the accepted BF16x configuration: strict
 // rounding, no FMA contraction (-fmad=false), compute capability 8.9. The flags are fixed; only the
 // location of nvcc is configurable: $NVCC, else $CUDA_HOME/bin/nvcc, else $CUDA_PATH/bin/nvcc,
 // else `nvcc` on PATH, else /usr/local/cuda/bin/nvcc (the CUDA toolkit's default install prefix).

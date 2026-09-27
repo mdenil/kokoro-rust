@@ -35,7 +35,7 @@ pub fn subtokenize(word: &str) -> Vec<String> {
     subtoken_regex().find_iter(word).filter_map(|m| m.ok()).map(|m| m.as_str().to_string()).collect()
 }
 
-/// Fallback G2P for words the lexicon cannot resolve (espeak-ng in production; owner decision).
+/// Fallback G2P for words the lexicon cannot resolve (espeak-ng in production).
 pub trait Fallback {
     fn g2p(&self, tk: &MToken) -> (Option<String>, Option<i32>);
 }
