@@ -1,4 +1,4 @@
-# Frontend coverage findings (F0, 2026-09-26)
+# Frontend coverage findings (2026-09-26)
 
 Oracle: `oracle/frontend_oracle.py` (pinned misaki 0.9.4 / spaCy 3.8.14 / en_core_web_sm 3.8.0 /
 espeak-ng via espeakng-loader 0.2.4). Public fixtures (hashes):
@@ -20,7 +20,7 @@ Observations
   runtime (dynamic loading, never compiled in); see docs/DEPENDENCIES.md. Fallback pronunciations
   follow the installed eSpeak NG version; the reference comparisons use the reference's 1.52.0.
 - ~17–20% of tokens pass through POS/context-dependent rules (a/an/the/to/used, POS-keyed entries,
-  NNP handling) → the spaCy tagger must be ported (F2); a tag-free approximation would change
+  NNP handling) → the spaCy tagger had to be ported; a tag-free approximation would change
   pronunciations.
 - Words left without a pronunciation: the reference silently drops them (for example "-12" in
   public edge case 7, the "n’t" of "won’t" on two Alice lines, and many fuzz/soup tokens in other

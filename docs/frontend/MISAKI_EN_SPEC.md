@@ -1,7 +1,7 @@
-# Behavioral spec: production English frontend (misaki 0.9.4 en.G2P + KPipeline chunking)
+# Behavioral spec: the reference English frontend (misaki 0.9.4 en.G2P + KPipeline chunking)
 
 Source: pinned `misaki/en.py` (712 lines), `misaki/espeak.py`, `kokoro/pipeline.py` in the
-reference venv. Cites are `en.py:<line>`. Configuration used by production: `KPipeline('a')` →
+reference venv. Cites are `en.py:<line>`. Configuration of the reference pipeline: `KPipeline('a')` →
 `en.G2P(trf=False, british=False, fallback=EspeakFallback(british=False), unk='')`, version None.
 
 ## S1 Pipeline (en.py:653-712)
@@ -45,7 +45,7 @@ post-rules (US: o^ʊ→O, ɜː(ɹ)→ɜɹ, ɪə→iə, drop ː; 'o'→'ɔ'; ɾ�
 Input split on `\n+`; per segment `g2p` then `en_tokenize`: accumulate tokens while phoneme count
 (with spaces) ≤ 510; on overflow choose split via `waterfall_last` (174-189: last `!.?…`, then `:;`,
 then `,—`, bumping over `)`/`”`, requiring the remainder ≤ 510), yield (graphemes, phonemes);
-skip empty; production truncates ps > 510 with a warning (380-382) — the Rust CLI refuses instead.
+skip empty; the reference truncates ps > 510 with a warning (380-382) — the Rust CLI refuses instead.
 
 ## S5 Where POS tags matter (drives the tagger-port requirement)
 special cases (a/am/an/I/by/to/in/the/vs/used), POS-keyed lexicon entries, NNP handling in lookup

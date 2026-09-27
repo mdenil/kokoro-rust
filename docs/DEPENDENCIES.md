@@ -11,14 +11,14 @@ from explicit paths at runtime, except eSpeak NG, which is the system installati
 - **No Python** interpreter, runtime, package or bridge process. The `python-bridge` frontend was
   removed from the binary. Tested with Python unavailable in `tests/cli_text_native.rs`.
 - **No subprocesses.** The execve audit sees exactly one exec, the binary itself, in every
-  integrated test and in the full-chapter acceptance.
+  integrated test and in long-form runs.
 - **No network** and no oracle replay: nothing recorded from the reference is read at inference.
 
 ## Executable
 | item | detail |
 |---|---|
 | `target/release/kokoro` | Rust, built `cargo build --release` (CUDA is always required; there is no CPU build). `ldd` shows only libc, libm and libgcc_s. The CUDA kernels are compiled to PTX at build time (nvcc 12.9, compute_89) and embedded in the binary (`include_str!`). They are JIT-loaded by the driver. |
-| build configuration | One configuration: the BF16x build, kernels compiled with FMA contraction (`-fmad=true`). Recorded in every sidecar as `cuda bf16x kernels=fma(-fmad=true)`. (Earlier f32/FMA and experimental precision builds were removed; see docs/HISTORY.md.) |
+| build configuration | One configuration: the BF16x build, kernels compiled with FMA contraction (`-fmad=true`). Recorded in every sidecar as `cuda bf16x kernels=fma(-fmad=true)`. (Other precision configurations were evaluated and are not included; see docs/VALIDATION.md.) |
 
 ## Native libraries loaded at runtime
 | library | how | version on this host | license / note |
@@ -37,14 +37,14 @@ created on GPU 1.
 |---|---|---|---|---|
 | Kokoro-82M weights `kokoro-v1_0.pth`, `config.json`, `voices/<voice>.pt` | `--model-dir` (HF snapshot f3ff3571…) | 327 MB + 0.5 MB/voice | docs/truth-pack (weights 496dba11…) | Apache-2.0 (model card) |
 | misaki 0.9.4 lexicons `us_gold.json`, `us_silver.json` | `<frontend-dir>/misaki-0.9.4/` | 5.1 MB (with the unused gb_*) | dc414872… / de8f67be… | misaki Apache-2.0. **Lexicon data provenance is an open item** (docs/frontend/COVERAGE.md) |
-| spaCy en_core_web_sm 3.8.0: tokenizer rules, lexeme_norm lookups, BASE_NORMS, symbol table, tok2vec + tagger weights (exported by oracle/export_spacy.py, deterministic) | `<frontend-dir>/spacy-en_core_web_sm-3.8.0/` | 6.2 MB | tokenizer.json b44b0bc0…, lookups.json a9162beb…, base_norms.json dfddb78e…, symbols.json 3f7694e0…, model_structure.json f80547c2…, tagger_weights.safetensors 66a133a4… | spaCy + model MIT |
+| spaCy en_core_web_sm 3.8.0: tokenizer rules, lexeme_norm lookups, BASE_NORMS, symbol table, tok2vec + tagger weights (exported by scripts/export_spacy_assets.py, deterministic) | `<frontend-dir>/spacy-en_core_web_sm-3.8.0/` | 6.2 MB | tokenizer.json b44b0bc0…, lookups.json a9162beb…, base_norms.json dfddb78e…, symbols.json 3f7694e0…, model_structure.json f80547c2…, tagger_weights.safetensors 66a133a4… | spaCy + model MIT |
 | eSpeak NG en-us data (`phontab`, `phonindex`, `phondata`, `intonations`, `en_dict`, `lang/gmw/en-US`) | the system `espeak-ng-data/` (Ubuntu: /usr/lib/x86_64-linux-gnu/espeak-ng-data) | 0.8 MB of the package's data | hashed at load time (identity) | GPL-3.0-or-later (see above) |
 
 ## Optional (off by default)
 - `--encode <ext>` runs the external **`ffmpeg`** executable (found on PATH) as a subprocess, to
   also write FLAC/MP3/Opus next to each WAV. The encoded file's sha256 is recorded in the sidecar.
   It is not used by the default WAV path or by the no-Python /
-  no-subprocess acceptance runs. `tests/cli_text_native.rs::encode_with_ffmpeg_when_enabled`
+  no-subprocess runs. `tests/cli_text_native.rs::encode_with_ffmpeg_when_enabled`
   covers it. With `--encode`, the execve audit shows the binary plus one ffmpeg per line.
 
 ## Build-time only
