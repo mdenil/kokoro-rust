@@ -12,18 +12,13 @@ use kokoro::engine::Engine;
 use kokoro::gpu::{BatchItem, ItemNoise};
 use kokoro::st::{self, TensorMap};
 use kokoro::vocoder::HARMONICS;
-use std::path::PathBuf;
 
 #[path = "common_gates.rs"]
 mod common_gates;
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
-
-fn model_dir() -> PathBuf {
-    data().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987")
-}
+#[path = "support/paths.rs"]
+mod paths;
+use paths::{data, model_dir};
 
 struct Fx {
     name: String,

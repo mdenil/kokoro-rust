@@ -10,17 +10,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
-
-fn model_dir() -> PathBuf {
-    data().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987")
-}
-
-fn bin() -> PathBuf {
-    std::env::var("KOKORO_BIN").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_kokoro")))
-}
+#[path = "support/paths.rs"]
+mod paths;
+use paths::{bin, data, model_dir};
 
 fn sha256_file(p: &Path) -> String {
     kokoro::engine::sha256_bytes(&std::fs::read(p).unwrap())
@@ -33,12 +25,9 @@ fn render(input: &Path, voice: &str, args: &[String], out: &Path) -> BTreeMap<us
 
 fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &[(&str, &str)]) -> BTreeMap<usize, String> {
     let _ = std::fs::remove_dir_all(out);
-    let o = Command::new(bin())
-        .env_clear()
-        .envs(env.iter().copied())
-        .env("PATH", "/nonexistent")
-        .env("CUDA_VISIBLE_DEVICES", "0")
-        .env("KOKORO_FRONTEND_DIR", data().join("frontend"))
+    let mut cmd = Command::new(bin());
+    cmd.env_clear().envs(env.iter().copied()).env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
+    let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
@@ -106,7 +95,7 @@ fn run_table(table: &serde_json::Value, input_root: Option<&Path>, scratch: &Pat
 fn public_cases_match_accepted_artifact() {
     let table: serde_json::Value = serde_json::from_str(include_str!("pinned/bf16x_golden.json")).unwrap();
     assert_eq!(table["accepted_sha256"], "6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea");
-    run_table(&table, None, &data().join("tmp/bf16x_golden"));
+    run_table(&table, None, &paths::scratch(&["bf16x_golden"]));
 }
 
 /// The checker must catch a changed line, a missing line and an extra line.
@@ -133,7 +122,7 @@ fn golden_detects_cross_item_leakage() {
     let c = &table["cases"]["edge_af"];
     let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(c["input"].as_str().unwrap());
     let args: Vec<String> = c["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect();
-    let got = render_env(&input, c["voice"].as_str().unwrap(), &args, &data().join("tmp/bf16x_golden_negctl"), &[("KOKORO_BATCH_NEGCTL_NOMASK", "1")]);
+    let got = render_env(&input, c["voice"].as_str().unwrap(), &args, &paths::scratch(&["bf16x_golden_negctl"]), &[("KOKORO_BATCH_NEGCTL_NOMASK", "1")]);
     let d = diff(&got, c["wav_sha256"].as_object().unwrap());
     println!("edge_af with gap masking disabled: {} of {} lines differ", d.len(), c["lines"]);
     assert!(!d.is_empty(), "cross-item leakage was not detected by the golden comparison");
@@ -147,5 +136,5 @@ fn private_chapter_matches_accepted_artifact() {
     let dir = data().join("evidence/private/release-cleanup/golden");
     let table: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("private_golden.json")).unwrap()).unwrap();
     let input = data().join("bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt");
-    run_table(&table, Some(&input), &data().join("tmp/bf16x_golden_private"));
+    run_table(&table, Some(&input), &paths::scratch(&["bf16x_golden_private"]));
 }

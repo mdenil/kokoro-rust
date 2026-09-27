@@ -80,6 +80,9 @@ impl Engine {
     pub fn load(model_dir: &Path, cuda_ordinal: usize) -> Result<Self> {
         let weights = model_dir.join("kokoro-v1_0.pth");
         let config = model_dir.join("config.json");
+        for (p, what) in [(&config, "config.json"), (&weights, "kokoro-v1_0.pth"), (&model_dir.join("voices"), "voices/")] {
+            ensure!(p.exists(), "model snapshot {} (--model-dir / KOKORO_MODEL_DIR) has no {what}: expected the hexgrad/Kokoro-82M snapshot with config.json, kokoro-v1_0.pth and voices/", model_dir.display());
+        }
         // hash the checkpoint on a helper thread while it is parsed/uploaded (identical result)
         let hash = std::thread::spawn({
             let weights = weights.clone();

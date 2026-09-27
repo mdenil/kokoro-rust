@@ -25,8 +25,12 @@ def norm(s):
 
 def main():
     repo = pathlib.Path(sys.argv[sys.argv.index("--repo") + 1] if "--repo" in sys.argv else pathlib.Path(__file__).resolve().parent.parent)
-    data = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
+    if not os.environ.get("KOKORO_DATA"):
+        sys.exit("KOKORO_DATA is not set: the private corpus to audit against lives under it (refusing to audit nothing)")
+    data = pathlib.Path(os.environ["KOKORO_DATA"])
     private = sorted((data / "bench/private").glob("**/*.txt"))
+    if not private:
+        sys.exit(f"no private corpus files under {data / 'bench/private'}: refusing to report clean against nothing")
     lines, windows = {}, {}
     for f in private:
         for no, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):

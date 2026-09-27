@@ -1,5 +1,5 @@
 {
- "accepted_binary": "/data/mdenil/code/kokoro-rust/bin/phase2-9b39d48-6fde9d88990a",
+ "accepted_binary": "$KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a",
  "accepted_sha256": "6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea",
  "tree": "9b39d48",
  "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (owner #25 accepted configuration)",

@@ -8,12 +8,8 @@ use std::path::PathBuf;
 mod support;
 use support::{Corpus, ALICE, CHAPTER, EDGE};
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
-
 fn spacy_dir() -> PathBuf {
-    data().join("frontend/spacy-en_core_web_sm-3.8.0")
+    support::paths::frontend_dir().join("spacy-en_core_web_sm-3.8.0")
 }
 
 struct Line {

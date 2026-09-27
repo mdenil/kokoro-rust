@@ -12,24 +12,16 @@ use std::process::Command;
 mod support;
 use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS};
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
-
-fn model_dir() -> PathBuf {
-    data().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987")
-}
-
-fn bin() -> PathBuf {
-    std::env::var("KOKORO_BIN").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_kokoro")))
-}
+use support::paths::{self, bin, model_dir};
 
 fn scratch(name: &str) -> PathBuf {
     let tag = bin().file_name().unwrap().to_string_lossy().into_owned();
-    let d = data().join("tmp/cli_text_native").join(tag).join(name);
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    paths::scratch(&["cli_text_native", &tag, name])
+}
+
+/// strace from the test's PATH (required: the exec audit is part of the Python-free guarantee).
+fn strace() -> PathBuf {
+    paths::which("strace").expect("strace not found on PATH: required for the execve audit - NOT a pass")
 }
 
 struct Run {
@@ -38,8 +30,9 @@ struct Run {
     execs: Vec<String>,
 }
 
-/// `kokoro synth` (text, native frontend, CUDA GPU 0) under `strace -f -e trace=execve` with a
-/// cleared environment: no PATH entry with Python, no PYTHON* variables, no HOME.
+/// `kokoro synth` (text, native frontend, CUDA; the caller's CUDA_VISIBLE_DEVICES is passed through)
+/// under `strace -f -e trace=execve` with a cleared environment: no PATH entry with Python, no
+/// PYTHON* variables, no HOME.
 fn synth(input: &Path, out: &Path, extra: &[&str]) -> Run {
     synth_path(input, out, extra, "/nonexistent")
 }
@@ -47,14 +40,9 @@ fn synth(input: &Path, out: &Path, extra: &[&str]) -> Run {
 fn synth_path(input: &Path, out: &Path, extra: &[&str], path: &str) -> Run {
     let log = out.with_extension("strace");
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
-    let o = Command::new("/usr/bin/strace")
-        .args(["-f", "-qq", "-e", "trace=execve,execveat", "-o"])
-        .arg(&log)
-        .arg(bin())
-        .env_clear()
-        .env("PATH", path)
-        .env("CUDA_VISIBLE_DEVICES", "0")
-        .env("KOKORO_FRONTEND_DIR", data().join("frontend"))
+    let mut cmd = Command::new(strace());
+    cmd.args(["-f", "-qq", "-e", "trace=execve,execveat", "-o"]).arg(&log).arg(bin()).env_clear().env("PATH", path).env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
+    let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
@@ -409,10 +397,9 @@ fn failures_restart_and_invalidation() {
         assert_eq!(json(&out.join("sec.manifest.json"))["counts"]["resumed"], 0, "{extra:?}");
     }
     // missing frontend data is a job-level error (exit 2), never a silent fallback
-    let o = Command::new(bin())
-        .env_clear()
-        .env("PATH", "/nonexistent")
-        .env("KOKORO_FRONTEND_DIR", d.join("no-such-dir"))
+    let mut cmd = Command::new(bin());
+    cmd.env_clear().env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", d.join("no-such-dir"));
+    let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
@@ -441,7 +428,7 @@ fn private_chapter_acceptance() {
     let stem = "002_hidden_curriculum_of_youth_whaddaya_want_from_me";
     let tag = bin().file_name().unwrap().to_string_lossy().into_owned();
     for voice in ["af_heart", "am_adam"] {
-        let out = data().join("evidence/private/acceptance").join(&tag).join(voice);
+        let out = support::data().join("evidence/private/acceptance").join(&tag).join(voice);
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
         let t = std::time::Instant::now();
@@ -474,7 +461,9 @@ fn encode_with_ffmpeg_when_enabled() {
     let d = scratch("encode");
     let input = d.join("enc.txt");
     std::fs::write(&input, "First line here.\nSecond line, a bit longer.\nThird.\n").unwrap();
-    let r = synth_path(&input, &d.join("out"), &["--encode", "flac"], "/usr/bin");
+    let ffmpeg = paths::which("ffmpeg").expect("ffmpeg not found on PATH: required for the --encode test - NOT a pass");
+    let ffdir = ffmpeg.parent().unwrap().to_string_lossy().into_owned();
+    let r = synth_path(&input, &d.join("out"), &["--encode", "flac"], &ffdir);
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(!r.execs.iter().any(|e| e.contains("python")));
     let ff = r.execs.iter().filter(|e| e.contains("ffmpeg")).count();

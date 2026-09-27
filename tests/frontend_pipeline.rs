@@ -2,20 +2,16 @@
 //! chunks) with the NATIVE spaCy tokenizer/tagger and the NATIVE espeak fallback, vs the pinned
 //! reference (oracle/frontend_oracle.py). No oracle tokens/tags/fallback outputs are replayed.
 use kokoro::frontend::pipeline::{Chunk, EnglishFrontend, FrontendPaths};
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 #[path = "support/mod.rs"]
 mod support;
 use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS, SOUP};
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
 
 fn fe() -> &'static EnglishFrontend {
     static FE: OnceLock<EnglishFrontend> = OnceLock::new();
-    FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&data().join("frontend"))).expect("native frontend data — missing is NOT a pass"))
+    FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&support::paths::frontend_dir())).expect("native frontend data — missing is NOT a pass"))
 }
 
 fn check(c: &Corpus) {

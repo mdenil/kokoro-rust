@@ -7,8 +7,11 @@
 use sha2::Digest;
 use std::path::PathBuf;
 
+#[path = "paths.rs"]
+pub mod paths;
+
 pub fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
+    paths::data()
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -1,8 +1,12 @@
 # Rust
 /target
+# local, host-specific cargo settings (e.g. build jobs); never required by public commands
+/.cargo/config.toml
+# local developer environment for scripts/env.sh (data root etc.)
+/scripts/env.local.sh
 Cargo.lock.orig
 
-# Large/generated/private material lives under /data/mdenil/code/kokoro-rust (see docs/truth-pack)
+# Large/generated/private material lives under the data root $KOKORO_DATA, outside Git (docs/PORTABILITY.md)
 *.wav
 *.flac
 *.mp3
@@ -17,7 +21,7 @@ __pycache__/
 .venv/
 venv/
 
-# Evidence bundles are hashed + summarized in-repo; raw payloads stay in /data
+# Evidence bundles are hashed + summarized in-repo; raw payloads stay under $KOKORO_DATA
 /evidence-raw/
 
 # Editor/OS noise
