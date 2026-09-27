@@ -9,7 +9,7 @@ paragraphs whitespace-normalized, split into sentences at terminal punctuation f
 uppercase letter/opening quote, one utterance per line, Gutenberg `_emphasis_` underscores
 removed. Text is otherwise exact (curly quotes, em-dashes, parentheses kept).
 
-65 utterances, 8–590 characters (median 142). Long lines exceed 510 phonemes and exercise the
+65 utterances, 8–590 characters (median 140). Long lines exceed 510 phonemes and exercise the
 reference's waterfall chunking. sha256 of the file after underscore removal is recorded
 with each benchmark result.
 
