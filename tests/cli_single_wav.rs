@@ -287,3 +287,88 @@ fn a_word_the_frontend_cannot_pronounce_stops_the_whole_file() {
     assert!(r.stderr.contains("line 2: error") && r.stderr.contains("unresolved word"), "{}", r.stderr);
     assert_eq!(deliverables(&cwd), set(&[]), "no shortened book.wav");
 }
+
+/// FAULT INJECTION: a directory where the temporary `.book.wav.partial` would be created makes the
+/// final write fail after all lines were synthesized.
+#[test]
+fn a_failed_final_write_keeps_and_flags_the_previous_output() {
+    let (cwd, input) = setup("assembly-fault", LINES);
+    let inp = input.to_str().unwrap();
+    assert_eq!(ph(&cwd, &["--diagnostics", inp]).code, 0);
+    let good = sha(&cwd.join("book.wav"));
+    assert_eq!(json(&cwd.join("book.manifest.json"))["complete"], true);
+    std::fs::write(&input, LINES.replace("wˈɜɹld.", "wˈɜɹldz.")).unwrap();
+    std::fs::create_dir(cwd.join(".book.wav.partial")).unwrap();
+    // without --diagnostics: the failure is on stderr, and the earlier manifest is marked out of date
+    let r = ph(&cwd, &[inp]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("could not write") && r.stderr.contains("was NOT updated"), "{}", r.stderr);
+    assert!(r.stderr.contains("marked as out of date"), "{}", r.stderr);
+    assert_eq!(sha(&cwd.join("book.wav")), good, "previous WAV kept");
+    let m = json(&cwd.join("book.manifest.json"));
+    assert_eq!(m["complete"], false);
+    assert_eq!(m["stale"]["complete_then"], true);
+    // with --diagnostics: the new manifest records the failure and the preserved file
+    let r = ph(&cwd, &["--diagnostics", inp]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let m = json(&cwd.join("book.manifest.json"));
+    assert_eq!(m["complete"], false);
+    assert_eq!(m["output"]["wav"], serde_json::Value::Null);
+    assert!(m["output"]["error"].is_string());
+    assert_eq!(m["output"]["stale_wav"]["sha256"], good);
+    // once the obstruction is gone, the line work is reused and the file is written
+    std::fs::remove_dir(cwd.join(".book.wav.partial")).unwrap();
+    let r = ph(&cwd, &["--diagnostics", inp]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let m = json(&cwd.join("book.manifest.json"));
+    assert_eq!(m["counts"], serde_json::json!({"done": 0, "resumed": 3, "failed": 0}), "line work kept across the failed runs");
+    assert_ne!(sha(&cwd.join("book.wav")), good);
+    assert_eq!(m["output"]["sha256"], sha(&cwd.join("book.wav")));
+}
+
+#[test]
+fn an_empty_rerun_flags_the_previous_output() {
+    let (cwd, input) = setup("empty-rerun", LINES);
+    let inp = input.to_str().unwrap();
+    assert_eq!(ph(&cwd, &[inp]).code, 0);
+    let good = sha(&cwd.join("book.wav"));
+    std::fs::write(&input, "\n\n").unwrap();
+    let r = ph(&cwd, &["--blank-lines", "skip", "--diagnostics", inp]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("nothing to synthesize") && r.stderr.contains("was NOT updated"), "{}", r.stderr);
+    assert_eq!(sha(&cwd.join("book.wav")), good);
+    let m = json(&cwd.join("book.manifest.json"));
+    assert_eq!(m["complete"], false);
+    assert_eq!(m["output"]["stale_wav"]["sha256"], good);
+}
+
+#[test]
+fn a_failed_conversion_flags_the_previous_encoded_file() {
+    let ffmpeg = paths::which("ffmpeg").expect("ffmpeg on PATH is needed for this test - NOT a pass");
+    let path = format!("{}:/nonexistent", ffmpeg.parent().unwrap().display());
+    let (cwd, input) = setup("encode-stale", LINES);
+    let inp = input.to_str().unwrap();
+    assert_eq!(kokoro(&cwd, &["--encode", "flac", inp], &path, false).code, 0);
+    let (old_wav, old_flac) = (sha(&cwd.join("book.wav")), sha(&cwd.join("book.flac")));
+    std::fs::write(&input, LINES.replace("wˈɜɹld.", "wˈɜɹldz.")).unwrap();
+    // ffmpeg not available this time
+    let r = ph(&cwd, &["--encode", "flac", "--diagnostics", inp]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("book.flac was NOT updated"), "{}", r.stderr);
+    assert_ne!(sha(&cwd.join("book.wav")), old_wav, "the new WAV was written");
+    assert_eq!(sha(&cwd.join("book.flac")), old_flac, "the old encoded file is kept");
+    let m = json(&cwd.join("book.manifest.json"));
+    assert_eq!(m["output"]["encoded"]["stale"]["sha256"], old_flac);
+    assert!(m["output"]["encoded"]["error"].is_string());
+}
+
+#[test]
+fn encode_targets_that_would_clash_are_refused_before_any_work() {
+    let (cwd, input) = setup("encode-args", LINES);
+    for ext in ["wav", "WAV", "../x", "fl.ac", ""] {
+        let r = ph(&cwd, &["--encode", ext, input.to_str().unwrap()]);
+        assert_eq!(r.code, 2, "--encode {ext:?}: {}", r.stderr);
+        assert!(r.stderr.contains("--encode"), "--encode {ext:?}: {}", r.stderr);
+        assert_eq!(deliverables(&cwd), set(&[]), "--encode {ext:?}: nothing written");
+    }
+}

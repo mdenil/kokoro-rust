@@ -311,6 +311,14 @@ fn synth(
     if input_format == InputFormat::Text && frontend == Frontend::None {
         bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
+    if let Some(ext) = &encode {
+        if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+            bail!("--encode takes a file extension such as flac, mp3 or opus (letters and digits only), not {ext:?}");
+        }
+        if ext.eq_ignore_ascii_case("wav") {
+            bail!("--encode wav would overwrite the WAV that kokoro writes itself; leave --encode out for WAV output");
+        }
+    }
     let ts = now();
     let inp = read_input(&input)?;
     tl.push(0, "main", "input_read", ts, inp.lines.len());
@@ -744,8 +752,25 @@ fn synth(
             "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
         });
         let ts = now();
-        wav::write_atomic_opt(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes(), fsync)?;
+        let mpath = out_dir.join(format!("{}.manifest.json", inp.stem));
+        if let Err(e) = wav::write_atomic_opt(&mpath, serde_json::to_string_pretty(&manifest)?.as_bytes(), fsync) {
+            eprintln!("could not write the diagnostics file {}: {e:#}", mpath.display());
+            complete = false;
+        }
         tl.push(pass, "main", "manifest", ts, 1);
+    } else {
+        // a manifest from an earlier --diagnostics run no longer describes the files: say so in it
+        let mpath = out_dir.join(format!("{}.manifest.json", inp.stem));
+        if let Some(mut old) = std::fs::read_to_string(&mpath).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) {
+            if old.get("stale").is_none() {
+                old["stale"] = serde_json::json!({"note": "written by an earlier run; a later run without --diagnostics did not update it", "complete_then": old["complete"].clone()});
+                old["complete"] = serde_json::json!(false);
+                match wav::write_atomic_opt(&mpath, serde_json::to_string_pretty(&old)?.as_bytes(), fsync) {
+                    Ok(()) => notes.push(format!("{} is from an earlier run; it is now marked as out of date", mpath.display())),
+                    Err(e) => eprintln!("{} is from an earlier run and could not be marked as out of date: {e:#}", mpath.display()),
+                }
+            }
+        }
     }
     tl.push(pass, "main", "pass", t_pass, inp.lines.len());
     eprintln!(
@@ -805,20 +830,25 @@ fn whole_file_output(
     let final_wav = out_dir.join(format!("{}.wav", inp.stem));
     let record_path = state_dir.join("output.json");
     let previous: serde_json::Value = std::fs::read_to_string(&record_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    if !lines_ok {
+    // no new WAV this run: say so, and flag a file left from an earlier run as not current
+    let not_written = |notes: &mut Vec<String>, reason: &str| -> serde_json::Value {
+        let mut out = serde_json::json!({"wav": null, "reason": reason});
         if final_wav.exists() {
             notes.push(format!("{} was NOT updated: the file there is from an earlier run and does not reflect this input", final_wav.display()));
-            let stale = serde_json::json!({"path": final_wav.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha256_file(&final_wav).ok(),
-                "note": "from an earlier run; not updated because lines failed"});
-            return Ok((serde_json::json!({"wav": null, "stale_wav": stale}), false));
+            out["stale_wav"] = serde_json::json!({"path": final_wav.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha256_file(&final_wav).ok(),
+                "note": format!("from an earlier run; not updated because {reason}")});
+        } else {
+            notes.push(format!("{} was not written", final_wav.display()));
         }
-        notes.push(format!("{} was not written", final_wav.display()));
-        return Ok((serde_json::json!({"wav": null}), false));
+        out
+    };
+    if !lines_ok {
+        return Ok((not_written(notes, "lines failed"), false));
     }
     let done: Vec<&serde_json::Value> = lines.iter().filter(|e| e["status"] == "ok").collect();
     if done.is_empty() {
-        notes.push(format!("nothing to synthesize: {} has no lines with text; no WAV written", inp.display));
-        return Ok((serde_json::json!({"wav": null, "reason": "the input has no lines with text"}), false));
+        notes.push(format!("nothing to synthesize: {} has no lines with text", inp.display));
+        return Ok((not_written(notes, "the input has no lines with text"), false));
     }
     let parts: Vec<(PathBuf, String)> = done
         .iter()
@@ -832,9 +862,18 @@ fn whole_file_output(
         eprintln!("{} is up to date", final_wav.display());
         (current.unwrap(), previous["samples"].as_u64().unwrap_or(0))
     } else {
-        let a = wav::assemble(&parts, format, SAMPLE_RATE as u32, &final_wav, fsync).with_context(|| format!("writing {}", final_wav.display()))?;
-        eprintln!("wrote {} ({} lines)", final_wav.display(), parts.len());
-        (a.sha256, a.samples)
+        match wav::assemble(&parts, format, SAMPLE_RATE as u32, &final_wav, fsync) {
+            Ok(a) => {
+                eprintln!("wrote {} ({} lines)", final_wav.display(), parts.len());
+                (a.sha256, a.samples)
+            }
+            Err(e) => {
+                notes.push(format!("could not write {}: {e:#}", final_wav.display()));
+                let mut out = not_written(notes, "writing the new file failed");
+                out["error"] = serde_json::json!(format!("{e:#}"));
+                return Ok((out, false));
+            }
+        }
     };
     let duration_s = samples as f64 / SAMPLE_RATE as f64;
     let mut ok = true;
@@ -862,15 +901,23 @@ fn whole_file_output(
                         Err(e) => format!("could not run ffmpeg: {e}"),
                     };
                     notes.push(format!("{} was written, but converting it to {ext} failed ({why})", final_wav.display()));
+                    encoded = serde_json::json!({"ext": ext, "error": why});
+                    if let Some(old) = enc_current {
+                        notes.push(format!("{} was NOT updated: it is from an earlier run and does not match the new {}", dst.display(), final_wav.display()));
+                        encoded["stale"] = serde_json::json!({"path": dst.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": old,
+                            "note": "from an earlier run; converting the new WAV failed"});
+                    }
                     ok = false;
                 }
             }
         }
     }
     let record = serde_json::json!({"wav": final_wav.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha, "assembly_key": key,
-        "samples": samples, "duration_s": duration_s, "format": format!("{format:?}"), "encoded": encoded});
+        "samples": samples, "duration_s": duration_s, "format": format!("{format:?}"),
+        "encoded": if encoded["sha256"].is_string() { encoded.clone() } else { serde_json::Value::Null }});
     wav::write_atomic_opt(&record_path, serde_json::to_string_pretty(&record)?.as_bytes(), fsync)?;
     let mut out = record;
+    out["encoded"] = encoded; // the full status, including a failed conversion
     out["lines"] = serde_json::json!(parts.len());
     out["sample_rate"] = serde_json::json!(SAMPLE_RATE);
     out["resumed"] = serde_json::json!(reuse);
