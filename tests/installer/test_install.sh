@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Scenario tests for install.sh, run from a checkout (developer tool; not part of `cargo test`).
 #
-#   tests/installer/test_install.sh RELEASES_DIR WORK_DIR
+#   tests/installer/test_install.sh RELEASES_DIR WORK_DIR [MODEL_COPY]
 #
 # RELEASES_DIR holds locally built release packages (scripts/package_release.sh):
 #   RELEASES_DIR/dist1/  version v0.1.0-test1: kokoro-x86_64-linux.tar.gz, kokoro-frontend.tar.gz, SHA256SUMS
 #   RELEASES_DIR/dist2/  version v0.1.0-test2
 # They are served to the installer through KOKORO_RELEASE_URL=file://... (a local stand-in for
-# GitHub Releases). The first fresh install downloads the model from Hugging Face; later scenarios
-# use a file:// copy of that verified download (KOKORO_MODEL_URL).
+# GitHub Releases). The first fresh install downloads the model from Hugging Face, unless MODEL_COPY
+# names a directory holding an already verified copy of the pinned model files (then S1 uses it as a
+# file:// mirror); later scenarios use a file:// copy of the first verified download
+# (KOKORO_MODEL_URL). S8 always interrupts a real, throttled Hugging Face download.
+# Fault injection: a MOCK mv (only in the scenarios that say so) fails, or sends TERM to the
+# installer, when moving to one chosen destination, once.
+# Terminal consent: `script` gives the piped installer a real pseudo-terminal as /dev/tty; the answers
+# are typed into it; sudo, apt-get and ldconfig stay MOCKED.
 # sudo, apt-get, ldconfig and uname are replaced by MOCKS on PATH where a scenario says so: no real
 # privileged command or package installation is ever run. The installer always runs piped into
 # bash (curl file://.../install.sh | bash), in an empty environment with a fresh HOME.
@@ -21,6 +27,7 @@ WORK=${2:?usage: $0 RELEASES_DIR WORK_DIR}
 V1=v0.1.0-test1
 V2=v0.1.0-test2
 REV=f3ff3571791e39611d31c381e3a41a3af07b4987
+MODEL_COPY=${3:-}
 REAL_LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig)
 FAILS=0
 PASSES=0
@@ -59,9 +66,34 @@ cat > "$MOCKS/uname" << 'EOF'
 # MOCK uname: reports an aarch64 machine
 case ${1:-} in -m) echo aarch64 ;; *) echo Linux ;; esac
 EOF
+cat > "$MOCKS/mv" << 'EOF'
+#!/bin/bash
+# MOCK mv (FAULT INJECTION): once, when the destination is $MOCK_MV_FAULT_DEST, fail instead of
+# moving (MOCK_MV_FAULT=fail) or send TERM to the installer and fail (MOCK_MV_FAULT=term)
+dest=${*: -1}
+if [[ -n ${MOCK_MV_FAULT_DEST:-} && $dest == "$MOCK_MV_FAULT_DEST" && ! -e $MOCK_STATE/mv_fault_done ]]; then
+  touch "$MOCK_STATE/mv_fault_done"
+  echo "mv $* ; injected ${MOCK_MV_FAULT:-fail}" >> "$MOCK_STATE/mv.log"
+  [[ ${MOCK_MV_FAULT:-fail} == term ]] && kill -TERM "$PPID"
+  exit 1
+fi
+exec /usr/bin/mv "$@"
+EOF
+cat > "$MOCKS/sudo-pty" << 'EOF'
+#!/bin/bash
+# MOCK sudo for the terminal tests: asks for a password on /dev/tty like sudo does, records what it
+# read and from where, then runs the command unprivileged (it only ever reaches the apt-get mock)
+printf '[sudo] password for tester: ' > /dev/tty
+IFS= read -r pw < /dev/tty
+echo "sudo $* ; password_chars=${#pw} ; tty=$(tty < /dev/tty)" >> "$MOCK_STATE/sudo.log"
+exec "$@"
+EOF
 chmod +x "$MOCKS"/*
-mkdir -p "$MOCKS/no-uname" "$MOCKS/std"
+mkdir -p "$MOCKS/no-uname" "$MOCKS/std" "$MOCKS/fault" "$MOCKS/pty"
 for m in ldconfig sudo apt-get; do ln -s "$MOCKS/$m" "$MOCKS/std/$m"; done
+ln -s "$MOCKS/mv" "$MOCKS/fault/mv"
+for m in ldconfig apt-get; do ln -s "$MOCKS/$m" "$MOCKS/pty/$m"; done
+ln -s "$MOCKS/sudo-pty" "$MOCKS/pty/sudo"
 
 # --- helpers ----------------------------------------------------------------------------------
 check() {  # check DESCRIPTION COMMAND...
@@ -91,12 +123,24 @@ no_file() { [[ ! -e $1 ]]; }
 launcher_points_to() { grep -qF "$2/bin/kokoro" "$1/.local/bin/kokoro"; }
 no_staging() { ! compgen -G "$1/.install.*" > /dev/null; }
 
-synth() {  # synth PREFIX NAME [args...]: the installed command, no paths given
+synth() {  # synth PREFIX NAME [args...]: the installed command, no paths given; sets SYNTH_RC
   local prefix=$1 name=$2
   shift 2
-  printf 'Hello from the installed kokoro command.\n' > "$WORK/$name.txt"
+  [[ -e $WORK/$name.txt ]] || printf 'Hello from the installed kokoro command.\n' > "$WORK/$name.txt"
   env -i HOME="$prefix" PATH="$prefix/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     kokoro synth --input "$WORK/$name.txt" --out-dir "$WORK/$name-out" "$@" > "$WORK/$name.synth.log" 2>&1
+  SYNTH_RC=$?
+  echo "  [synth $name] exit=$SYNTH_RC"
+}
+
+manifest_is() {  # manifest_is NAME DONE RESUMED FAILED: counts and completeness of the run's manifest
+  jq -e --argjson d "$2" --argjson r "$3" --argjson f "$4" \
+    '.counts.done == $d and .counts.resumed == $r and .counts.failed == $f and .complete == true' \
+    "$WORK/$1-out/$1.manifest.json" > /dev/null
+}
+
+wav_is_audio() {  # fmt fields at byte 20: PCM, 1 channel, 24000 Hz, 48000 B/s, align 2, 16 bits
+  [[ $(od -An -tx1 -j20 -N16 "$1" | tr -d ' \n') == 01000100c05d000080bb000002001000 ]]
 }
 
 URL1="file://$RELEASES/dist1"
@@ -106,17 +150,29 @@ MIRROR=$WORK/model-mirror
 # ================================================================================================
 echo "S1 fresh install, piped, real Hugging Face model download"
 P=$WORK/home-main
-MOCKPATH='' run_install s1 "$P" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1"
+S1_MODEL=()
+if [[ -n $MODEL_COPY ]]; then
+  echo "  (model from the verified local copy $MODEL_COPY, not downloaded again)"
+  S1_MODEL=(KOKORO_MODEL_URL="file://$MODEL_COPY")
+fi
+MOCKPATH='' run_install s1 "$P" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" "${S1_MODEL[@]}"
 D=$P/.local/share/kokoro
 check "exit 0" test "$RC" = 0
 check "launcher in ~/.local/bin" test -x "$P/.local/bin/kokoro"
 check "launcher points to release $V1" launcher_points_to "$P" "$D/releases/$V1"
 check "model from Hugging Face in models/<rev>" test -f "$D/models/$REV/kokoro-v1_0.pth"
-check "model file downloads logged" has "Downloading model file kokoro-v1_0.pth"
+check "model file download logged" has "Downloading model file kokoro-v1_0.pth"
 check "no staging left" no_staging "$D"
 check "PATH hint printed (bin dir not on PATH)" has "is not on your PATH"
 synth "$P" s1
-check "installed command synthesizes with no path options" test -s "$WORK/s1-out/s1_00001.wav"
+check "installed command, no path options: synthesis exit 0" test "$SYNTH_RC" = 0
+check "manifest: 1 done, 0 resumed, 0 failed, complete" manifest_is s1 1 0 0
+check "WAV is 24 kHz mono 16-bit PCM" wav_is_audio "$WORK/s1-out/s1_00001.wav"
+wav1=$(sha256sum < "$WORK/s1-out/s1_00001.wav")
+synth "$P" s1
+check "installed command rerun (resume): exit 0" test "$SYNTH_RC" = 0
+check "resume manifest: 0 done, 1 resumed, 0 failed, complete" manifest_is s1 0 1 0
+check "resumed WAV unchanged" test "$(sha256sum < "$WORK/s1-out/s1_00001.wav")" = "$wav1"
 mkdir -p "$MIRROR"
 cp -r "$D/models/$REV/." "$MIRROR/"
 MIRROR_URL="file://$MIRROR"
@@ -139,7 +195,8 @@ check "previous version kept" test -d "$D/releases/$V1"
 check "previous version listed" has "Other installed versions"
 check "model reused" bash -c "! grep -q 'Downloading model' '$WORK/s3.log'"
 synth "$P" s3
-check "upgraded command synthesizes" test -s "$WORK/s3-out/s3_00001.wav"
+check "upgraded command: synthesis exit 0" test "$SYNTH_RC" = 0
+check "manifest: 1 done, 0 failed, complete" manifest_is s3 1 0 0
 
 echo "S4 damaged installed release is repaired on rerun"
 rm "$D/releases/$V2/frontend/misaki-0.9.4/us_gold.json"
@@ -308,6 +365,102 @@ env -i HOME="$P" PATH="$P/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA
   kokoro synth --input "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20b.log" 2>&1
 RC=$?
 check "KOKORO_FRONTEND_DIR override used (exit 2 naming it)" bash -c "[[ $RC == 2 ]] && grep -qF '$WORK/no-such-frontend' '$WORK/s20b.log'"
+
+# --- same-version replacement: FAULT INJECTION (MOCK mv) ----------------------------------------
+# A re-published $V2 (same tag, different package bytes: a marker file added to the frontend
+# package; a local FIXTURE) makes the installer replace the intact installed copy of $V2.
+REPUB=$RELEASES/dist-republished
+rm -rf "$REPUB" "$WORK/repub"; cp -r "$RELEASES/dist2" "$REPUB"; mkdir -p "$WORK/repub"
+tar -xzf "$REPUB/kokoro-frontend.tar.gz" -C "$WORK/repub"
+echo republished > "$WORK/repub/frontend/REPUBLISHED"
+tar -C "$WORK/repub" -czf "$REPUB/kokoro-frontend.tar.gz" frontend
+(cd "$REPUB" && sha256sum kokoro-x86_64-linux.tar.gz kokoro-frontend.tar.gz > SHA256SUMS)
+tree_sum() { (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum); }
+cp "$P/.local/bin/kokoro" "$WORK/launcher.v2"
+v2_tree=$(tree_sum "$D/releases/$V2")
+same_as_before() {
+  [[ $(tree_sum "$D/releases/$V2") == "$v2_tree" ]] && cmp -s "$WORK/launcher.v2" "$P/.local/bin/kokoro" \
+    && [[ ! -e $D/releases/.previous-$V2 ]] && no_staging "$D"
+}
+
+echo "F1 FAULT: moving the new copy into place fails"
+MOCKPATH=$MOCKS/fault run_install f1 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+check "exit non-zero" test "$RC" != 0
+check "fault was injected at the move" grep -q "injected fail" "$WORK/state/f1/mv.log"
+check "previous copy restored (message)" has "previous installation of this version was restored"
+check "old release content, launcher unchanged; no leftovers" same_as_before
+
+echo "F2 FAULT: TERM arrives at the same move"
+MOCKPATH=$MOCKS/fault run_install f2 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" MOCK_MV_FAULT=term KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+check "exit non-zero" test "$RC" != 0
+check "TERM was injected" grep -q "injected term" "$WORK/state/f2/mv.log"
+check "old release content, launcher unchanged; no leftovers" same_as_before
+
+echo "F3 FAULT: writing the launcher fails after the new copy was moved in"
+MOCKPATH=$MOCKS/fault run_install f3 "$P" MOCK_MV_FAULT_DEST="$P/.local/bin/kokoro" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+check "exit non-zero" test "$RC" != 0
+check "fault was injected at the launcher" grep -q "injected fail" "$WORK/state/f3/mv.log"
+check "old release content, launcher unchanged; no leftovers" same_as_before
+check "no temporary launcher left" bash -c "! compgen -G '$P/.local/bin/.kokoro.*' > /dev/null"
+
+echo "F4 later failure before anything is replaced (corrupt model file download)"
+mv "$D/models/$REV/voices/am_adam.pt" "$WORK/am_adam.pt.saved"
+MOCKPATH='' run_install f4 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="file://$BADM"
+check "exit non-zero" test "$RC" != 0
+check "model checksum mismatch reported" has "checksum mismatch for model file voices/am_adam.pt"
+check "old release content, launcher unchanged; no leftovers" same_as_before
+mv "$WORK/am_adam.pt.saved" "$D/models/$REV/voices/am_adam.pt"
+synth "$P" f4
+check "installed command still works: exit 0" test "$SYNTH_RC" = 0
+
+echo "F5 leftover of a run killed outright (SIMULATED: the release moved to .previous-$V2, nothing else)"
+mv "$D/releases/$V2" "$D/releases/.previous-$V2"
+MOCKPATH='' run_install f5 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="$URL2" KOKORO_MODEL_URL="$MIRROR_URL"
+check "exit 0" test "$RC" = 0
+check "restored message" has "Restored the previous installation of $V2"
+check "restored copy reused as intact" has "already installed and intact"
+check "old release content, launcher unchanged; no leftovers" same_as_before
+
+echo "F6 same-version replacement without faults succeeds"
+MOCKPATH='' run_install f6 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+check "exit 0" test "$RC" = 0
+check "new content in place" test -f "$D/releases/$V2/frontend/REPUBLISHED"
+check "no .previous left" no_file "$D/releases/.previous-$V2"
+check "no staging left" no_staging "$D"
+
+# --- eSpeak NG consent through a REAL pseudo-terminal (script); MOCK ldconfig/sudo/apt-get --------
+# pty_install NAME PREFIX TYPED: the piped installer runs with a pty as its controlling terminal and
+# default /dev/tty; TYPED is what the user types (answer, then the mock sudo's password)
+pty_install() {
+  local name=$1 prefix=$2 typed=$3
+  mkdir -p "$prefix" "$WORK/state/$name"
+  local cmd="curl -fsSL 'file://$REPO/install.sh' | env -i HOME='$prefix' PATH='$MOCKS/pty:/usr/bin:/bin' MOCK_STATE='$WORK/state/$name' MOCK_HIDE_ESPEAK=1 KOKORO_VERSION=$V1 KOKORO_RELEASE_URL='$URL1' KOKORO_MODEL_URL='$MIRROR_URL' bash"
+  printf '%b' "$typed" | SHELL=/bin/bash script -qefc "$cmd" "$WORK/$name.typescript" > /dev/null 2>&1
+  RC=$?
+  OUT=$(cat "$WORK/$name.typescript")
+  echo "[$name] exit=$RC ($WORK/$name.typescript)"
+}
+
+echo "T1 terminal: user types y, then the password for (mock) sudo"
+pty_install t1 "$WORK/home-pty-yes" 'y\nsecret\n'
+check "exit 0" test "$RC" = 0
+check "question shown on the terminal" has "[y/N]"
+check "password explanation shown" has "sudo may ask for your password"
+check "mock sudo prompted on the terminal" has "[sudo] password for tester:"
+check "sudo ran apt-get install -y libespeak-ng1 once, after consent" test "$(grep -c 'sudo apt-get install -y libespeak-ng1' "$WORK/state/t1/sudo.log" 2>/dev/null)" = 1
+check "password read from the pty" grep -q "password_chars=6 ; tty=/dev/pts/" "$WORK/state/t1/sudo.log"
+check "apt-get stdin is /dev/tty, not the piped script" grep -q "stdin=/dev/tty$" "$WORK/state/t1/apt.log"
+check "installed" test -x "$WORK/home-pty-yes/.local/bin/kokoro"
+
+for ans in n empty; do
+  typed='n\n'; [[ $ans == empty ]] && typed='\n'
+  echo "T-$ans terminal: user answers '$ans'"
+  pty_install "t-$ans" "$WORK/home-pty-$ans" "$typed"
+  check "exit non-zero" test "$RC" != 0
+  check "question shown on the terminal" has "[y/N]"
+  check "sudo never called" no_file "$WORK/state/t-$ans/sudo.log"
+  check "nothing installed" no_file "$WORK/home-pty-$ans/.local/share/kokoro"
+done
 
 echo
 echo "installer scenarios: $PASSES checks passed, $FAILS failed"

@@ -24,9 +24,15 @@ no Python or compiler, only `bash`, `curl`, `tar`, `gzip` and `sha256sum`.
    installer.
 5. Writes the `kokoro` command.
 
-Everything is first downloaded and checked in a temporary directory inside the data directory, and
-only moved into place once it is complete. If anything fails, or the run is interrupted, the
-previous installation keeps working and the temporary directory is removed.
+Downloads are checked in a temporary directory inside the data directory before anything installed
+changes:
+- The new release is moved into place only after the release and the model are complete.
+- Model files are replaced one at a time, each only after its checksum matches.
+- When a damaged or re-published copy of the same version is replaced, the old copy is kept until
+  the `kokoro` command has been written, and put back if any step fails or the run is interrupted.
+- The temporary directory is removed at the end of every run.
+- If the installer is killed outright (for example by `kill -9`) while a release is being moved into
+  place, the next run restores the old copy.
 
 ## Where things go
 | path | contents |

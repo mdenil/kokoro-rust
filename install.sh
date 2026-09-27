@@ -148,8 +148,39 @@ safe_archive() {  # safe_archive TARBALL PREFIX: every member is a relative path
     END { exit bad }' || die "unexpected paths in $(basename "$1")"
 }
 
-install_release() {  # install_release VERSION BASE_URL DATA STAGING -> sets RELEASE_DIR
-  local version=$1 base=$2 data=$3 staging=$4
+# Globals of one run: STAGING (temporary directory), RELEASE_DIR (target of this version),
+# NEW_RELEASE (verified new copy waiting in STAGING, empty when the installed copy is reused) and
+# PREVIOUS (the replaced copy of the same version, kept until the whole install has succeeded).
+STAGING=""
+RELEASE_DIR=""
+NEW_RELEASE=""
+PREVIOUS=""
+
+cleanup() {  # EXIT trap: an unfinished install puts the previous copy of this version back
+  local rc=$?
+  if [[ -n $PREVIOUS && -d $PREVIOUS ]]; then
+    if [[ -e $RELEASE_DIR ]]; then
+      mv "$RELEASE_DIR" "$STAGING/discarded-release" 2> /dev/null || rm -rf "$RELEASE_DIR"
+    fi
+    mv "$PREVIOUS" "$RELEASE_DIR" && say "The previous installation of this version was restored."
+  fi
+  [[ -z $STAGING ]] || rm -rf "$STAGING"
+  exit "$rc"
+}
+
+recover_previous() {  # a run killed outright (SIGKILL, power loss) may leave releases/.previous-<version>
+  local prev=$1/releases/.previous-$2 target=$1/releases/$2
+  [[ -d $prev ]] || return 0
+  if [[ -e $target ]]; then
+    rm -rf "$prev"  # the new copy had been moved in completely
+  else
+    mv "$prev" "$target"
+    say "Restored the previous installation of $2 left by an interrupted run."
+  fi
+}
+
+stage_release() {  # stage_release VERSION BASE_URL DATA: download, verify and unpack into STAGING
+  local version=$1 base=$2 data=$3 staging=$STAGING
   RELEASE_DIR=$data/releases/$version
   local dl=$staging/download
   mkdir -p "$dl"
@@ -183,16 +214,30 @@ install_release() {  # install_release VERSION BASE_URL DATA STAGING -> sets REL
   (cd "$new" && find . -type f ! -name '.files.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > .files.sha256)
   cp "$dl/SHA256SUMS" "$new/.SHA256SUMS"
   touch "$new/.installed"
-  # put the verified release in place (replacing a damaged or different copy of the same version)
-  mkdir -p "$data/releases"
-  if [[ -e $RELEASE_DIR ]]; then
-    mv "$RELEASE_DIR" "$staging/old-release"
-  fi
-  mv "$new" "$RELEASE_DIR"
+  NEW_RELEASE=$new
 }
 
-install_model() {  # install_model BASE_URL DATA STAGING -> sets MODEL_DIR
-  local base=$1 data=$2 staging=$3
+commit_release() {  # move the staged release into place; a replaced copy is kept as PREVIOUS
+  [[ -n $NEW_RELEASE ]] || return 0
+  mkdir -p "$(dirname "$RELEASE_DIR")"
+  if [[ -e $RELEASE_DIR ]]; then
+    PREVIOUS=$(dirname "$RELEASE_DIR")/.previous-$(basename "$RELEASE_DIR")
+    rm -rf "$PREVIOUS"
+    mv "$RELEASE_DIR" "$PREVIOUS"
+  fi
+  mv "$NEW_RELEASE" "$RELEASE_DIR"
+}
+
+finish_release() {  # the launcher is written: the replaced copy is no longer needed
+  if [[ -n $PREVIOUS ]]; then
+    local prev=$PREVIOUS
+    PREVIOUS=""
+    rm -rf "$prev"
+  fi
+}
+
+install_model() {  # install_model BASE_URL DATA -> sets MODEL_DIR
+  local base=$1 data=$2 staging=$STAGING
   MODEL_DIR=$data/models/$MODEL_REV
   local path sha dest tmp
   while read -r path sha; do
@@ -233,7 +278,7 @@ export KOKORO_MODEL_DIR KOKORO_FRONTEND_DIR
 exec '$release/bin/kokoro' "\$@"
 EOF
   chmod 755 "$tmp"
-  mv -f "$tmp" "$target"
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; die "could not write $target"; }
 }
 
 main() {
@@ -255,15 +300,18 @@ main() {
   local model_base=${KOKORO_MODEL_URL:-https://huggingface.co/hexgrad/Kokoro-82M/resolve/$MODEL_REV}
 
   mkdir -p "$data"
-  local staging
-  staging=$(mktemp -d "$data/.install.XXXXXX")
-  # shellcheck disable=SC2064  # expand now: remove this run's staging directory on any exit
-  trap "rm -rf '$staging'" EXIT
+  recover_previous "$data" "$version"
+  trap cleanup EXIT
   trap 'exit 130' INT TERM HUP
+  STAGING=$(mktemp -d "$data/.install.XXXXXX")
 
-  install_release "$version" "$release_base" "$data" "$staging"
-  install_model "$model_base" "$data" "$staging"
+  # nothing installed changes until the release and the model are verified; a replaced copy of the
+  # same version is restored if the remaining steps fail
+  stage_release "$version" "$release_base" "$data"
+  install_model "$model_base" "$data"
+  commit_release
   write_launcher "$bin_dir" "$RELEASE_DIR" "$MODEL_DIR"
+  finish_release
 
   say ""
   say "kokoro $version installed: $bin_dir/kokoro"
@@ -272,7 +320,7 @@ main() {
     *) say "Note: $bin_dir is not on your PATH; add it (for example in ~/.profile) or run $bin_dir/kokoro." ;;
   esac
   local other
-  other=$(find "$data/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$version" -printf '%f ' 2> /dev/null || true)
+  other=$(find "$data/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$version" ! -name '.*' -printf '%f ' 2> /dev/null || true)
   [[ -z $other ]] || say "Other installed versions (can be deleted from $data/releases): $other"
   say "Try: kokoro synth --input book.txt --out-dir out/"
   if ! command -v ffmpeg > /dev/null; then
