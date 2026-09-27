@@ -1,7 +1,7 @@
 # Third-party components and licenses
 
 This lists what the program and its setup use from others, where it comes from, and the license
-stated by its source. It records facts as found; it is not legal advice.
+stated by its source.
 
 ## Downloaded by the installer or the setup scripts (not in this repository)
 The release's `kokoro-frontend.tar.gz` contains the exported misaki and spaCy data below, with the
