@@ -1,5 +1,14 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
+## CURRENT WORK (owner #26, 2026-09-27): BF16X-ONLY RELEASE CLEANUP on branch release/bf16x-cleanup
+- Scope: HERMES_RELEASE_CLEANUP_BRIEF.md and HERMES_BRIEF #26.
+- Reduce the code to the single accepted bf16x path.
+- Reference artifact (immutable): $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256
+  6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea), run as `--precision bf16x` with
+  defaults. Build: strict -fmad=false, IG_BK=4, WMMA_TN=128.
+- Progress and inventory: docs/RELEASE_CLEANUP.md.
+- main and experiment/reduced-precision are untouched; no merge, release or deployment.
+
 ## CURRENT STATE (owner #25, 2026-09-27): PHASE 2 DECIDED — BF16X SELECTED, presented quality ACCEPTED
 - Branch experiment/reduced-precision. Selected configuration: `--precision bf16x`
   (KOKORO_PRECISION=bf16x) with kernel levers P2-L2..L5 at their defaults. Final binary

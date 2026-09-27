@@ -294,3 +294,22 @@ Load the named skill. Inspect available toolchains/storage and public reference.
      differences.
    - This records the decision only: NOT a new optimization campaign, public release, deployment or
      automatic merge. Source and corpus protections unchanged.
+26. OWNER AUTHORIZES BF16X-ONLY RELEASE CLEANUP (Misha, 1553679677162389505, confirmed
+   1553679934516371629; full scope in HERMES_RELEASE_CLEANUP_BRIEF.md):
+   - Branch release/bf16x-cleanup from the accepted lineage (aed6a5e = accepted code tree 9b39d48 plus
+     docs).
+   - Simplify to ONLY the approved BF16x production path. Remove the other precision variants,
+     experimental kernel alternatives and kill switches, and dead plumbing; do not merely hide them
+     behind a bf16x default.
+   - Keep the FP32 operations and shape fallbacks intrinsic to bf16x, operational options, and
+     safety/resume behavior.
+   - Freeze the exact accepted build/kernel/rounding configuration (strict -fmad=false, IG_BK=4,
+     WMMA_TN=128, P2-L2..L5). No new precision or speed experiments.
+   - Tests: repoint/add them for the actual bf16x product; keep the useful unit, differential,
+     negative-control and end-to-end checks.
+   - Verification: prove outputs are preserved vs the accepted binary; bounded pre/post speed smoke.
+   - No Python runtime. Private material stays outside Git.
+   - Deliverable: incremental commits, a switch-removal inventory, current test evidence and a
+     simplified command.
+   - NOT authorized: public release, deployment, license choice, automatic main merge.
+   - Preserve the accepted binary, evidence and main.
