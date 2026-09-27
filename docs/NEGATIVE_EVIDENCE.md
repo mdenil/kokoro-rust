@@ -146,3 +146,15 @@ cv%>5 rows are noise. Interleaved same-window stage pairs only.
 - Kept instead: the residual epilogue only (PL-009).
 - Do-not-retry predicate: a prologue fusion that recomputes transcendental activations per tile
   load, without a single-producer staging step.
+
+## NE-007 — cp.async double-buffered conv1d_igemm   [2026-09-27 | REVERTED; neutral]
+- Two smem stages filled with cp.async (zero-fill for halo / out-of-range). The dynamic smem limit
+  was raised to 96 KB so the strided variant still fits.
+- Bitwise identical (Alice 65/65).
+- Speed:
+  - forward sweep: BK 2 / 4 / 8 → 1.724 / 1.665 / 2.091 s (vs 1.677 single-buffered at BK 4);
+  - sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-020426-L14-cpasync-alice`): 1.913 → 1.871 s median (1.023×). The ranges overlap (base
+    min 1.851 < db min 1.861; cv 2.0% / 3.6%), so it is neutral within noise.
+- Likely cause: the doubled smem lowers occupancy by as much as the load/compute overlap gains.
+- Do-not-retry predicate: double buffering without also cutting per-stage smem (e.g. staging
+  weights per tap group) or raising compute per block.
