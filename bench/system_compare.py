@@ -29,7 +29,8 @@ ROOT = HERE.parent
 DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
 PY = os.environ.get("KOKORO_PY", str(DATA / "reference/venv-prod/bin/python"))
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
-BINS = {"rust": ROOT / "target/release/kokoro", "rustfma": ROOT / "target/release/kokoro-fma"}
+BINS = {"rust": pathlib.Path(os.environ.get("KOKORO_BIN_RUST", ROOT / "target/release/kokoro")),
+        "rustfma": pathlib.Path(os.environ.get("KOKORO_BIN_RUSTFMA", ROOT / "target/release/kokoro-fma"))}
 
 
 def sha256_file(p):

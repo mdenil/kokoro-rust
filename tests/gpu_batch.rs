@@ -303,6 +303,39 @@ fn export_fma_worst_listening() {
 }
 
 
+/// PL-014 audit (supervisor): the two batched (case, metric) failure-set additions, as raw WAVs.
+/// Run once with KOKORO_STATS_1PASS=0 (two-pass statistics) and once with =1 (single-pass, the
+/// default); the switch is read once per process. Writes reference cpu-t1, Rust single (unchanged
+/// by PL-014) and Rust batched(15) under the current statistics mode, plus a per-mode manifest.
+#[test]
+#[ignore = "export for owner listening; run explicitly"]
+fn export_pl014_pairs_listening() {
+    let mode = if std::env::var("KOKORO_STATS_1PASS").map(|v| v != "0").unwrap_or(true) { "stats1pass" } else { "stats2pass" };
+    let (m, gm, cases, _) = setup();
+    let all: Vec<&Case> = cases.iter().collect();
+    let outs = batch(&m, &gm, &all);
+    for name in ["s03_moon__am_adam__s1.0", "s06_long__af_heart__s1.0"] {
+        let k = cases.iter().position(|c| c.name == name).unwrap();
+        let c = &cases[k];
+        let want = st::load(&data().join("fixtures/cpu-t1").join(&c.name).join("fixture.safetensors")).unwrap()["audio"].f32().unwrap().to_vec();
+        let s = single(&m, &gm, c);
+        let dir = data().join("evidence/listening/phase2-pack/pl014-pairs").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut manifest = serde_json::json!({"case": c.name, "mode": mode, "kernel_rounding": kokoro::gpu::KERNEL_ROUNDING,
+            "note": "PL-014 batched failure-set addition (supervisor audit); disclosed, not an acceptance artifact",
+            "format": "RIFF WAVE IEEE float32 mono 24 kHz, raw"});
+        let bname = format!("rust-cuda-batched15-{mode}");
+        for (label, audio) in [("reference-cpu-t1", &want), ("rust-cuda-single", &s.audio), (bname.as_str(), &outs[k].audio)] {
+            let enc = kokoro::wav::encode(audio, 24000, kokoro::wav::Format::Float32);
+            std::fs::write(dir.join(format!("{label}.wav")), &enc.bytes).unwrap();
+            let (r, mx, sp) = drift(audio, &want);
+            manifest[label] = serde_json::json!({"sha256": kokoro::engine::sha256_bytes(&enc.bytes), "vs_reference": {"rel": r, "max": mx, "spec_db": sp}, "samples": audio.len()});
+        }
+        std::fs::write(dir.join(format!("manifest-{mode}.json")), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+        println!("{}", serde_json::to_string_pretty(&manifest).unwrap());
+    }
+}
+
 /// Mapping negative controls: the checker must catch a missing output, a duplicated output and a
 /// swapped (misattributed) output — i.e. batch result -> item mapping errors.
 #[test]

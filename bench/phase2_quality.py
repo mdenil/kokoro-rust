@@ -77,8 +77,13 @@ def coverage(d, pattern, n, fails, label):
 
 
 def render_rust(binary, level, voice, corpus, out):
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION=level)
+    # "<precision>-seed<N>" renders <precision> with excitation seed N (noise-floor calibration: the
+    # distance between two noise draws of the same engine); plain "<precision>" uses the default seed 0
+    prec, _, seed = level.partition("-seed")
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION=prec)
     cmd = [binary, "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(out), "--voice", voice, "--format", "float32", "--force"]
+    if seed:
+        cmd += ["--seed", seed]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     (out / "stderr.txt").write_text(r.stderr)
     return r.returncode, cmd

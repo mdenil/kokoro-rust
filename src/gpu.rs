@@ -415,6 +415,11 @@ const IG_BK: usize = crate::gpu::IG_BK_CU;
 static IGEMM_STRIDED_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_STRIDED").map(|v| v != "0").unwrap_or(true));
 static SW_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_SW").map(|v| v != "0").unwrap_or(true));
 static WMMA_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA").map(|v| v != "0").unwrap_or(true));
+/// PHASE 2: let the half-precision fused WMMA conv take any Cin / Cout (the kernel zero-pads partial
+/// 16-channel input slices and bounds-checks partial 64-channel output tiles) instead of sending
+/// e.g. the decoder convs (Cin 514 / 1090) to the per-tap fallback. Opt-in KOKORO_LP_WMMA_ANY=1:
+/// measured NEUTRAL (fp16 Alice forward 1.106 -> 1.100 s, 3 interleaved rounds), so off by default.
+static WMMA_ANY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA_ANY").map(|v| v == "1").unwrap_or(false));
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -613,10 +618,12 @@ impl GConv {
         Ok(y)
     }
 
-    /// PHASE 2: the fused tensor-core conv applies (low-precision weights, same-length output,
-    /// Cout % 64, Cin % 16).
+    /// PHASE 2: the fused tensor-core conv applies (low-precision weights, same-length output;
+    /// Cout % 64 and Cin % 16 unless KOKORO_LP_WMMA_ANY=1 for half types).
     pub(crate) fn wmma_ok(&self, t: usize, tout: usize) -> bool {
-        self.lp.is_some() && tout == t && self.cout % 64 == 0 && self.cin % 16 == 0 && *WMMA_ON
+        let aligned = self.cout % 64 == 0 && self.cin % 16 == 0;
+        let any = *WMMA_ANY && matches!(self.lp, Some(LpWeights::Half(_)));
+        self.lp.is_some() && tout == t && (aligned || any) && *WMMA_ON
     }
 
     /// PHASE 2: launch the fused tensor-core conv into `y` (res = accumulate into y).
@@ -627,7 +634,7 @@ impl GConv {
         let tn = WMMA_TN_CU;
         let tw = tn + (self.k - 1) * self.dil;
         let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-        let grid = (t.div_ceil(tn) as u32, (cout / 64) as u32, 1);
+        let grid = (t.div_ceil(tn) as u32, cout.div_ceil(64) as u32, 1);
         let k = &g.k;
         match lp {
             LpWeights::Half(wh) => {
