@@ -7,15 +7,14 @@ into one WAV.
 
 ## Speed
 
-On an RTX 4090, reading chapter I of *Alice's Adventures in Wonderland* (65 lines, 11 minutes of
-audio) into one WAV:
+On an RTX 4090, reading chapters I–III of *Alice's Adventures in Wonderland* (251 lines, 31 minutes
+of audio) into one WAV:
 
 | | Python Kokoro 0.9.4 | kokoro-rust | |
 |---|---|---|---|
-| Whole command, including startup and model loading | 25.2 s | 2.7 s | 9.4× faster |
-| With the model already loaded | 8.0 s | 1.3 s | 6.0× faster |
+| Whole command, disk cache warm | 52.5 s | 5.1 s | 10.4× faster |
 
-Medians of 5 runs (model loaded: 6 passes). [How this was measured](docs/VALIDATION.md#performance)
+Median of 5 runs, including startup and model loading. [How this was measured](docs/VALIDATION.md#performance)
 
 ## Install
 

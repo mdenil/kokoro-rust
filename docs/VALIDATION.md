@@ -62,39 +62,41 @@ between the two builds is 1.77 dB (maximum 13.4 dB). tests/strict_reference_diff
 differences.
 
 ## Performance
-Measured with the current build (BF16x with FMA contraction, one WAV per input) against the
-unmodified Python pipeline, on the public text in this repository.
+The current build (BF16x with FMA contraction, one WAV per input) against the unmodified Python
+pipeline, as whole commands on the public text in this repository.
 
-- Input: `bench/corpus_alice_ch1.txt`, chapter I of *Alice's Adventures in Wonderland* (65 lines;
-  sha256 `0056b945…`; [bench/CORPUS.md](../bench/CORPUS.md)), voice `af_heart`.
-- Both write the whole chapter as one 24 kHz 16-bit WAV: kokoro-rust with its default command,
+- Input: `bench/corpus_alice_ch1-3.txt`, chapters I–III of *Alice's Adventures in Wonderland*
+  (251 lines; sha256 `8108bc77…`; [bench/CORPUS.md](../bench/CORPUS.md)), voice `af_heart`.
+- Both write the whole input as one 24 kHz 16-bit WAV: kokoro-rust with its default command,
   Python with `KPipeline(lang_code='a')` (kokoro 0.9.4, torch 2.12.1, on the same GPU) called line by
   line, the audio of all lines joined and written with `soundfile` at the end
-  (`bench/system_reference.py --single-wav`). The WAV write is timed in both.
-- Host: RTX 4090, CUDA 12.9, driver 580, Ubuntu 24.04; no other job on the GPU during any run.
-- Build: kokoro-rust commit `33b024d` (binary sha256 `8ae5879e…`).
+  (`bench/system_reference.py --single-wav`).
+- Each timed run is a fresh process with a fresh output directory, so nothing is reused. The time
+  covers everything: starting the process (and importing Python and torch), loading the model and
+  the text frontend, synthesis, and writing the WAV.
+- Disk cache warm: each program ran once untimed first, so its files were in the page cache. The
+  timed runs then alternated between the two programs.
+- Host: RTX 4090, CUDA 12.9, driver 580, Ubuntu 24.04; no other job on the GPU during any run
+  (other CPU work on the shared host: 1-minute load average 4.4–11.4).
+- Build: kokoro-rust commit `d94db53` (binary sha256 `8ae5879e…`, the same binary as the tested
+  commit `a389b1a`).
 
-| | Python KPipeline | kokoro-rust | |
-|---|---|---|---|
-| whole command: start, load the model, synthesize, write (5 runs each) | 25.19 s (23.63–30.69) | 2.67 s (2.57–2.89) | 9.4× |
-| model already loaded: one pass over the file (6 passes each) | 8.01 s (7.37–9.45) | 1.33 s (1.31–1.44) | 6.0× |
+| whole command, disk cache warm (5 runs each) | Python KPipeline | kokoro-rust |
+|---|---|---|
+| median | 52.46 s | 5.06 s |
+| range | 49.98–55.62 s | 4.95–5.94 s |
+| all runs | 52.46, 51.57, 55.62, 53.77, 49.98 | 4.95, 5.94, 5.51, 5.06, 5.01 |
 
-Medians, with the range in brackets. The whole-command runs alternate between the two programs,
-each a fresh process with no earlier output to reuse. The Python figure includes loading Python,
-torch and the pipeline; its first run (30.7 s) was slower than the rest. The model-loaded rows
-come from benchmark harnesses that load once and then time repeated passes: Python's
-`--passes`, and kokoro-rust's hidden `--bench-passes` option, which is not a normal way to run
-kokoro. Both produced 10.9 minutes of audio (kokoro-rust 15,741,600 samples, Python 15,748,200;
-durations differ slightly because of the reduced precision, see above). They also differ in the
-eSpeak NG used for words missing from the dictionary: the installed 1.51 for kokoro-rust, and the
-1.52.0 bundled with the Python package.
+The ratio of the medians is 10.4. Both produced 31.1 minutes of audio (kokoro-rust 44,799,000
+samples, Python 44,808,600; durations differ slightly because of the reduced precision, see
+above). They also differ in the eSpeak NG used for words missing from the dictionary: the
+installed 1.51 for kokoro-rust, and the 1.52.0 bundled with the Python package.
 
 To reproduce (with the Python reference environment of `scripts/setup_reference_env.sh` and the
 test data root of [PORTABILITY.md](PORTABILITY.md)):
 ```
-KOKORO_DATA=/path/to/data python3 bench/system_compare.py --corpus bench/corpus_alice_ch1.txt \
-    --out results --output single --engines py,rust --phases cold,warm \
-    --cold-reps 5 --warm-reps 2 --warm-passes 3
+KOKORO_DATA=/path/to/data python3 bench/system_compare.py --corpus bench/corpus_alice_ch1-3.txt \
+    --out results --output single --engines py,rust --phases cold --cold-reps 5 --cache-warmup
 ```
 
 The main sources of speed:
@@ -104,9 +106,13 @@ The main sources of speed:
 - a parallel frontend stage and pipelined WAV writing;
 - loading the model while the frontend starts.
 
-### Earlier measurement
-Before FMA contraction was enabled, the strict-rounding BF16x build was compared with the Python
-pipeline and with the since-removed f32 implementation on a private 316-line long-form text (about
-49 minutes of audio, one WAV per line). Medians: whole process 68.71 s (Python), 8.69 s (f32),
-5.81 s (BF16x); model loaded 54.31 s, 7.45 s and 4.15 s. That text is not distributed, so these
-figures can't be reproduced from this repository.
+### Earlier measurements
+- The same build on chapter I only (`bench/corpus_alice_ch1.txt`, 65 lines, 10.9 minutes of audio),
+  5 fresh processes each without a warm-up run: medians 25.19 s (Python, 23.63–30.69) and 2.67 s
+  (kokoro-rust, 2.57–2.89). With the model already loaded, in benchmark harnesses that time
+  repeated passes: 8.01 s and 1.33 s (6 passes each).
+- Before FMA contraction was enabled, the strict-rounding BF16x build was compared with the Python
+  pipeline and with the since-removed f32 implementation on a private 316-line long-form text
+  (about 49 minutes of audio, one WAV per line). Medians: whole process 68.71 s (Python), 8.69 s
+  (f32), 5.81 s (BF16x); model loaded 54.31 s, 7.45 s and 4.15 s. That text is not distributed, so
+  these figures can't be reproduced from this repository.
