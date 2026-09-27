@@ -108,3 +108,72 @@ Historical outcomes of the retired f32 tests stay in the evidence (docs/conforma
 - Step B: CPU backend, single-item GPU forward, profiling/debug plumbing and the `cuda` feature
   removed; tests repointed/retired. Golden: 0 differences (11 public cases + private chapter);
   leakage negative control detects 65/65 lines.
+- Step C (d83540a): product surface: README, CLI description, DEPENDENCIES; bench harness
+  engines py | rust | accepted; phase-2 research scripts retired.
+
+## Size
+Engine code (src/ without the frontend, kernels, build.rs): 7363 -> 4593 lines (-3125/+349 in
+src/kernels/build/Cargo). `unsafe` is confined to the CUDA module (launches, fully-overwritten
+allocations, bounds-checked cuBLAS calls); the CPU `ops` facade and its `unsafe` are gone.
+
+## Validation of the cleaned build (tree d83540a)
+- Binary `$KOKORO_DATA/bin/bf16x-cleanup-d83540a-a8d405f1cacd` (sha256 a8d405f1…7ddf).
+- Evidence: `/data/mdenil/code/kokoro-rust/evidence/release-cleanup/validation-d83540a` (public logs, suite-inventory.txt) and
+  `$KOKORO_DATA/evidence/private/release-cleanup/validation-d83540a` (ignored/private suite logs).
+- **Default suite** (`cargo test --release --no-fail-fast -- --test-threads=2`): exit 0, 16 targets,
+  all pass. Full stdout: suite-default.log.
+- **Ignored suites**, each exit 0:
+  - bf16x_golden private chapter;
+  - bf16x_reference diagnostic;
+  - cli_text_native private chapter acceptance (316 lines, pronunciations = reference, 1 exec);
+  - frontend_spacy / espeak / g2p / pipeline (private + fuzz/soup corpora).
+- **Outputs vs the accepted artifact:** byte-identical on all 11 public golden cases, both voices
+  (Alice ch. 1, frontend edge cases, link features, held-out passages, default pcm16, speed 0.8,
+  seed 7, one item per batch) and on the full private chapter, both voices. Checked after steps A,
+  B and C.
+- **Reference data pins:** input ids and voice style vectors equal the 15 Python fixtures exactly.
+- **Negative controls:** the golden checker detects changed / missing / extra lines. Disabling
+  batch gap masking changes 65/65 edge-case lines and is detected.
+
+## Bounded pre/post throughput smoke (not an optimization campaign)
+- Same harness, accepted artifact vs cleaned binary interleaved (3 cold processes, 2 x 3 warm
+  passes each). Host load1 5.0–20.8.
+- Evidence: `$KOKORO_DATA/evidence/release-cleanup/20260927-095939-smoke-alice` and
+  `$KOKORO_DATA/evidence/private/release-cleanup/20260927-095939-smoke-chapter` (aggregates only).
+
+| workload | accepted: cold / warm | cleaned: cold / warm |
+|---|---|---|
+| Alice ch. 1 (65 lines, 656 s audio) | 2.63 s (cv 2.4%) / 0.99 s (cv 1.9%) | 2.53 s (cv 5.1%) / 1.00 s (cv 1.7%) |
+| private chapter (316 lines, 2915 s audio) | 5.63 s (cv 5.2%) / 4.20 s (cv 1.0%) | 5.47 s (cv 2.3%) / 4.14 s (cv 1.7%) |
+
+- No throughput regression: warm within 1.5% either way.
+- Model load is ~0.2 s shorter (1.40 -> 1.24 s Alice, 1.43 -> 1.16 s chapter): f32 copies of the
+  BF16 weights are no longer uploaded, and BF16 linear weights are converted once at load.
+- Every pass of both engines wrote identical WAVs (digest of per-line WAV hashes equal across all
+  runs; default pcm16 output).
+
+## Simplified command
+```
+cargo build --release
+kokoro synth --model-dir <snapshot> --frontend-dir <frontend-data> --input book.txt --out-dir out/ \
+    [--voice af_heart] [--speed 1.0]
+```
+Previously: `--features cuda` at build time plus `KOKORO_PRECISION=bf16x` / `--precision bf16x` at run time.
+
+## Remaining packaging / license / install questions (owner decisions; nothing done here)
+1. **License.** No project license has been chosen. Cargo.toml has carried
+   `license = "Apache-2.0"` since the early scaffolding; it is not an owner decision and should be
+   confirmed or removed. libespeak-ng (GPL-3.0-or-later, dlopened) and the model/voice weights have
+   their own terms: see docs/DEPENDENCIES.md.
+2. **Merge.** Should release/bf16x-cleanup merge into main (main is still the phase-1 f32 engine)?
+   No merge was made.
+3. **Distribution of data.** The model snapshot and the frontend data (misaki, spaCy, espeak-ng
+   1.52 with its library) are loaded from directories: bundle, fetch-script, or document?
+4. **GPU scope.** The PTX targets compute_89 (Ada, RTX 40xx), and the BF16 tensor-core path needs
+   compute_80+. Is support for other GPUs wanted (a fatbin with more targets) or out of scope?
+5. **Install location / packaging.** Binary install path, a service or wrapper for the audiobook
+   pipeline, and whether `kokoro bench` and the hidden `--bench-passes` stay in shipped builds.
+6. **Accepted-artifact identity.** Engine identity strings changed from
+   `cuda precision=bf16x [EXPERIMENTAL, phase 2] ...` to `cuda bf16x kernels=strict(-fmad=false)`.
+   Resume therefore re-synthesizes outputs made by the experimental binary once. The audio is
+   byte-identical; this is only cache invalidation.

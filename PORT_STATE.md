@@ -1,13 +1,19 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
 ## CURRENT WORK (owner #26, 2026-09-27): BF16X-ONLY RELEASE CLEANUP on branch release/bf16x-cleanup
-- Scope: HERMES_RELEASE_CLEANUP_BRIEF.md and HERMES_BRIEF #26.
-- Reduce the code to the single accepted bf16x path.
+- Scope: HERMES_RELEASE_CLEANUP_BRIEF.md and HERMES_BRIEF #26. Record: docs/RELEASE_CLEANUP.md.
+- The product is ONE path:
+  - native frontend + batched CUDA forward in the owner-accepted BF16x configuration (strict
+    -fmad=false build, P2-L2..L5);
+  - no precision selector, no CPU backend, no batch-1 forward, no kill switches.
 - Reference artifact (immutable): $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256
-  6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea), run as `--precision bf16x` with
-  defaults. Build: strict -fmad=false, IG_BK=4, WMMA_TN=128.
-- Progress and inventory: docs/RELEASE_CLEANUP.md.
-- main and experiment/reduced-precision are untouched; no merge, release or deployment.
+  6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea).
+  - Byte-identical outputs after every cleanup step: tests/bf16x_golden.rs, 11 public cases + the
+    private chapter, both voices.
+- Cleaned binary preserved: $KOKORO_DATA/bin/bf16x-cleanup-d83540a-a8d405f1cacd.
+- Commits: 781b910 scope, 6968945 goldens, 5c42c54 step A, cb553b1 step B, d83540a step C.
+- main and experiment/reduced-precision are untouched. No merge, release or deployment; license
+  undecided.
 
 ## CURRENT STATE (owner #25, 2026-09-27): PHASE 2 DECIDED — BF16X SELECTED, presented quality ACCEPTED
 - Branch experiment/reduced-precision. Selected configuration: `--precision bf16x`
