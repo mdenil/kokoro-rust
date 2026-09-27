@@ -25,6 +25,13 @@ fn main() -> anyhow::Result<()> {
     {
         let ctx = cudarc::driver::CudaContext::new(0)?;
         lap(&mut t, "CUDA context");
+        let _m = ctx.load_module(cudarc::nvrtc::Ptx::from_src(kokoro::gpu::PTX_SRC))?;
+        lap(&mut t, "load PTX module (JIT)");
+        let _m2 = ctx.load_module(cudarc::nvrtc::Ptx::from_src(kokoro::gpu::PTX_SRC))?;
+        lap(&mut t, "load PTX module again (JIT cache)");
+        let s = ctx.default_stream();
+        let _b = cudarc::cublas::CudaBlas::new(s.clone())?;
+        lap(&mut t, "cuBLAS handle");
         drop(ctx);
         let g = kokoro::gpu::GpuKokoro::new(&m, 0)?;
         lap(&mut t, "GpuKokoro::new (ctx+PTX+upload)");

@@ -97,12 +97,18 @@ impl Engine {
             let weights = weights.clone();
             move || sha256_file(&weights)
         });
+        // create the CUDA context / module / cuBLAS handle while the checkpoint is parsed
+        #[cfg(feature = "cuda")]
+        let gpu_init = (device == Device::Cuda).then(|| std::thread::spawn(move || crate::gpu::Gpu::new(cuda_ordinal)));
         let w = Weights::load_pth(&weights)?;
         let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?)?;
         let model = Kokoro::from_weights(&w, &cfg)?;
         #[cfg(feature = "cuda")]
         let gpu = match device {
-            Device::Cuda => Some(crate::gpu::GpuKokoro::new(&model, cuda_ordinal)?),
+            Device::Cuda => {
+                let g = gpu_init.expect("spawned for cuda").join().map_err(|_| anyhow::anyhow!("CUDA init thread panicked"))??;
+                Some(crate::gpu::GpuKokoro::with_gpu(g, &model)?)
+            }
             Device::Cpu => None,
         };
         #[cfg(not(feature = "cuda"))]

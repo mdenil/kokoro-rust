@@ -245,3 +245,18 @@ the frozen baseline is not.
   - integrated suites pass; the accepted batch-vs-single RB-1 test fails as before.
 - Speed: forward 1.768 / 1.777 → 1.676 / 1.677 s; sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-013937-L12-strided-alice`) Alice warm
   1.964 → 1.861 s (**1.055×**, cv 1.3% / 0.6%).
+
+### PL-013 — cold start: skip exit teardown + CUDA context/cuBLAS init concurrent with parsing   [2026-09-27 | KEEP; bitwise identical]
+- Measured (cold Alice timeline + examples/load_breakdown.rs):
+  - 0.33 s outside main, mostly teardown (CUDA context destroy, buffer frees);
+  - CUDA context 0.27 s + cuBLAS handle 0.09 s, serial after checkpoint parsing;
+  - PTX JIT is cached by the driver (3 ms), so not a lever.
+- Lever:
+  - `synth` forgets the engine and frontend at the end of the CLI run, since the process exits
+    and the OS/driver reclaim them. Kill switch KOKORO_SKIP_TEARDOWN=0. Measured outside-main
+    0.33 → 0.18 s.
+  - Engine::load_on creates the Gpu (context, module, cuBLAS, twiddle tables) on a helper thread
+    while the .pth is parsed; GpuKokoro::with_gpu builds on it.
+- Correctness: WAVs bitwise identical to PL-012 (Alice 65/65).
+- Sealed A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-015158-L13-coldstart-alice`; PL-012 binary 5f1d371c… vs new): cold 4.031 → 3.399 s (**1.19×**, cv 3.4% /
+  1.0%); warm unchanged (1.856 vs 1.863 s).

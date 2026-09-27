@@ -18,6 +18,8 @@ use std::sync::Arc;
 type Buf = CudaSlice<f32>;
 
 pub const IG_BK_CU: usize = match usize::from_str_radix(env!("KOKORO_IG_BK"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_IG_BK") };
+/// The embedded PTX (exposed for load-time probes).
+pub const PTX_SRC: &str = PTX;
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
 /// Kernel rounding mode baked in at build time ("fma" default, or "strict(-fmad=false)").
 pub const KERNEL_ROUNDING: &str = env!("KOKORO_KERNEL_ROUNDING");
@@ -718,7 +720,12 @@ pub struct GpuKokoro {
 
 impl GpuKokoro {
     pub fn new(m: &Kokoro, ordinal: usize) -> Result<Self> {
-        let g = Gpu::new(ordinal)?;
+        Self::with_gpu(Gpu::new(ordinal)?, m)
+    }
+
+    /// Build on an already-initialized device (lets the CUDA context be created concurrently with
+    /// checkpoint parsing).
+    pub fn with_gpu(g: Gpu, m: &Kokoro) -> Result<Self> {
         let p = &m.predictor;
         let d = &m.decoder;
         let gen = &d.generator;

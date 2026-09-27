@@ -727,8 +727,16 @@ fn synth(
         });
         std::fs::write(&path, serde_json::to_string(&rec)?).with_context(|| format!("writing {}", path.display()))?;
     }
+    // The process exits right after this: skip tearing down the CUDA context / device buffers and
+    // the frontend tables (the OS and driver reclaim them at exit; measured ~0.3 s of teardown).
+    if *SKIP_TEARDOWN {
+        std::mem::forget(engine);
+        std::mem::forget(fe);
+    }
     Ok(code)
 }
+
+static SKIP_TEARDOWN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_SKIP_TEARDOWN").map(|v| v != "0").unwrap_or(true));
 
 fn peak_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
