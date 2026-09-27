@@ -110,6 +110,21 @@ Evidence that returns are severely diminishing (not an assumed roofline, not one
 - Everything larger requires lower precision: tensor cores, i.e. PHASE 2 (lossy) on branch
   experiment/reduced-precision.
 
+## PHASE 2 (lossy, branch experiment/reduced-precision) — pointer only; nothing on main changes
+- Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS"; head 537bcc4). Receipts:
+  `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`.
+- Status: every non-f32 level is EXPERIMENTAL and UNREVIEWED. No merge and no default change without
+  owner approval. The numbers below do not change the phase-1 headline above.
+- Headline (fresh whole-system matrix, final binary phase2-9b39d48; private chapter; medians):
+  - fp16 vs the Rust f32 engine: warm 7.45 → 4.27 s (1.74×), cold 8.69 → 5.79 s (1.50×).
+  - vs production Python in the same matrix: 12.73× warm, 11.86× cold (Python cv 4.0% / 1.8%).
+  - Alice ch. 1 Python ratios are provisional (Python warm cv 9.2%).
+  - Core (in-process) kernel-lever timings are reported separately on the branch and are not
+    multiplied into these ratios.
+- fp16 quality diagnostic: 0.047–0.049 dB median spectral distance from f32; no duration changes;
+  0 functional failures. The Rust f32 alternate-seed distance (1.19 / 1.49 dB) is given there as
+  noise-scale context only, not as a decomposition of cross-engine differences.
+
 ## PHASE-1 CHECKPOINT 1 — whole system after PL-006..PL-013 (2026-09-27 ~03:00; tree 69dcf43)
 Same harness and protocol as the baseline: production Python unchanged vs Rust strict (default) and
 FMA builds; cold = 3 interleaved processes; warm = 2 resident processes × 3 timed passes. Raw

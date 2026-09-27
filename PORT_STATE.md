@@ -9,11 +9,23 @@
     (69.48 → 8.79 s), warm 7.13× (52.28 → 7.33 s).
   - Alice warm 4.76× is provisional (Python cv 10.1%).
   - Phase-1 binaries preserved: $KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35.
-- PHASE 2 IN PROGRESS on branch experiment/reduced-precision (worktree target/worktrees/phase2, from
-  3dc5a35): precision ladder f32 | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8 (docs there:
-  docs/PHASE2_PRECISION.md). All non-f32 are UNREVIEWED; no merge; main defaults unchanged.
-  - The morning pack must include the PL-014 changed-case pairs s03_moon/am_adam and
-    s06_long/af_heart (raw rows in the PL-014 evidence dir).
+- PHASE 2 DELIVERED (awaiting owner listening) on branch experiment/reduced-precision, head 537bcc4
+  (worktree target/worktrees/phase2, from 3dc5a35). NOT merged; main code and defaults unchanged.
+  Every non-f32 level is UNREVIEWED.
+  - Ladder: f32 | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8. Full results, levers and
+    caveats: docs/PHASE2_PRECISION.md on the branch ("FINAL RESULTS").
+  - Final binary: $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a. Its f32 level is bitwise identical
+    to the phase-1 engine.
+  - Private chapter, fp16 vs Rust f32: warm 7.45 → 4.27 s (1.74×), cold 8.69 → 5.79 s (1.50×).
+    vs production Python: 12.73× warm / 11.86× cold (Python cv 4.0% / 1.8%). Alice Python ratios
+    are provisional (Python warm cv 9.2%).
+  - fp16 quality: 0.047–0.049 dB median spectral distance from f32; no duration changes; distance to
+    the Python reference unchanged.
+  - Listening pack (raw, incl. the PL-014 pairs s03_moon/am_adam and s06_long/af_heart):
+    $KOKORO_DATA/evidence/listening/phase2-pack-9b39d48. Receipts:
+    $KOKORO_DATA/evidence/phase2/RECEIPTS.json.
+  - Next step is the owner's: listen, then decide on any adoption. No merge or default change without
+    approval.
 - Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
   RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
   must be escalated.
