@@ -9,9 +9,16 @@ paragraphs whitespace-normalized, split into sentences at terminal punctuation f
 uppercase letter/opening quote, one utterance per line, Gutenberg `_emphasis_` underscores
 removed. Text is otherwise exact (curly quotes, em-dashes, parentheses kept).
 
-65 utterances, 8–596 characters (median 142). Long lines exceed 510 phonemes and exercise the
+65 utterances, 8–590 characters (median 142). Long lines exceed 510 phonemes and exercise the
 reference's waterfall chunking. sha256 of the file after underscore removal is recorded
 with each benchmark result.
+
+`corpus_alice_ch1-3.txt` — chapters I–III of the same book in one file, built from the same
+pinned source with the same construction (`python3 bench/make_alice_full.py --chapters 3 pg11.txt
+corpus_alice_ch1-3.txt`). 251 utterances (chapter I: 65, II: 92, III: 94), 8–590 characters (median
+86), sha256 `8108bc77fafd71a7ce0bd66c59c75bd591da205eb6855003971134866f9a8ece`. Its first 65
+lines are `corpus_alice_ch1.txt` exactly (`--chapters 1` reproduces that file). Used for the speed
+comparison in docs/VALIDATION.md.
 
 ## Legal / provenance notes
 - Project Gutenberg's eBook #11 page states the work is in the public domain in the USA. Users

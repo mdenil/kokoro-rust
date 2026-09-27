@@ -6,7 +6,9 @@ Engines:
   accepted the immutable accepted BF16x reference artifact ($KOKORO_BIN_ACCEPTED), run exactly
            as accepted (KOKORO_PRECISION=bf16x, default settings): the pre/post reference
 Phases (separate, never mixed):
-  cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines
+  cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines.
+          With --cache-warmup, each engine first runs once untimed (recorded as cachewarm-<engine>,
+          excluded from results) so the timed runs start with the disk/page cache warm.
   warm    one resident process per replicate: load, 1 untimed warm-up pass, P timed passes
   attr    one ATTRIBUTION process per engine (Python per-call timers; Rust timeline is always on) —
           stage breakdowns only, never headline timings
@@ -184,6 +186,7 @@ def main():
     ap.add_argument("--engines", default="py,rust")
     ap.add_argument("--phases", default="cold,warm,attr")
     ap.add_argument("--output", choices=["per-line", "single"], default="per-line")
+    ap.add_argument("--cache-warmup", action="store_true", help="one untimed run per engine before the cold phase")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -233,6 +236,10 @@ def main():
 
     phases = args.phases.split(",")
     if "cold" in phases:
+        if args.cache_warmup:
+            for e in engines:
+                name = f"cachewarm-{e}"
+                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0, corpus.stem if single else None)
         for k in range(args.cold_reps):
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
