@@ -148,7 +148,7 @@ impl GpuKokoro {
     fn snake_b(&self, blk: &GSnakeBlk, x: &Buf, d: &Dom, styles: &Buf) -> Result<Buf> {
         let g = &self.gpu;
         let mut x = g.stream.clone_dtod(x)?;
-        let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable() && blk.convs2[i].igemm_applicable());
+        let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable(g) && blk.convs2[i].igemm_applicable(g));
         for i in 0..3 {
             if fuse {
                 // LEVER PL-009 (kill switch KOKORO_FUSE_RES_CONV=0): AdaIN+Snake applied separately (its

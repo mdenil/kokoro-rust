@@ -97,7 +97,7 @@ def run(rec_file, logs, name, cmd, env, out, engine, passes):
         rc = subprocess.run(cmd, env=env, stdout=so, stderr=se).returncode
     wall = time.perf_counter() - t
     host_after = host_state()
-    rec = {"run": name, "engine": engine, "passes": passes, "cmd": cmd, "env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "KOKORO_FRONTEND_DIR") if k in env},
+    rec = {"run": name, "engine": engine, "passes": passes, "cmd": cmd, "env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "KOKORO_FRONTEND_DIR", "KOKORO_PRECISION") if k in env},
            "rc": rc, "wall_s": wall, "waited_for_quiet_s": waited, "host_before": host_before, "host_after": host_after}
     stdout = (logs / f"{name}.stdout").read_text(errors="replace").strip()
     if engine == "py":
@@ -149,14 +149,19 @@ def main():
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True).stdout.strip()
     ident = {"git": git, "git_dirty_tracked": dirty.splitlines(), "corpus": str(corpus), "corpus_sha256": sha256_file(corpus),
              "corpus_lines": corpus.read_text(encoding="utf-8").count("\n"), "voice": args.voice,
-             "binaries": {k: {"path": str(v), "sha256": sha256_file(v)} for k, v in BINS.items() if k in engines},
+             "binaries": {k: {"path": str(v), "sha256": sha256_file(v)} for k, v in BINS.items() if k in {e.split(":")[0] for e in engines}},
              "python": PY, "reference_script_sha256": sha256_file(HERE / "system_reference.py"),
              "args": vars(args), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "host": os.uname().nodename,
              "nproc": os.cpu_count(), "host_start": host_state()}
     (out / "identity.json").write_text(json.dumps(ident, indent=1))
 
-    def env():
+    def env(engine=""):
         e = dict(os.environ)
+        # PHASE 2: "rust:<precision>" = the rust binary with KOKORO_PRECISION=<precision>
+        if ":" in engine:
+            e["KOKORO_PRECISION"] = engine.split(":", 1)[1]
+        else:
+            e.pop("KOKORO_PRECISION", None)
         e["CUDA_VISIBLE_DEVICES"] = "0"
         e["KOKORO_FRONTEND_DIR"] = str(DATA / "frontend")
         e.pop("KOKORO_PROFILE", None)
@@ -166,7 +171,7 @@ def main():
         if engine == "py":
             c = [PY, str(HERE / "system_reference.py"), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice, "--passes", str(passes)]
             return c + (["--attribute"] if attribute else [])
-        c = [str(BINS[engine]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
+        c = [str(BINS[engine.split(":")[0]]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
              "--timeline", str(logs / f"{name}.timeline.json")]
         return c + (["--bench-passes", str(passes)] if passes else [])
 
@@ -176,17 +181,17 @@ def main():
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"cold-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(), work / name, e, 0)
+                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0)
     if "warm" in phases:
         for k in range(args.warm_reps):
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"warm-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(), work / name, e, args.warm_passes)
+                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(e), work / name, e, args.warm_passes)
     if "attr" in phases:
         for e in engines:
             name = f"attr-{e}"
-            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(), work / name, e, args.warm_passes)
+            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(e), work / name, e, args.warm_passes)
     (out / "SHA256SUMS").write_text("".join(f"{sha256_file(p)}  {p.relative_to(out)}\n" for p in sorted(out.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"))
     print("done:", out)
 

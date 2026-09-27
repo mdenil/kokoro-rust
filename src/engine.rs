@@ -135,7 +135,14 @@ impl Engine {
         match self.device {
             Device::Cpu => "cpu f32".into(),
             #[cfg(feature = "cuda")]
-            Device::Cuda => format!("cuda f32 kernels={}", crate::gpu::KERNEL_ROUNDING),
+            Device::Cuda => {
+                let p = self.gpu.as_ref().map(|g| g.gpu.prec).unwrap_or(crate::gpu::Precision::F32);
+                if p == crate::gpu::Precision::F32 {
+                    format!("cuda f32 kernels={}", crate::gpu::KERNEL_ROUNDING)
+                } else {
+                    format!("cuda precision={} [EXPERIMENTAL, phase 2] kernels={}", p.name(), crate::gpu::KERNEL_ROUNDING)
+                }
+            }
             #[cfg(not(feature = "cuda"))]
             Device::Cuda => "cuda (unavailable)".into(),
         }

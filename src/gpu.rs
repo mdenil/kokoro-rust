@@ -9,10 +9,10 @@ use crate::albert::{self, Albert};
 use crate::model::{self, Kokoro, Output, HIDDEN, STYLE_DIM};
 use crate::nn::{AdaIn1d, AdaInResBlock1, AdainResBlk1d, BiLstm, Conv1d, ConvTranspose1d, Linear};
 use crate::vocoder::{self, NoiseSource, HARMONICS, UPSAMPLE_SCALE};
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use cudarc::cublas::sys::cublasOperation_t as Op;
 use cudarc::cublas::{CudaBlas, Gemm, GemmConfig, StridedBatchedConfig};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut, LaunchConfig, PushKernelArg};
 use std::sync::Arc;
 
 type Buf = CudaSlice<f32>;
@@ -42,6 +42,7 @@ kernels!(
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
     cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s, chan_stats_seg1,
+    lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb,
     conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
 );
 
@@ -60,6 +61,88 @@ fn cfg1(n: usize) -> LaunchConfig {
     LaunchConfig { grid_dim: (n.div_ceil(256).max(1) as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }
 }
 
+/// PHASE 2 (branch experiment/reduced-precision): numerical mode of the CUDA engine, chosen by
+/// KOKORO_PRECISION at load and recorded in the engine identity (resume never mixes modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    /// phase-1 f32 control
+    F32,
+    /// cuBLAS GEMMs on TF32 tensor cores; f32 SIMT fused convs kept
+    Tf32,
+    /// TF32 everywhere a GEMM can run: all non-direct convs as per-tap TF32 GEMMs
+    Tf32All,
+    /// decoder + generator convs: FP16 operands, f32 accumulate/output; rest f32
+    Fp16,
+    /// as Fp16 with BF16 operands
+    Bf16,
+    /// Fp16 + predictor/text-encoder convs + all linear layers with FP16 operands
+    Fp16X,
+    /// as Fp16X with BF16 operands
+    Bf16X,
+    /// decoder + generator convs: INT8 weights (per-out-channel scale) x INT8 activations (dynamic
+    /// per-tensor scale), INT32 accumulate, f32 dequant; rest f32
+    Int8,
+}
+
+impl Precision {
+    pub fn from_env() -> Result<Self> {
+        Ok(match std::env::var("KOKORO_PRECISION").unwrap_or_else(|_| "f32".into()).as_str() {
+            "f32" => Self::F32,
+            "tf32" => Self::Tf32,
+            "tf32all" => Self::Tf32All,
+            "fp16" => Self::Fp16,
+            "bf16" => Self::Bf16,
+            "fp16x" => Self::Fp16X,
+            "bf16x" => Self::Bf16X,
+            "int8" => Self::Int8,
+            other => bail!("unknown KOKORO_PRECISION {other:?} (f32|tf32|tf32all|fp16|bf16|fp16x|bf16x|int8)"),
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Tf32 => "tf32",
+            Self::Tf32All => "tf32all",
+            Self::Fp16 => "fp16",
+            Self::Bf16 => "bf16",
+            Self::Fp16X => "fp16x",
+            Self::Bf16X => "bf16x",
+            Self::Int8 => "int8",
+        }
+    }
+
+    /// Highest conv tier run in low precision (0 none; 1 decoder+generator; 2 + predictor/text enc).
+    fn conv_tier(self) -> u8 {
+        match self {
+            Self::Fp16 | Self::Bf16 | Self::Int8 => 1,
+            Self::Fp16X | Self::Bf16X => 2,
+            _ => 0,
+        }
+    }
+
+    fn half(self) -> Option<cudarc::cublas::sys::cudaDataType> {
+        match self {
+            Self::Fp16 | Self::Fp16X => Some(cudarc::cublas::sys::cudaDataType::CUDA_R_16F),
+            Self::Bf16 | Self::Bf16X => Some(cudarc::cublas::sys::cudaDataType::CUDA_R_16BF),
+            _ => None,
+        }
+    }
+
+    fn tf32(self) -> bool {
+        matches!(self, Self::Tf32 | Self::Tf32All)
+    }
+
+    fn linear_half(self) -> bool {
+        matches!(self, Self::Fp16X | Self::Bf16X)
+    }
+
+    /// f32 SIMT fused conv kernels allowed for convs that stay in f32
+    fn f32_fused_ok(self) -> bool {
+        self != Self::Tf32All
+    }
+}
+
 pub struct Gpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -67,6 +150,7 @@ pub struct Gpu {
     k: Kernels,
     tw: CudaSlice<f64>,
     win: Buf,
+    pub prec: Precision,
 }
 
 impl Gpu {
@@ -86,7 +170,7 @@ impl Gpu {
         let win: Vec<f32> = (0..20).map(|n| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / 20.0).cos()) as f32).collect();
         let tw = stream.clone_htod(&tw)?;
         let win = stream.clone_htod(&win)?;
-        Ok(Self { k: Kernels::load(&module)?, ctx, stream, blas, tw, win })
+        Ok(Self { k: Kernels::load(&module)?, ctx, stream, blas, tw, win, prec: Precision::from_env()? })
     }
 
     /// With KOKORO_PROFILE=1, block until queued GPU work finishes so stage scopes measure
@@ -144,11 +228,53 @@ impl Gpu {
             beta,
             ldc: ldc as i32,
         };
+        if self.prec.tf32() {
+            use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
+            let (pa, _ga) = a.device_ptr(&self.stream);
+            let (pb, _gb) = b.device_ptr(&self.stream);
+            let (pc, _gc) = c.device_ptr_mut(&self.stream);
+            // SAFETY: operand extents checked above; f32 operands, TF32 tensor-core compute.
+            return unsafe {
+                self.gemm_raw(ta, tb, m, n, k, pa + 4 * a_off as u64, Dt::CUDA_R_32F, lda, pb + 4 * b_off as u64, Dt::CUDA_R_32F, ldb, &beta as *const f32 as *const std::ffi::c_void, pc + 4 * c_off as u64, Dt::CUDA_R_32F, ldc, Ct::CUBLAS_COMPUTE_32F_FAST_TF32)
+            };
+        }
         let (av, bv) = (a.slice(a_off..), b.slice(b_off..));
         let mut cv = c.slice_mut(c_off..);
         // SAFETY: operand extents checked above.
         unsafe { self.blas.gemm(cfg, &av, &bv, &mut cv) }.context("cublas sgemm")?;
         Ok(())
+    }
+
+    /// PHASE 2: raw cublasGemmEx (column-major) on device addresses. Callers guarantee extents,
+    /// types and alignment. alpha is 1 (f32, or i32 for integer compute); beta points to a value of
+    /// the compute type.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn gemm_raw(&self, ta: bool, tb: bool, m: usize, n: usize, k: usize, a: u64, at: cudarc::cublas::sys::cudaDataType, lda: usize, b: u64, bt: cudarc::cublas::sys::cudaDataType, ldb: usize, beta: *const std::ffi::c_void, c: u64, ct: cudarc::cublas::sys::cudaDataType, ldc: usize, compute: cudarc::cublas::sys::cublasComputeType_t) -> Result<()> {
+        use cudarc::cublas::sys::{cublasComputeType_t as Ct, cublasGemmAlgo_t};
+        let (one_f, one_i) = (1.0f32, 1i32);
+        let alpha = if compute == Ct::CUBLAS_COMPUTE_32I { &one_i as *const i32 as *const std::ffi::c_void } else { &one_f as *const f32 as *const std::ffi::c_void };
+        cudarc::cublas::result::gemm_ex(
+            *self.blas.handle(),
+            if ta { Op::CUBLAS_OP_T } else { Op::CUBLAS_OP_N },
+            if tb { Op::CUBLAS_OP_T } else { Op::CUBLAS_OP_N },
+            m as i32,
+            n as i32,
+            k as i32,
+            alpha,
+            a as *const std::ffi::c_void,
+            at,
+            lda as i32,
+            b as *const std::ffi::c_void,
+            bt,
+            ldb as i32,
+            beta,
+            c as *mut std::ffi::c_void,
+            ct,
+            ldc as i32,
+            compute,
+            cublasGemmAlgo_t::CUBLAS_GEMM_DFALT,
+        )
+        .context("cublasGemmEx")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -225,11 +351,13 @@ pub struct GLinear {
     b: Option<Buf>,
     din: usize,
     dout: usize,
+    /// PHASE 2: half weights, created on first use in the fp16x/bf16x modes
+    w_h: std::sync::OnceLock<CudaSlice<u16>>,
 }
 
 impl GLinear {
     fn new(g: &Gpu, l: &Linear) -> Result<Self> {
-        Ok(Self { w: g.up(&l.w)?, b: l.b.as_ref().map(|b| g.up(b)).transpose()?, din: l.din, dout: l.dout })
+        Ok(Self { w: g.up(&l.w)?, b: l.b.as_ref().map(|b| g.up(b)).transpose()?, din: l.din, dout: l.dout, w_h: std::sync::OnceLock::new() })
     }
 
     /// x [t, din] -> [t, dout]
@@ -240,6 +368,38 @@ impl GLinear {
             launch!(g, fill_rows, cfg1(t * self.dout), &mut y, b, &ri, &di)?;
         }
         let beta = if self.b.is_some() { 1.0 } else { 0.0 };
+        if let Some(dt) = g.prec.half().filter(|_| g.prec.linear_half() && t > 0) {
+            // PHASE 2 (fp16x/bf16x): half operands, f32 accumulate/output
+            use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
+            let f16 = dt == Dt::CUDA_R_16F;
+            let cvt = |src: &Buf| -> Result<CudaSlice<u16>> {
+                // SAFETY: fully written by the conversion kernel.
+                let mut h = unsafe { g.stream.alloc::<u16>(src.len()) }?;
+                let n = src.len() as i64;
+                if f16 {
+                    launch!(g, lp_cvt_f16, cfg1(src.len()), src, &mut h, &n)?;
+                } else {
+                    launch!(g, lp_cvt_bf16, cfg1(src.len()), src, &mut h, &n)?;
+                }
+                Ok(h)
+            };
+            if self.w_h.get().is_none() {
+                let h = cvt(&self.w)?;
+                let _ = self.w_h.set(h);
+            }
+            let wh = self.w_h.get().expect("set above");
+            let xh = cvt(x)?;
+            {
+                let (pw, _gw) = wh.device_ptr(&g.stream);
+                let (px, _gx) = xh.device_ptr(&g.stream);
+                let (py, _gy) = y.device_ptr_mut(&g.stream);
+                // SAFETY: same shapes as the f32 gemm below (A = W [dout][din], B = x [t][din], C = y).
+                unsafe {
+                    g.gemm_raw(true, false, self.dout, t, self.din, pw, dt, self.din, px, dt, self.din, &beta as *const f32 as *const std::ffi::c_void, py, Dt::CUDA_R_32F, self.dout, Ct::CUBLAS_COMPUTE_32F)?;
+                }
+            }
+            return Ok(y);
+        }
         g.gemm(true, false, self.dout, t, self.din, &self.w, 0, self.din, x, 0, self.din, beta, &mut y, 0, self.dout)?;
         Ok(y)
     }
@@ -253,6 +413,7 @@ static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
 const IG_BK: usize = crate::gpu::IG_BK_CU;
 static IGEMM_STRIDED_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_STRIDED").map(|v| v != "0").unwrap_or(true));
 static SW_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_SW").map(|v| v != "0").unwrap_or(true));
+static WMMA_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA").map(|v| v != "0").unwrap_or(true));
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -267,6 +428,18 @@ pub struct GConv {
     pad: usize,
     dil: usize,
     direct: bool,
+    /// PHASE 2: precision tier (0 always f32; 1 decoder/generator; 2 predictor/text encoder)
+    tier: u8,
+    /// PHASE 2: low-precision weights for this conv under the engine's precision (None = f32)
+    lp: Option<LpWeights>,
+}
+
+/// PHASE 2: per-conv low-precision operands, layout [K][Cout][Cin] like `wt`.
+enum LpWeights {
+    /// FP16 or BF16 bit patterns (type = the engine precision's half type)
+    Half(CudaSlice<u16>),
+    /// INT8 values with per-output-channel scale (absmax over (k, ci) / 127)
+    Int8 { q: CudaSlice<i8>, scale: Buf },
 }
 
 impl GConv {
@@ -298,12 +471,177 @@ impl GConv {
         } else {
             None
         };
-        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct })
+        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct, tier: 0, lp: None })
     }
 
     /// Whether the fused implicit-GEMM path applies to a same-length conv over length `t`.
-    pub(crate) fn igemm_applicable(&self) -> bool {
-        self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4 <= 48 * 1024
+    /// PHASE 2: create this conv's low-precision operands if its tier is covered by the precision.
+    fn prepare_lowp(&mut self, g: &Gpu, tier: u8) -> Result<()> {
+        self.tier = tier;
+        if tier == 0 || tier > g.prec.conv_tier() || self.direct || self.stride != 1 {
+            return Ok(());
+        }
+        let n = self.wt.len();
+        if let Some(_dt) = g.prec.half() {
+            // SAFETY: fully written by the conversion kernel below.
+            let mut h = unsafe { g.stream.alloc::<u16>(n) }?;
+            let nn = n as i64;
+            if matches!(g.prec, Precision::Fp16 | Precision::Fp16X) {
+                launch!(g, lp_cvt_f16, cfg1(n), &self.wt, &mut h, &nn)?;
+            } else {
+                launch!(g, lp_cvt_bf16, cfg1(n), &self.wt, &mut h, &nn)?;
+            }
+            self.lp = Some(LpWeights::Half(h));
+        } else if g.prec == Precision::Int8 {
+            // INT8 only where the fused tensor-core kernel applies (same-length output, Cout % 64,
+            // Cin % 16); cuBLAS per-tap IMMA is unsupported for these shapes -> such convs stay f32.
+            if self.cout % 64 != 0 || self.cin % 16 != 0 || 2 * self.pad != self.dil * (self.k - 1) {
+                return Ok(());
+            }
+            let w = g.down(&self.wt)?; // [K][Cout][Cin]
+            let (k, co_n, ci_n) = (self.k, self.cout, self.cin);
+            let mut scale = vec![0.0f32; co_n];
+            for kk in 0..k {
+                for co in 0..co_n {
+                    for ci in 0..ci_n {
+                        scale[co] = scale[co].max(w[(kk * co_n + co) * ci_n + ci].abs());
+                    }
+                }
+            }
+            for s in &mut scale {
+                *s = if *s > 0.0 { *s / 127.0 } else { 1.0 };
+            }
+            let q: Vec<i8> = (0..w.len()).map(|i| {
+                let co = (i / ci_n) % co_n;
+                (w[i] / scale[co]).round().clamp(-127.0, 127.0) as i8
+            }).collect();
+            self.lp = Some(LpWeights::Int8 { q: g.stream.clone_htod(&q)?, scale: g.up(&scale)? });
+        }
+        Ok(())
+    }
+
+    /// PHASE 2: low-precision per-tap conv (tensor cores). Activations are converted once per call
+    /// into a transposed [T][Cin] operand, so every tap's A operand starts at a multiple of Cin.
+    fn fwd_lowp(&self, g: &Gpu, x: &Buf, t: usize, tout: usize) -> Result<Buf> {
+        use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
+        let lp = self.lp.as_ref().expect("lowp weights");
+        let (cin, cout) = (self.cin, self.cout);
+        let mut y = g.alloc(cout * tout)?;
+        let null = 0u64;
+        if tout == t && cout % 64 == 0 && cin % 16 == 0 && *WMMA_ON {
+            // PHASE 2: fused tensor-core conv (kill switch KOKORO_LP_WMMA=0 -> per-tap GEMMs)
+            let tw = 64 + (self.k - 1) * self.dil;
+            let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+            let grid = (t.div_ceil(64) as u32, (cout / 64) as u32, 1);
+            match lp {
+                LpWeights::Half(wh) => {
+                    let smem = ((tw * 16 + self.k * 64 * 16) * 2).max(64 * 64 * 4);
+                    let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                    let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
+                    match (&self.b, f16) {
+                        (Some(b), true) => launch!(g, conv1d_wmma_f16, cfg, x, wh, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                        (None, true) => launch!(g, conv1d_wmma_f16, cfg, x, wh, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                        (Some(b), false) => launch!(g, conv1d_wmma_bf16, cfg, x, wh, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                        (None, false) => launch!(g, conv1d_wmma_bf16, cfg, x, wh, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
+                    }
+                }
+                LpWeights::Int8 { q, scale } => {
+                    let mut am = g.stream.alloc_zeros::<f32>(1)?;
+                    let nx = (cin * t) as i64;
+                    let mb = LaunchConfig { grid_dim: (1024, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    launch!(g, lp_absmax_mb, mb, x, &nx, &mut am)?;
+                    let smem = (tw * 32 + self.k * 64 * 16).max(64 * 64 * 4);
+                    let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                    match &self.b {
+                        Some(b) => launch!(g, conv1d_wmma_s8, cfg, x, q, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &am, scale)?,
+                        None => launch!(g, conv1d_wmma_s8, cfg, x, q, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &am, scale)?,
+                    }
+                }
+            }
+            return Ok(y);
+        }
+        let tcfg = LaunchConfig { grid_dim: (t.div_ceil(32) as u32, cin.div_ceil(32) as u32, 1), block_dim: (32, 8, 1), shared_mem_bytes: 0 };
+        let (ci, ti) = (cin as i32, t as i32);
+        let taps = |mut f: Box<dyn FnMut(usize, usize, usize, usize) -> Result<()> + '_>| -> Result<()> {
+            for kk in 0..self.k {
+                let shift = (kk * self.dil) as isize - self.pad as isize;
+                let o_lo = if shift >= 0 { 0 } else { (-shift) as usize };
+                let max_in = t as isize - 1 - shift;
+                if max_in < 0 {
+                    continue;
+                }
+                let o_hi = (max_in as usize).min(tout - 1);
+                if o_lo > o_hi {
+                    continue;
+                }
+                f(kk, o_lo, o_hi - o_lo + 1, (o_lo as isize + shift) as usize)?;
+            }
+            Ok(())
+        };
+        match lp {
+            LpWeights::Half(wh) => {
+                let dt = g.prec.half().expect("half precision");
+                // SAFETY: fully written by the transpose kernel (all t < T, c < Cin).
+                let mut xt = unsafe { g.stream.alloc::<u16>(t * cin) }?;
+                if dt == Dt::CUDA_R_16F {
+                    launch!(g, lp_transpose_f16, tcfg, x, &mut xt, &ci, &ti)?;
+                } else {
+                    launch!(g, lp_transpose_bf16, tcfg, x, &mut xt, &ci, &ti)?;
+                }
+                let (co, to) = (cout as i32, tout as i32);
+                match &self.b {
+                    Some(b) => launch!(g, fill_channels, cfg1(cout * tout), &mut y, b, &co, &to)?,
+                    None => launch!(g, fill_channels, cfg1(cout * tout), &mut y, &null, &co, &to)?,
+                }
+                let (px, _gx) = xt.device_ptr(&g.stream);
+                let (pw, _gw) = wh.device_ptr(&g.stream);
+                let (py, _gy) = y.device_ptr_mut(&g.stream);
+                let beta = 1.0f32;
+                taps(Box::new(|kk, o_lo, n, a_row| {
+                    // SAFETY: A = xt rows [a_row, a_row+n) x Cin (in bounds: a_row + n <= t);
+                    // B = tap kk weights Cin x Cout; C = y columns [o_lo, o_lo+n) of Cout rows.
+                    unsafe {
+                        g.gemm_raw(true, false, n, cout, cin, px + 2 * (a_row * cin) as u64, dt, cin, pw + 2 * (kk * cout * cin) as u64, dt, cin,
+                            &beta as *const f32 as *const std::ffi::c_void, py + 4 * o_lo as u64, Dt::CUDA_R_32F, tout, Ct::CUBLAS_COMPUTE_32F)
+                    }
+                }))?;
+            }
+            LpWeights::Int8 { q, scale } => {
+                let mut am = g.alloc(1)?;
+                let nx = (cin * t) as i64;
+                let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+                launch!(g, lp_absmax, one, x, &nx, &mut am)?;
+                // SAFETY: fully written by the quantize-transpose kernel.
+                let mut xq = unsafe { g.stream.alloc::<i8>(t * cin) }?;
+                launch!(g, lp_transpose_q8, tcfg, x, &mut xq, &ci, &ti, &am)?;
+                let ldc = tout.next_multiple_of(4);
+                let mut acc = g.stream.alloc_zeros::<i32>(cout * ldc)?;
+                {
+                    let (px, _gx) = xq.device_ptr(&g.stream);
+                    let (pw, _gw) = q.device_ptr(&g.stream);
+                    let (pc, _gc) = acc.device_ptr_mut(&g.stream);
+                    let beta = 1i32;
+                    taps(Box::new(|kk, o_lo, n, a_row| {
+                        // SAFETY: as for the half path; INT8 operands (offsets are multiples of
+                        // Cin, a multiple of 4), INT32 C with ldc a multiple of 4.
+                        unsafe {
+                            g.gemm_raw(true, false, n, cout, cin, px + (a_row * cin) as u64, Dt::CUDA_R_8I, cin, pw + (kk * cout * cin) as u64, Dt::CUDA_R_8I, cin,
+                                &beta as *const i32 as *const std::ffi::c_void, pc + 4 * o_lo as u64, Dt::CUDA_R_32I, ldc, Ct::CUBLAS_COMPUTE_32I)
+                        }
+                    }))?;
+                }
+                let (ldi, co, to) = (ldc as i32, cout as i32, tout as i32);
+                match &self.b {
+                    Some(b) => launch!(g, lp_dequant, cfg1(cout * tout), &acc, &ldi, scale, &am, b, &mut y, &co, &to)?,
+                    None => launch!(g, lp_dequant, cfg1(cout * tout), &acc, &ldi, scale, &am, &null, &mut y, &co, &to)?,
+                }
+            }
+        }
+        Ok(y)
+    }
+
+    pub(crate) fn igemm_applicable(&self, g: &Gpu) -> bool {
+        self.lp.is_none() && g.prec.f32_fused_ok() && self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4 <= 48 * 1024
     }
 
     /// LEVER PL-016: the sliding-window kernel instance for (k, dil), if one exists.
@@ -345,7 +683,7 @@ impl GConv {
 
     /// res += conv(x) in place via the fused kernel's residual epilogue (x must already be masked).
     pub(crate) fn fwd_igemm_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
-        ensure!(self.igemm_applicable() && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
+        ensure!(self.igemm_applicable(g) && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
         if let Some(f) = self.sw_kernel(g, true) {
             return self.launch_sw(g, f, x, t, res);
         }
@@ -407,8 +745,11 @@ impl GConv {
             }
             return Ok((y, tout));
         }
+        if self.lp.is_some() {
+            return Ok((self.fwd_lowp(g, x, t, tout)?, tout));
+        }
         if let Some(w_ig) = &self.w_ig {
-            if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN {
+            if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && g.prec.f32_fused_ok() {
                 if let Some(f) = self.sw_kernel(g, false) {
                     self.launch_sw(g, f, x, t, &mut y)?;
                     return Ok((y, tout));
@@ -806,7 +1147,48 @@ impl GpuKokoro {
             gpu: g,
         };
         s.gpu.stream.synchronize()?;
+        let mut s = s;
+        s.prepare_lowp()?;
         Ok(s)
+    }
+
+    /// PHASE 2: assign precision tiers and create low-precision conv operands.
+    /// Tier 1 = decoder + generator convs; tier 2 = duration/F0/N predictor + text-encoder convs.
+    fn prepare_lowp(&mut self) -> Result<()> {
+        let Self { gpu, f0, n, f0_proj, n_proj, te_cnn, encode, decode, asr_res, noise_res, resblocks, conv_post, .. } = self;
+        let g = &*gpu;
+        let rb = |b: &mut GResBlk, tier: u8| -> Result<()> {
+            b.conv1.prepare_lowp(g, tier)?;
+            b.conv2.prepare_lowp(g, tier)?;
+            if let Some(c) = b.conv1x1.as_mut() {
+                c.prepare_lowp(g, tier)?;
+            }
+            Ok(())
+        };
+        let sb = |b: &mut GSnakeBlk, tier: u8| -> Result<()> {
+            for c in b.convs1.iter_mut().chain(b.convs2.iter_mut()) {
+                c.prepare_lowp(g, tier)?;
+            }
+            Ok(())
+        };
+        for b in f0.iter_mut().chain(n.iter_mut()) {
+            rb(b, 2)?;
+        }
+        f0_proj.prepare_lowp(g, 2)?;
+        n_proj.prepare_lowp(g, 2)?;
+        for (c, _, _) in te_cnn.iter_mut() {
+            c.prepare_lowp(g, 2)?;
+        }
+        rb(encode, 1)?;
+        for b in decode.iter_mut() {
+            rb(b, 1)?;
+        }
+        asr_res.prepare_lowp(g, 1)?;
+        for b in noise_res.iter_mut().chain(resblocks.iter_mut()) {
+            sb(b, 1)?;
+        }
+        conv_post.prepare_lowp(g, 1)?;
+        Ok(())
     }
 
     fn cat_style(&self, x: &Buf, t: usize, d: usize, s: &Buf) -> Result<Buf> {

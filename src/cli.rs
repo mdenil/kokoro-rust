@@ -55,6 +55,11 @@ struct Common {
     /// CUDA device index (after CUDA_VISIBLE_DEVICES).
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
+    /// PHASE 2 EXPERIMENTAL numerical mode of the CUDA engine (branch experiment/reduced-precision):
+    /// f32 (control) | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8. Recorded in the engine
+    /// identity (sidecars, manifest, resume keys). Everything but f32 is UNREVIEWED.
+    #[arg(long, env = "KOKORO_PRECISION", default_value = "f32")]
+    precision: String,
     /// Batched synthesis budget: max phoneme chars per microbatch (0 = one chunk at a time).
     #[arg(long, default_value_t = 8000)]
     batch_phonemes: usize,
@@ -137,6 +142,11 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+}
+
+/// PHASE 2: the engine reads its precision from KOKORO_PRECISION at load.
+fn set_precision(p: &str) {
+    std::env::set_var("KOKORO_PRECISION", p);
 }
 
 fn set_threads(n: usize) {
@@ -309,6 +319,7 @@ fn synth(
         bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
     set_threads(common.threads);
+    set_precision(&common.precision);
     let ts = now();
     let inp = read_input(&input)?;
     tl.push(0, "main", "input_read", ts, inp.lines.len());
@@ -785,6 +796,7 @@ fn peak_rss_mb() -> f64 {
 
 fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> Result<()> {
     set_threads(common.threads);
+    set_precision(&common.precision);
     let t0 = Instant::now();
     let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     engine.voice(&common.voice)?;

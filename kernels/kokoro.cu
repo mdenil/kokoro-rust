@@ -1009,3 +1009,199 @@ __device__ __forceinline__ void conv1d_sw_body(const float* __restrict__ x, cons
 SW_KERNEL(3, 1) SW_KERNEL(3, 3) SW_KERNEL(3, 5)
 SW_KERNEL(7, 1) SW_KERNEL(7, 3) SW_KERNEL(7, 5)
 SW_KERNEL(11, 1) SW_KERNEL(11, 3) SW_KERNEL(11, 5)
+
+// ======================= PHASE 2 (experiment/reduced-precision branch) =======================
+// Reduced-precision helpers. f32 [C][T] activations -> transposed low-precision [T][C] operands
+// (per-tap GEMM offsets then become multiples of C: aligned TN tensor-core GEMMs).
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+extern "C" __global__ void lp_transpose_f16(const float* __restrict__ x, __half* __restrict__ y, int C, int T) {
+    __shared__ float tile[32][33];
+    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
+    for (int k = 0; k < 32; k += 8) {
+        int cc = c + k;
+        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
+    }
+    __syncthreads();
+    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
+    for (int k = 0; k < 32; k += 8) {
+        int t3 = tt + k;
+        if (t3 < T && c2 < C) y[(long)t3 * C + c2] = __float2half_rn(tile[threadIdx.x][threadIdx.y + k]);
+    }
+}
+extern "C" __global__ void lp_transpose_bf16(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, int C, int T) {
+    __shared__ float tile[32][33];
+    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
+    for (int k = 0; k < 32; k += 8) {
+        int cc = c + k;
+        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
+    }
+    __syncthreads();
+    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
+    for (int k = 0; k < 32; k += 8) {
+        int t3 = tt + k;
+        if (t3 < T && c2 < C) y[(long)t3 * C + c2] = __float2bfloat16_rn(tile[threadIdx.x][threadIdx.y + k]);
+    }
+}
+// Plain element-wise conversions (weights at load; row-major operands for linear layers).
+extern "C" __global__ void lp_cvt_f16(const float* __restrict__ x, __half* __restrict__ y, long n) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i < n) y[i] = __float2half_rn(x[i]);
+}
+extern "C" __global__ void lp_cvt_bf16(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, long n) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i < n) y[i] = __float2bfloat16_rn(x[i]);
+}
+// |x| max over n elements into *out (one block per call; grid-stride; deterministic: fixed order
+// per thread + fixed tree).
+extern "C" __global__ void lp_absmax(const float* __restrict__ x, long n, float* __restrict__ out) {
+    __shared__ float sh[1024];
+    float m = 0.0f;
+    for (long i = threadIdx.x; i < n; i += blockDim.x) m = fmaxf(m, fabsf(x[i]));
+    sh[threadIdx.x] = m;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] = fmaxf(sh[threadIdx.x], sh[threadIdx.x + k]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[0] = sh[0];
+}
+// INT8 symmetric quantization with a device-resident per-tensor scale s = absmax/127 (s>0),
+// transposing [C][T] f32 -> [T][C] int8; values rounded to nearest, clamped to [-127, 127].
+extern "C" __global__ void lp_transpose_q8(const float* __restrict__ x, signed char* __restrict__ y, int C, int T,
+                                           const float* __restrict__ absmax) {
+    __shared__ float tile[32][33];
+    float am = absmax[0];
+    float inv = am > 0.0f ? 127.0f / am : 0.0f;
+    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
+    for (int k = 0; k < 32; k += 8) {
+        int cc = c + k;
+        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
+    }
+    __syncthreads();
+    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
+    for (int k = 0; k < 32; k += 8) {
+        int t3 = tt + k;
+        if (t3 < T && c2 < C) {
+            float q = rintf(tile[threadIdx.x][threadIdx.y + k] * inv);
+            q = fminf(fmaxf(q, -127.0f), 127.0f);
+            y[(long)t3 * C + c2] = (signed char)q;
+        }
+    }
+}
+// y[co][t] = bias[co] + acc[co][t] * (absmax/127) * wscale[co]   (acc int32, row stride ldc)
+extern "C" __global__ void lp_dequant(const int* __restrict__ acc, int ldc, const float* __restrict__ wscale,
+                                      const float* __restrict__ absmax, const float* __restrict__ b,
+                                      float* __restrict__ y, int Cout, int T) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i >= (long)Cout * T) return;
+    int co = (int)(i / T), t = (int)(i - (long)co * T);
+    float sx = absmax[0] / 127.0f;
+    float v = (float)acc[(long)co * ldc + t] * (sx * wscale[co]);
+    y[i] = (b ? b[co] : 0.0f) + v;
+}
+
+// ---- PHASE 2: fused tensor-core (WMMA) conv1d, stride 1, any K / dil. Tile 64 out-ch x 64 time,
+// 4 warps (warp w: out-ch rows [16w, 16w+16), 4 accumulator fragments over time).
+// Input f32 [Cin][T] is converted on the fly into a TRANSPOSED smem window [TW][XLD] (time rows,
+// input-channel columns) so each tap's B operand is a row offset (32-byte aligned for any k*dil).
+// Weights: low-precision [K][Cout][Cin] staged per 16-channel chunk as [K][64][16].
+// HT = __half | __nv_bfloat16 (f32 accumulate) | signed char (int32 accumulate, dynamic per-tensor
+// activation scale *absmax/127, per-out-channel weight scale wscale[co]).
+#include <mma.h>
+template <typename HT> struct WmmaAcc { typedef float T; };
+template <> struct WmmaAcc<signed char> { typedef int T; };
+template <typename HT> __device__ __forceinline__ HT to_lp(float v, float inv);
+template <> __device__ __forceinline__ __half to_lp<__half>(float v, float) { return __float2half_rn(v); }
+template <> __device__ __forceinline__ __nv_bfloat16 to_lp<__nv_bfloat16>(float v, float) { return __float2bfloat16_rn(v); }
+template <> __device__ __forceinline__ signed char to_lp<signed char>(float v, float inv) {
+    float q = rintf(v * inv);
+    q = fminf(fmaxf(q, -127.0f), 127.0f);
+    return (signed char)q;
+}
+template <typename HT>
+__device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, const HT* __restrict__ w,
+                                                 const float* __restrict__ b, float* __restrict__ y,
+                                                 int Cin, int T, int Cout, int K, int dil, int pad,
+                                                 const float* __restrict__ absmax, const float* __restrict__ wscale) {
+    using namespace nvcuda;
+    typedef typename WmmaAcc<HT>::T AT;
+    constexpr int XLD = sizeof(HT) == 1 ? 32 : 16;  // smem row stride (elements): 32-byte rows
+    extern __shared__ __align__(128) unsigned char smem_raw[];
+    const int TW = 64 + (K - 1) * dil;
+    HT* xs = (HT*)smem_raw;                    // [TW][XLD]
+    HT* ws = xs + TW * XLD;                    // [K][64][16]
+    const int t0 = blockIdx.x * 64, co0 = blockIdx.y * 64, warp = threadIdx.x >> 5;
+    float inv = 0.0f;
+    if (absmax) {
+        float am = absmax[0];
+        inv = am > 0.0f ? 127.0f / am : 0.0f;
+    }
+    wmma::fragment<wmma::accumulator, 16, 16, 16, AT> acc[4];
+#pragma unroll
+    for (int f = 0; f < 4; f++) wmma::fill_fragment(acc[f], (AT)0);
+    for (int c0 = 0; c0 < Cin; c0 += 16) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < 16 * TW; i += 128) {
+            int ci = i / TW, tt = i - ci * TW;
+            int t = t0 - pad + tt;
+            float v = (c0 + ci < Cin && t >= 0 && t < T) ? x[(long)(c0 + ci) * T + t] : 0.0f;
+            xs[tt * XLD + ci] = to_lp<HT>(v, inv);
+        }
+        for (int i = threadIdx.x; i < K * 64 * 16; i += 128) {
+            int ci = i & 15, co = (i >> 4) & 63, k = i >> 10;
+            ws[i] = (co0 + co < Cout && c0 + ci < Cin) ? w[((long)k * Cout + co0 + co) * Cin + c0 + ci] : (HT)0;
+        }
+        __syncthreads();
+        for (int k = 0; k < K; k++) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, HT, wmma::row_major> a;
+            wmma::load_matrix_sync(a, ws + (k * 64 + warp * 16) * 16, 16);
+#pragma unroll
+            for (int f = 0; f < 4; f++) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, HT, wmma::col_major> bf;
+                wmma::load_matrix_sync(bf, xs + (f * 16 + k * dil) * XLD, XLD);
+                wmma::mma_sync(acc[f], a, bf, acc[f]);
+            }
+        }
+    }
+    __syncthreads();
+    AT* cs = (AT*)smem_raw;  // [64][64] staging (reuses the operand smem)
+#pragma unroll
+    for (int f = 0; f < 4; f++) wmma::store_matrix_sync(cs + (warp * 16) * 64 + f * 16, acc[f], 64, wmma::mem_row_major);
+    __syncthreads();
+    float sx = absmax ? absmax[0] / 127.0f : 1.0f;
+    for (int i = threadIdx.x; i < 64 * 64; i += 128) {
+        int co = co0 + (i >> 6), t = t0 + (i & 63);
+        if (co < Cout && t < T) {
+            float v = sizeof(HT) == 1 ? (float)cs[i] * (sx * wscale[co]) : (float)cs[i];
+            y[(long)co * T + t] = (b ? b[co] : 0.0f) + v;
+        }
+    }
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_f16(const float* x, const __half* w, const float* b, float* y,
+                                                                  int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma_body<__half>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_bf16(const float* x, const __nv_bfloat16* w, const float* b, float* y,
+                                                                   int Cin, int T, int Cout, int K, int dil, int pad) {
+    conv1d_wmma_body<__nv_bfloat16>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
+}
+extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_s8(const float* x, const signed char* w, const float* b, float* y,
+                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                 const float* absmax, const float* wscale) {
+    conv1d_wmma_body<signed char>(x, w, b, y, Cin, T, Cout, K, dil, pad, absmax, wscale);
+}
+// Multi-block |x| max (out must be zeroed first): block maxima combined with atomicMax on the float
+// bit pattern (monotone for non-negative floats) -> deterministic result.
+extern "C" __global__ void lp_absmax_mb(const float* __restrict__ x, long n, float* __restrict__ out) {
+    __shared__ float sh[256];
+    float m = 0.0f;
+    for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < n; i += (long)gridDim.x * blockDim.x) m = fmaxf(m, fabsf(x[i]));
+    sh[threadIdx.x] = m;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) sh[threadIdx.x] = fmaxf(sh[threadIdx.x], sh[threadIdx.x + k]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) atomicMax((int*)out, __float_as_int(sh[0]));
+}
