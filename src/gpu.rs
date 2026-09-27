@@ -39,7 +39,7 @@ kernels!(
     layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
-    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s,
 );
 
 macro_rules! launch {
@@ -248,6 +248,7 @@ static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_MAX_CIN").ok().and_then(|v| v.parse().ok()).unwrap_or(128));
 /// Input-channel chunk of conv1d_igemm; MUST equal IG_BK in kernels/kokoro.cu (build.rs passes it).
 const IG_BK: usize = crate::gpu::IG_BK_CU;
+static IGEMM_STRIDED_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_STRIDED").map(|v| v != "0").unwrap_or(true));
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -280,7 +281,7 @@ impl GConv {
             }
             wt
         };
-        let w_ig = if !direct && c.stride == 1 {
+        let w_ig = if (!direct && c.stride == 1) || (c.stride > 1 && c.dil == 1) {
             let mut v = vec![0.0f32; c.w.len()];
             for co in 0..c.cout {
                 for ci in 0..c.cin {
@@ -323,6 +324,22 @@ impl GConv {
         let null = 0u64;
         let win = (64 - 1) * self.stride + self.k;
         let tiled_ok = self.dil == 1 && self.cin * win <= 12288;
+        if self.stride > 1 && *IGEMM_STRIDED_ON {
+            if let Some(w_ig) = &self.w_ig {
+                // LEVER PL-012 (kill switch KOKORO_CONV_IGEMM_STRIDED=0): strided implicit-GEMM conv
+                let xw = (128 - 1) * self.stride + (self.k - 1) * self.dil + 1;
+                let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
+                if smem <= 48 * 1024 {
+                    let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32, self.stride as i32, tout as i32];
+                    let cfg = LaunchConfig { grid_dim: (tout.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                    match &self.b {
+                        Some(b) => launch!(g, conv1d_igemm_s, cfg, x, w_ig, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
+                        None => launch!(g, conv1d_igemm_s, cfg, x, w_ig, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
+                    }
+                    return Ok((y, tout));
+                }
+            }
+        }
         if self.direct && tiled_ok && std::env::var("KOKORO_CONV_TILED").map(|v| v != "0").unwrap_or(true) {
             // LEVER PL-004 (kill switch KOKORO_CONV_TILED=0): same arithmetic order, shared-memory tile
             let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];

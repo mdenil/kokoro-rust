@@ -229,3 +229,19 @@ the frozen baseline is not.
   - Alice (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-012259-L11-firstwindow-alice`) warm: fw0 2.036 → fw16 1.969, fw32 1.968 (1.035×), fw64 2.010 s;
   - private chapter: fw0 8.566 → fw32 8.557 s (neutral; fw64 8.622).
   Gain on short files, neutral on the chapter.
+
+### PL-012 — strided implicit-GEMM conv for the generator noise conv (stride 6, k 12)   [2026-09-27 | KEEP; approximately lossless]
+- Measured: conv_direct_tiled was ~0.1 s per Alice pass (6% of GPU time) at ~0.7 TFLOP/s for the
+  stage-0 noise conv (Cin 22 → 256, k 12, stride 6): 64-thread blocks with 34 KB smem, ~2 blocks
+  per SM.
+- Lever: `conv1d_igemm_s`, a STRIDED instantiation of the fused kernel. It reads the input
+  window at t·stride + k·dil and allows Tout ≠ T. Kill switch KOKORO_CONV_IGEMM_STRIDED=0. The
+  stride-1 kernels are separate instantiations and compile to the previous code.
+- Correctness:
+  - the switch-off path is bitwise identical to PL-010 (Alice 65/65, first window 0);
+  - strided path: 135 GPU seams pass (max rel 1.41e-5); original-gate fail set IDENTICAL; RB-1
+    0 drift violations, no new binding failures; GPU negative controls detected;
+  - batched-vs-reference diagnostic unchanged (0.0121 / 0.0118; 5/15 / 8/15);
+  - integrated suites pass; the accepted batch-vs-single RB-1 test fails as before.
+- Speed: forward 1.768 / 1.777 → 1.676 / 1.677 s; sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-013937-L12-strided-alice`) Alice warm
+  1.964 → 1.861 s (**1.055×**, cv 1.3% / 0.6%).

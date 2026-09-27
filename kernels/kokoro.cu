@@ -806,12 +806,17 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
 #ifndef IG_BK
 #define IG_BK 4
 #endif
-template <bool RES>
+// STRIDED: input length T, output length Tout, output o reads x[o*stride + k*dil - pad]
+// (non-strided instantiations compile to exactly the previous code: stride 1, Tout == T).
+template <bool RES, bool STRIDED>
 __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, const float* __restrict__ w,
                                                   const float* __restrict__ b, float* __restrict__ y,
-                                                  int Cin, int T, int Cout, int K, int dil, int pad) {
+                                                  int Cin, int T, int Cout, int K, int dil, int pad,
+                                                  int stride_, int Tout_) {
     extern __shared__ float smem[];
-    const int xw = IG_BN + (K - 1) * dil;
+    const int stride = STRIDED ? stride_ : 1;
+    const int Tout = STRIDED ? Tout_ : T;
+    const int xw = STRIDED ? (IG_BN - 1) * stride + (K - 1) * dil + 1 : IG_BN + (K - 1) * dil;
     float* xs = smem;                   // [IG_BK][xw]
     float* ws = smem + IG_BK * xw;      // [IG_BK][K][IG_BM]
     const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
@@ -825,7 +830,7 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
         __syncthreads();
         for (int i = threadIdx.x; i < IG_BK * xw; i += 128) {
             int c = i / xw, j = i - c * xw;
-            int ci = c0 + c, t = t0 - pad + j;
+            int ci = c0 + c, t = t0 * stride - pad + j;
             xs[i] = (ci < Cin && t >= 0 && t < T) ? x[(long)ci * T + t] : 0.0f;
         }
         const int nw = IG_BK * K * IG_BM;
@@ -839,12 +844,12 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
         for (int c = 0; c < IG_BK; c++) {
             for (int k = 0; k < K; k++) {
                 const float* wp = ws + (c * K + k) * IG_BM + ty * 8;
-                const float* xp = xs + c * xw + k * dil + tx;
+                const float* xp = xs + c * xw + k * dil + tx * stride;
                 float a[8], bv[8];
 #pragma unroll
                 for (int i = 0; i < 8; i++) a[i] = wp[i];
 #pragma unroll
-                for (int j = 0; j < 8; j++) bv[j] = xp[16 * j];
+                for (int j = 0; j < 8; j++) bv[j] = xp[16 * j * stride];
 #pragma unroll
                 for (int i = 0; i < 8; i++)
 #pragma unroll
@@ -860,8 +865,8 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
 #pragma unroll
         for (int j = 0; j < 8; j++) {
             int t = t0 + tx + 16 * j;
-            if (t < T) {
-                long o = (long)co * T + t;
+            if (t < Tout) {
+                long o = (long)co * Tout + t;
                 float v = acc[i][j] + bias;
                 if (RES) y[o] = y[o] + v;  // residual in place: same order as add_inplace(res, conv)
                 else y[o] = v;
@@ -872,11 +877,18 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
 extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
                                                                const float* __restrict__ b, float* __restrict__ y,
                                                                int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<false>(x, w, b, y, Cin, T, Cout, K, dil, pad);
+    conv1d_igemm_body<false, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
+}
+// LEVER PL-012: strided variant (e.g. the generator's noise conv, stride 6).
+extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_s(const float* __restrict__ x, const float* __restrict__ w,
+                                                                 const float* __restrict__ b, float* __restrict__ y,
+                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                 int stride, int Tout) {
+    conv1d_igemm_body<false, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, stride, Tout);
 }
 // LEVER PL-009: residual epilogue variant (y += conv), same order as add_inplace(res, conv).
 extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_res(const float* __restrict__ x, const float* __restrict__ w,
                                                                    const float* __restrict__ b, float* __restrict__ y,
                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<true>(x, w, b, y, Cin, T, Cout, K, dil, pad);
+    conv1d_igemm_body<true, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
 }
