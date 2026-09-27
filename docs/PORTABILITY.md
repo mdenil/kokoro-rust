@@ -95,6 +95,29 @@ Credentials audit: the 126 tracked files were scanned for private-key blocks, Gi
 Hugging Face / AWS / Slack / API-key token formats, assigned secrets and credentials embedded in
 URLs. No findings; no values were printed.
 
+## Verification (tree 3895666 = portability work on top of canonical main fc30599)
+Evidence:
+- `$KOKORO_DATA/evidence/release-cleanup/portability-3895666/`: per step `<step>.cmd` (exact
+  command), `<step>.log` (full output) and `<step>.exit`, plus SHA256SUMS.
+- Private-suite logs: `$KOKORO_DATA/evidence/private/release-cleanup/portability-3895666/`.
+
+Every step runs under `env -i` with only HOME, a minimal PATH and the variables shown.
+
+| step | configuration | result |
+|---|---|---|
+| cargo metadata | no CARGO_TARGET_DIR | target_directory = the checkout's `./target` |
+| default suite | `KOKORO_DATA=<isolated view>` (symlinks to fixtures/, frontend/, hf/, models/ only), `CUDA_VISIBLE_DEVICES=0` | exit 0: 40 passed, 0 failed, 9 ignored. Includes the public goldens (byte-identical to the accepted artifact), the leakage negative control, the Python-free execve audit and the refusal of a non-pinned espeak |
+| no data root | `KOKORO_DATA` unset | exit 101, "KOKORO_DATA is not set ... NOT a pass" |
+| ignored suites: golden (private chapter), reference diagnostic, frontend spacy/espeak/g2p/pipeline, CLI private chapter | real data root | all exit 0; private chapter 316/316 lines byte-identical, both voices |
+| missing `--model-dir` / incomplete model dir / missing or incomplete frontend dir / no visible GPU / invalid `--cuda-device` / obsolete `KOKORO_PRECISION` | explicit options | exit 2, each with a message naming what to fix |
+| relative input + output paths from another working directory, model/frontend from `KOKORO_MODEL_DIR` / `KOKORO_FRONTEND_DIR` | | exit 0, complete output |
+| `scripts/env.sh`, leak checker, golden generator without `KOKORO_DATA` | | exit 1, actionable message |
+| build with `NVCC=/nonexistent/nvcc` | | fails: "NVCC=... does not exist. Install the CUDA 12.9 toolkit or set NVCC=..." |
+| build with no nvcc hints (minimal PATH) | | exit 0, nvcc found at the default prefix |
+
+GPU: all runs used this host's authorized GPU 0 via `CUDA_VISIBLE_DEVICES=0`, set by the caller; no
+test forces it.
+
 ## Deferred to a later milestone (inventory only)
 Host-specific paths remain in historical records and briefs; they are not product
 instructions. Occurrences of `/home/mdenil`, `/data/mdenil`, `CUDA_VISIBLE_DEVICES=0` or

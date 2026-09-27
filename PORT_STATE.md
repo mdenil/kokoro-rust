@@ -28,10 +28,13 @@
     - cold 5.81 s = 1.50× / 11.82×.
   - Cleaned binary vs accepted (matched smoke): warm Alice 0.990 -> 0.995 s, chapter 4.196 -> 4.136 s.
     Cold is provisional (one arm with cv > 5%).
-- In progress: the portability/configuration milestone
-  (supervision/portability-milestone.md under the data root).
-  - Unverified work on the local branch portability-wip (9cff7c6), NOT merged.
-  - Patch archived under $KOKORO_DATA/evidence/release-cleanup/portability-wip-preserve.
+- Portability/configuration milestone (owner #27; supervision/portability-milestone.md under the data
+  root): IMPLEMENTED, AWAITING SUPERVISOR VERIFICATION.
+  - Local branch portability-wip, on top of main fc30599. NOT pushed or merged, per the milestone
+    brief.
+  - Record: docs/PORTABILITY.md (configuration contract, tested scope, inventory, verification).
+  - Evidence: $KOKORO_DATA/evidence/release-cleanup/portability-3895666.
+  - Historical docs with host paths are inventoried there and deferred to a later milestone.
 - Not done: public release, publication, deployment, license choice, clean-checkout setup validation.
   The `license` field in Cargo.toml predates any owner decision.
 - Standing: batching/FMA-era variation accepted (#14); private corpus stays under the data root, never
