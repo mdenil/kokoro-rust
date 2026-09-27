@@ -313,7 +313,7 @@ fn synth(
                 if let Some(lib) = espeak_lib {
                     paths.espeak_lib = lib;
                 }
-                Some(EnglishFrontend::load(&paths).context("loading the native text frontend")?)
+                Some(EnglishFrontend::load(&paths).with_context(|| format!("loading the native text frontend from {} (--frontend-dir / KOKORO_FRONTEND_DIR; expects misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, espeak-ng-1.52.0/)", dir.display()))?)
             }
             _ => None,
         };

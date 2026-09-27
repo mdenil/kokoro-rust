@@ -9,14 +9,9 @@ import os
 import pathlib
 import sys
 
-DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
-# Retired pre-relocation root (2026-09-26); refuse it so inherited env cannot recreate it.
-_RETIRED_ROOT = "/data/mdenil/kokoro-rust"
-for _var, _val in [("KOKORO_DATA", str(DATA)), ("HF_HOME", os.environ.get("HF_HOME", "")),
-                   ("TORCH_HOME", os.environ.get("TORCH_HOME", "")),
-                   ("UV_CACHE_DIR", os.environ.get("UV_CACHE_DIR", ""))]:
-    if _val == _RETIRED_ROOT or _val.startswith(_RETIRED_ROOT + "/"):
-        raise SystemExit(f"{_var}={_val} points at the retired data root; source scripts/env.sh")
+if not os.environ.get("KOKORO_DATA"):
+    raise SystemExit("KOKORO_DATA is not set: point it at the data root (docs/PORTABILITY.md; e.g. source scripts/env.sh)")
+DATA = pathlib.Path(os.environ["KOKORO_DATA"])
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
 FIXTURES = DATA / "fixtures"
 MODELS = DATA / "models"

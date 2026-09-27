@@ -27,7 +27,9 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
+if not os.environ.get("KOKORO_DATA"):
+    raise SystemExit("KOKORO_DATA is not set: point it at the data root (docs/PORTABILITY.md; e.g. source scripts/env.sh)")
+DATA = pathlib.Path(os.environ["KOKORO_DATA"])
 PY = os.environ.get("KOKORO_PY", str(DATA / "reference/venv-prod/bin/python"))
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
 BINS = {"rust": pathlib.Path(os.environ.get("KOKORO_BIN_RUST", ROOT / "target/release/kokoro")),
@@ -164,7 +166,6 @@ def main():
             e["KOKORO_PRECISION"] = "bf16x"
         else:
             e.pop("KOKORO_PRECISION", None)
-        e["CUDA_VISIBLE_DEVICES"] = "0"
         e["KOKORO_FRONTEND_DIR"] = str(DATA / "frontend")
         return e
 

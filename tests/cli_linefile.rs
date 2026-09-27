@@ -1,30 +1,23 @@
 //! Audiobook line-file interface (owner #7) exercised through the ACTUAL `kokoro` binary.
 //! Phoneme-mode input (Python-free today); the text path joins at milestone I1 (native frontend).
-//! Uses the CPU engine with short lines so the suite stays portable.
+//! Runs the product (CUDA) with short lines; GPU selection comes from the caller's CUDA_VISIBLE_DEVICES.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
-
-fn model_dir() -> PathBuf {
-    data().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987")
-}
+#[path = "support/paths.rs"]
+mod paths;
+use paths::model_dir;
 
 fn scratch(name: &str) -> PathBuf {
-    let d = data().join("tmp/cli_linefile").join(name);
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    paths::scratch(&["cli_linefile", name])
 }
 
 /// Runs `kokoro synth` with a PATH that contains no Python and a scrubbed environment.
 fn synth(input: &Path, out: &Path, extra: &[&str]) -> (i32, String) {
-    let o = Command::new(env!("CARGO_BIN_EXE_kokoro"))
-        .env_clear()
-        .env("PATH", "/nonexistent")
+    let mut cmd = Command::new(paths::bin());
+    cmd.env_clear().env("PATH", "/nonexistent");
+    let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--input-format", "phonemes", "--model-dir"])
         .arg(model_dir())
         .arg("--input")

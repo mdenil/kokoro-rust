@@ -118,7 +118,7 @@ allocations, bounds-checked cuBLAS calls); the CPU `ops` facade and its `unsafe`
 
 ## Validation of the cleaned build (tree d83540a)
 - Binary `$KOKORO_DATA/bin/bf16x-cleanup-d83540a-a8d405f1cacd` (sha256 a8d405f1…7ddf).
-- Evidence: `/data/mdenil/code/kokoro-rust/evidence/release-cleanup/validation-d83540a` (public logs, suite-inventory.txt) and
+- Evidence: `$KOKORO_DATA/evidence/release-cleanup/validation-d83540a` (public logs, suite-inventory.txt) and
   `$KOKORO_DATA/evidence/private/release-cleanup/validation-d83540a` (ignored/private suite logs).
 - **Default suite** (`cargo test --release --no-fail-fast -- --test-threads=2`): exit 0, 16 targets,
   all pass. Full stdout: suite-default.log.

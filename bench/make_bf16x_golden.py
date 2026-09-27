@@ -18,7 +18,9 @@ import subprocess
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
+if not os.environ.get("KOKORO_DATA"):
+    raise SystemExit("KOKORO_DATA is not set: point it at the data root (docs/PORTABILITY.md; e.g. source scripts/env.sh)")
+DATA = pathlib.Path(os.environ["KOKORO_DATA"])
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
 ACCEPTED = DATA / "bin/phase2-9b39d48-6fde9d88990a"
 ACCEPTED_SHA256 = "6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea"
@@ -48,7 +50,7 @@ def sha(p):
 def render(inp, voice, extra, out):
     if out.exists():
         shutil.rmtree(out)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION="bf16x")
+    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION="bf16x")  # GPU: caller's CUDA_VISIBLE_DEVICES
     cmd = [str(ACCEPTED), "synth", "--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     (out.parent / f"{out.name}.stderr.txt").write_text(r.stderr)
@@ -64,7 +66,7 @@ def main():
     a = ap.parse_args()
     assert sha(ACCEPTED) == ACCEPTED_SHA256, "accepted binary hash mismatch"
     gold = DATA / "evidence/release-cleanup/golden"
-    table = {"accepted_binary": str(ACCEPTED), "accepted_sha256": ACCEPTED_SHA256, "tree": "9b39d48",
+    table = {"accepted_binary": "$KOKORO_DATA/bin/" + ACCEPTED.name, "accepted_sha256": ACCEPTED_SHA256, "tree": "9b39d48",
              "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (owner #25 accepted configuration)",
              "compare": "per-line WAV bytes (sha256); sidecars carry the engine identity and are not compared",
              "cases": {}}

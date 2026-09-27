@@ -15,6 +15,8 @@ Status: release-preparation branch `release/bf16x-cleanup`. Not released, not pu
 license chosen by the owner yet.
 
 ## Requirements
+Tested scope: Linux x86_64, RTX 4090 (compute capability 8.9), CUDA 12.9, American English. Other
+GPUs and platforms are unverified (docs/PORTABILITY.md).
 - NVIDIA GPU with compute capability 8.9 (developed on an RTX 4090) and its driver.
 - CUDA 12.9 toolkit: `nvcc` at build time; cuBLAS at runtime.
 - Model snapshot directory: `config.json`, `kokoro-v1_0.pth`, `voices/`.
@@ -26,7 +28,7 @@ Details and licenses of runtime libraries: docs/DEPENDENCIES.md.
 
 ## Build
 ```
-cargo build --release          # nvcc from $NVCC or /usr/local/cuda/bin/nvcc
+cargo build --release          # nvcc: $NVCC, $CUDA_HOME/bin, $CUDA_PATH/bin, PATH, /usr/local/cuda/bin
 ```
 
 ## Use
@@ -58,15 +60,17 @@ Other options, all operational (they do not change the numerical mode):
 
 ## Tests
 ```
-cargo test --release -- --test-threads=2
-cargo test --release --test bf16x_golden -- --include-ignored   # + private chapter, local data only
+KOKORO_DATA=/path/to/data cargo test --release -- --test-threads=2
+KOKORO_DATA=/path/to/data cargo test --release --test bf16x_golden -- --include-ignored   # + private chapter, local data only
 ```
 - `tests/bf16x_golden.rs` checks, byte for byte, that the build reproduces the owner-accepted
   artifact on pinned public cases.
 - `tests/bf16x_reference.rs` pins the model inputs against the Python reference fixtures.
 - The frontend and CLI suites cover pronunciation fidelity, line mapping, resume, failure handling
   and the Python-free process audit.
-Test data lives under `$KOKORO_DATA` (default `/data/mdenil/code/kokoro-rust`), outside Git.
+Tests read their data root from `KOKORO_DATA` (required; outside Git). The GPU is the caller's
+`CUDA_VISIBLE_DEVICES` selection. They also need `strace` and `ffmpeg` on PATH and a non-pinned
+libespeak-ng for one negative control. Details and optional overrides: docs/PORTABILITY.md.
 
 ## History (archival)
 - Porting, conformance and performance records: PORT_STATE.md, docs/PERFORMANCE_REPORT.md,

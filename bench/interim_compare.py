@@ -2,7 +2,7 @@
 
 Every engine runs in its own process; engines are interleaved with a rotating order per replicate.
 Raw per-process records (command, wall, exit code, receipt path) go to raw.jsonl; nothing is
-summarized away. Run under scripts/env.sh with CUDA_VISIBLE_DEVICES=0.
+summarized away. Run under scripts/env.sh; the GPU is the caller's CUDA_VISIBLE_DEVICES selection.
 
 Scopes:
   core   warm pure inference over the frozen 69 production phoneme chunks (full warmup pass, then

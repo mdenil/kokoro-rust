@@ -6,15 +6,11 @@ use kokoro::frontend::lexicon::Lexicon;
 use kokoro::frontend::{MToken, SpacyToken};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 #[path = "support/mod.rs"]
 mod support;
 use support::{Corpus, ALICE, CHAPTER, EDGE};
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
 
 struct Recorded {
     map: HashMap<String, (Option<String>, Option<i32>)>,
@@ -35,7 +31,7 @@ impl Fallback for Recorded {
 
 fn run(c: &Corpus) -> (usize, usize, Vec<String>) {
     let private = c.private;
-    let lex = Lexicon::load(&data().join("frontend/misaki-0.9.4"), false).unwrap();
+    let lex = Lexicon::load(&support::paths::frontend_dir().join("misaki-0.9.4"), false).unwrap();
     let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
     let (mut n, mut ok, mut bad) = (0, 0, vec![]);
     for r in &recs {
@@ -95,8 +91,8 @@ fn g2p_matches_oracle_on_private_chapter() {
 #[test]
 fn g2p_negative_controls_are_detected() {
     let recs = support::load_corpus(&ALICE).unwrap_or_else(|e| panic!("{e}"));
-    let us = Lexicon::load(&data().join("frontend/misaki-0.9.4"), false).unwrap();
-    let gb = Lexicon::load(&data().join("frontend/misaki-0.9.4"), true).unwrap();
+    let us = Lexicon::load(&support::paths::frontend_dir().join("misaki-0.9.4"), false).unwrap();
+    let gb = Lexicon::load(&support::paths::frontend_dir().join("misaki-0.9.4"), true).unwrap();
     let (mut tag_diff, mut nofb_diff, mut gb_diff) = (0, 0, 0);
     let mut n = 0;
     for r in recs.iter().take(400) {

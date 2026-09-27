@@ -194,9 +194,7 @@ def main():
 
     if "cold" in scopes:
         runs = []
-        env = dict(os.environ)
-        if args.device == "cuda":
-            env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0")
+        env = dict(os.environ)  # GPU selection: the caller's CUDA_VISIBLE_DEVICES (inherited)
         for k in range(max(3, args.reps // 2)):
             wav_dir = out / f"cold_wavs_{args.device}_{k}"
             t0 = time.perf_counter()

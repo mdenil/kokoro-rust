@@ -74,10 +74,20 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// Open CUDA device `ordinal` (an index into the devices visible under CUDA_VISIBLE_DEVICES).
+    /// The kernels are compute-capability 8.9 PTX: older devices are refused; newer ones may JIT
+    /// the PTX but are untested (a warning is printed).
     pub fn new(ordinal: usize) -> Result<Self> {
-        let ctx = CudaContext::new(ordinal).context("CUDA context")?;
+        let visible = std::env::var("CUDA_VISIBLE_DEVICES").map(|v| format!("CUDA_VISIBLE_DEVICES={v:?}")).unwrap_or_else(|_| "CUDA_VISIBLE_DEVICES unset".into());
+        let ctx = CudaContext::new(ordinal).with_context(|| format!("opening CUDA device {ordinal} (--cuda-device, {visible}); an NVIDIA GPU with compute capability 8.9 and its driver are required"))?;
+        let (major, minor) = ctx.compute_capability().context("querying the CUDA compute capability")?;
+        let name = ctx.name().unwrap_or_else(|_| "unknown".into());
+        ensure!((major, minor) >= (8, 9), "CUDA device {ordinal} ({name}) has compute capability {major}.{minor}; this build needs 8.9 (tested: RTX 4090)");
+        if (major, minor) != (8, 9) {
+            eprintln!("warning: CUDA device {ordinal} ({name}) has compute capability {major}.{minor}; only 8.9 (RTX 4090) is tested");
+        }
         let stream = ctx.default_stream();
-        let module = ctx.load_module(cudarc::nvrtc::Ptx::from_src(PTX)).context("loading PTX")?;
+        let module = ctx.load_module(cudarc::nvrtc::Ptx::from_src(PTX)).context("loading the CUDA kernels (PTX JIT)")?;
         let blas = CudaBlas::new(stream.clone()).context("cuBLAS")?;
         let mut tw = vec![0.0f64; 440];
         for k in 0..11 {

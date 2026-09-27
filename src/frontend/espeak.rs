@@ -38,12 +38,6 @@ pub struct Espeak {
 
 static INSTANCE: OnceLock<std::result::Result<Espeak, String>> = OnceLock::new();
 
-/// Default location of the pinned library + data (explicit paths override it).
-pub fn default_dir() -> PathBuf {
-    let root = std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into());
-    PathBuf::from(root).join("frontend/espeak-ng-1.52.0")
-}
-
 impl Espeak {
     /// Load (once per process) libespeak-ng from `library` with voice data `data_dir`
     /// (the directory CONTAINING `espeak-ng-data`). Later calls must name the same paths.

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Recreate the pinned production-reference Python environment (oracle side).
 # Pins are the OBSERVED production versions from HERMES_BRIEF.md; the oracle asserts
-# them at runtime. Everything large lives under /data/mdenil/code/kokoro-rust.
+# them at runtime. Everything large lives under the data root $KOKORO_DATA.
+# The interpreter must be CPython 3.12.3 (asserted below): $REFERENCE_PYTHON, default python3.12.
 set -euo pipefail
 
 source "$(dirname "$0")/env.sh"
 DATA="$KOKORO_DATA"
 VENV="$DATA/reference/venv-prod"
 
-uv venv --python /usr/bin/python3 "$VENV"
+uv venv --python "${REFERENCE_PYTHON:-python3.12}" "$VENV"
 uv pip install -p "$VENV/bin/python" \
   torch==2.12.1 numpy==2.4.6 soundfile==0.14.0 transformers==5.12.1 \
   espeakng-loader==0.2.4 spacy==3.8.14 huggingface-hub==1.20.1 \

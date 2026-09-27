@@ -19,7 +19,9 @@ import system_compare as sc
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
-DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
+if not os.environ.get("KOKORO_DATA"):
+    raise SystemExit("KOKORO_DATA is not set: point it at the data root (docs/PORTABILITY.md; e.g. source scripts/env.sh)")
+DATA = pathlib.Path(os.environ["KOKORO_DATA"])
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
 
 
@@ -40,7 +42,7 @@ def main():
     bins.update(dict(b.split("=", 1) for b in a.bin))
     out = pathlib.Path(a.out)
     (out / "logs").mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="0", KOKORO_FRONTEND_DIR=str(DATA / "frontend"))
+    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"))  # GPU: caller's CUDA_VISIBLE_DEVICES
     # preserve every measured binary under its content hash (later rebuilds overwrite target/)
     keep = DATA / "bin"
     keep.mkdir(exist_ok=True)

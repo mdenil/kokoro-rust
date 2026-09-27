@@ -5,11 +5,12 @@
 use kokoro::{st, torchpt, weights::Weights};
 use std::path::PathBuf;
 
-fn data() -> PathBuf {
-    PathBuf::from(std::env::var("KOKORO_DATA").unwrap_or_else(|_| "/data/mdenil/code/kokoro-rust".into()))
-}
+#[path = "support/paths.rs"]
+mod paths;
+use paths::data;
+
 fn snap() -> PathBuf {
-    data().join("hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987")
+    paths::model_dir()
 }
 
 #[test]
@@ -56,8 +57,7 @@ fn voice_packs_match_bitwise() {
 
 #[test]
 fn corrupt_and_missing_artifacts_are_refused() {
-    let dir = data().join("tmp/native_load_test");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = paths::scratch(&["native_load_test"]);
     // missing
     assert!(torchpt::load_voice_pack(&dir.join("nope.pt")).is_err());
     // truncated
