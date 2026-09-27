@@ -24,4 +24,3 @@ cited from the installed pinned packages (`kokoro/` = kokoro 0.9.4,
 | OQ-16 | Output | RESOLVED | No clamp/normalize in model; f32 audio `.squeeze().cpu()` (`model.py:134`). |
 | OQ-17 | Loaded weights | RESOLVED | Strict load of each sub-dict succeeded or fell back to prefix-strip non-strict; exported census from the loaded module is authoritative. Unused params: `noi_source` path has none; AdaIN InstanceNorm affine params ARE used. |
 | OQ-18 | Licenses | RESOLVED | Weights Apache-2.0 (model card front-matter); kokoro + misaki Apache-2.0 (PyPI metadata). See docs/THIRD_PARTY.md. |
-

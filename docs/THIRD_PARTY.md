@@ -7,11 +7,11 @@ project's own code has not been decided yet (see README.md).
 ## Downloaded by the setup scripts (not in this repository)
 | component | used for | origin (pinned) | license (as stated by the source) |
 |---|---|---|---|
-| Kokoro-82M `config.json`, `kokoro-v1_0.pth`, voices `af_heart`, `am_adam` | the model | Hugging Face `hexgrad/Kokoro-82M`, revision `f3ff3571` | Apache-2.0 (model card). The model card names yl4579/StyleTTS2-LJSpeech as the base model and cites the StyleTTS 2 and ISTFTNet papers; the StyleTTS2 code repository is MIT-licensed. |
-| misaki 0.9.4 lexicons `us_gold.json`, `us_silver.json` | pronunciation dictionary | the `misaki` 0.9.4 wheel on PyPI | Apache-2.0 (package metadata). The upstream repository does not document where the lexicon entries come from. |
-| spaCy en_core_web_sm 3.8.0 (exported tokenizer rules, lookups, tagger weights) | tokenizer and part-of-speech tagger data | `explosion/spacy-models` release on GitHub | MIT (model metadata). The model's metadata lists its training sources: OntoNotes 5 ("commercial (licensed by Explosion)"), WordNet 3.0 (WordNet 3.0 License), and a ClearNLP citation (no code included). |
+| Kokoro-82M `config.json`, `kokoro-v1_0.pth`, voices `af_heart`, `am_adam` | the model | Hugging Face `hexgrad/Kokoro-82M`, revision `f3ff3571` (each file sha256-pinned) | Apache-2.0 (model card). The model card names yl4579/StyleTTS2-LJSpeech as the base model and cites the StyleTTS 2 and ISTFTNet papers; the StyleTTS2 code repository is MIT-licensed. |
+| misaki 0.9.4 lexicons `us_gold.json`, `us_silver.json` | pronunciation dictionary | the `misaki` 0.9.4 wheel on PyPI (wheel and lexicons sha256-pinned) | Apache-2.0 (package metadata). The upstream repository does not document where the lexicon entries come from. |
+| spaCy en_core_web_sm 3.8.0 (exported tokenizer rules, lookups, tagger weights) | tokenizer and part-of-speech tagger data | `explosion/spacy-models` release on GitHub (wheel sha256-pinned) | MIT (model metadata). The model's metadata lists its training sources: OntoNotes 5 ("commercial (licensed by Explosion)"), WordNet 3.0 (WordNet 3.0 License), and a ClearNLP citation (no code included). |
 | spaCy 3.8.14 base norm exceptions (`base_norms.json`) | token normalization data | the `spacy` 3.8.14 package on PyPI | MIT |
-| Python packages in the spaCy export environment (`scripts/spacy_export_requirements.txt`) | the one-time export only; not used by the program | PyPI | their own licenses; not part of the program or its output |
+| Python packages in the spaCy export environment (`scripts/spacy_export_requirements.txt`) | the one-time export only; not used by the program | PyPI, pinned to exact versions (no artifact hashes; the exported files are hash-checked instead) | their own licenses; not part of the program or its output |
 
 ## Installed separately by the user
 | component | used for | how | license |

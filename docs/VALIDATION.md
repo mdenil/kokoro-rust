@@ -10,10 +10,12 @@ with en_core_web_sm 3.8.0, eSpeak NG 1.52.0 (as bundled by espeakng-loader 0.2.4
 Kokoro-82M snapshot `f3ff3571`. Exact pins: docs/truth-pack/.
 
 ## Text frontend
-- Phoneme strings, chunking and eSpeak NG fallback calls match the reference exactly on every test
-  corpus: frontend edge cases, the full public-domain *Alice* text, link-feature syntax, a grammar
-  fuzz corpus, a mixed-script "soup" corpus, and a private long-form text. Where the reference
-  raises an error, the native frontend fails the same line with the same error class.
+- Test corpora: frontend edge cases, the full public-domain *Alice* text, link-feature syntax, a
+  grammar fuzz corpus, a mixed-script "soup" corpus, and a private long-form text.
+- With the reference's eSpeak NG 1.52.0, every line of these corpora gives the reference's phoneme
+  strings, chunks and eSpeak NG fallback calls exactly, except the lines refused under the first
+  difference below. Where the reference raises an error, the native frontend fails the same line
+  with the same error class.
 - Two intended differences from the reference:
   - Words the reference leaves without a pronunciation, which it silently drops from the audio,
     make the native frontend fail that line ("unresolved word"). Examples: "-12" in edge case 7,
@@ -60,20 +62,26 @@ between the two builds is 1.77 dB (maximum 13.4 dB). tests/strict_reference_diff
 differences.
 
 ## Performance
-Measured with the strict-rounding BF16x build; the FMA build has not been re-timed.
+Scope:
+- One comparison run (all arms in the same session) on the measurement host.
+- Built from the source state before FMA contraction was enabled, i.e. the strict-rounding BF16x
+  build, and the f32 implementation that has since been removed. The current FMA build has not been
+  re-timed.
 
 Benchmark: a private 316-line long-form text (about 49 minutes of audio). The Python baseline is
 the unmodified `KPipeline` driven one line at a time by a usage harness (bench/system_reference.py).
 It is not a measurement of any particular deployed service.
 
-| | Python KPipeline | f32 implementation | BF16x |
-|---|---|---|---|
-| warm pass (model resident) | 52.3 s | 7.3 s | 4.15 s (≈13× Python) |
-| cold process (load + synthesize) | 69.5 s | 8.8 s | 5.81 s (≈12× Python) |
+Median seconds per arm (6 warm passes, 3 cold processes), with the coefficient of variation:
 
-- Cold figures: 3 replicates per arm, coefficient of variation 2.9% (BF16x), 2.2% (f32) and 1.8%
-  (Python). A later, smaller check of the same BF16x build showed more cold-start variation (5.2%);
-  its warm passes agreed within 1.5%.
+| | Python KPipeline | f32 implementation | BF16x (strict rounding) |
+|---|---|---|---|
+| warm pass (model resident) | 54.31 s (CV 4.0%) | 7.45 s (1.9%) | 4.15 s (0.6%): 13.1× Python, 1.79× f32 |
+| cold process (load + synthesize) | 68.71 s (1.8%) | 8.69 s (2.2%) | 5.81 s (2.9%): 11.8× Python, 1.50× f32 |
+
+- A later, smaller check compared two BF16x builds with byte-identical output (before and after a
+  code restructuring). It showed more cold-start variation (CV 5.2%); the two builds' warm passes
+  agreed within 1.5%.
 - The main sources of speed:
   - length-bucketed batching over a gap-separated ragged layout (docs/design/BATCHING.md);
   - fused BF16 tensor-core convolutions with the AdaIN + Snake prologue fused in;

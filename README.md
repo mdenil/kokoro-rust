@@ -7,11 +7,11 @@ into one 24 kHz mono WAV file per line, in a single process on an NVIDIA GPU. Th
 implemented natively as well, so no Python is needed to synthesize speech.
 
 It is a port of the reference Python pipeline ([hexgrad/kokoro](https://github.com/hexgrad/kokoro)
-0.9.4 with misaki 0.9.4) and was checked against it; see docs/VALIDATION.md.
+0.9.4 with misaki 0.9.4) and was checked against it; see [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Requirements
 Tested on Ubuntu 24.04 (x86_64) with an RTX 4090, NVIDIA driver 580, CUDA 12.9 and Rust 1.98.
-Other GPUs, distributions and versions are untested (docs/PORTABILITY.md).
+Other GPUs, distributions and versions are untested ([docs/PORTABILITY.md](docs/PORTABILITY.md)).
 
 - An NVIDIA GPU with compute capability 8.9 (Ada, e.g. RTX 40-series) and its driver. Older GPUs
   are refused at startup; newer ones may work but are unverified.
@@ -41,10 +41,12 @@ scripts/prepare_spacy_assets.sh ~/kokoro-data
 ```
 - `fetch_assets.sh` downloads the Kokoro-82M weights, config and the voices `af_heart` and
   `am_adam` from Hugging Face (revision `f3ff3571`), and the misaki 0.9.4 lexicons from PyPI.
-- `prepare_spacy_assets.sh` creates a Python virtual environment with pinned packages from PyPI
+- `prepare_spacy_assets.sh` creates a Python virtual environment with exact package versions from PyPI
   and the `en_core_web_sm` 3.8.0 model from GitHub, and exports the tokenizer and tagger data.
-- Every file is checked against a pinned SHA-256. Both scripts can be re-run; files that already
-  verify are kept.
+- Checked against pinned SHA-256 hashes: the model files, the misaki and `en_core_web_sm` wheels,
+  the extracted lexicons and the six exported spaCy files. The Python packages of the export
+  environment are pinned to exact versions only, not hashes; the exported files are what is
+  verified. Both scripts can be re-run; files that already verify are kept.
 - eSpeak NG is not downloaded; it comes from your system (see Requirements).
 
 ## Usage
@@ -99,16 +101,16 @@ Common options:
   truncated.
 - Audio depends slightly on which lines are synthesized together in a batch. For the same input and
   options, output is byte-identical from run to run, unless GPU memory runs short and a batch has to
-  be split, which prints a message. See docs/design/BATCHING.md.
+  be split, which prints a message. See [docs/design/BATCHING.md](docs/design/BATCHING.md).
 - Numerical mode: BF16 tensor-core arithmetic (f32 accumulation) for convolutions and linear layers,
   f32 elsewhere. Output is close to, but not identical with, the reference Python pipeline
-  (docs/VALIDATION.md).
+  ([docs/VALIDATION.md](docs/VALIDATION.md)).
 
 ## License
 The license of this project's own code has not been decided yet. (Cargo.toml contains
 `license = "Apache-2.0"`; that field is not a decision and may change.)
 
-Third-party components keep their own licenses (details in docs/THIRD_PARTY.md):
+Third-party components keep their own licenses (details in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)):
 - Kokoro-82M weights and voices: Apache-2.0.
 - misaki lexicons: Apache-2.0.
 - spaCy and en_core_web_sm: MIT.
@@ -117,11 +119,11 @@ Third-party components keep their own licenses (details in docs/THIRD_PARTY.md):
 - CUDA driver and cuBLAS: NVIDIA's license terms. They are not included here.
 
 ## Documentation
-- docs/PORTABILITY.md: configuration reference, tested scope, and how to run the tests.
-- docs/DEPENDENCIES.md: what the program loads at run time.
-- docs/THIRD_PARTY.md: third-party components, origins and licenses.
-- docs/VALIDATION.md: how the port was checked against the reference, and measured performance.
-- docs/design/BATCHING.md: batched inference.
-- docs/frontend/: the text frontend specification and coverage.
-- docs/truth-pack/: the pinned upstream sources and hashes.
-- bench/CORPUS.md: the public test and benchmark texts.
+- [docs/PORTABILITY.md](docs/PORTABILITY.md): configuration reference, tested scope, and how to run the tests.
+- [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md): what the program loads at run time.
+- [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md): third-party components, origins and licenses.
+- [docs/VALIDATION.md](docs/VALIDATION.md): how the port was checked against the reference, and measured performance.
+- [docs/design/BATCHING.md](docs/design/BATCHING.md): batched inference.
+- [docs/frontend/](docs/frontend/): the text frontend specification and coverage.
+- [docs/truth-pack/](docs/truth-pack/): the pinned upstream sources and hashes.
+- [bench/CORPUS.md](bench/CORPUS.md): the public test and benchmark texts.
