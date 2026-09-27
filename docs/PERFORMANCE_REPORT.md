@@ -78,13 +78,22 @@ evidence: `/data/mdenil/code/kokoro-rust/evidence/system-baseline/20260927-02103
 | Alice ch.1 (65 lines, 656 s audio) | cold process wall | 25.57 s (cv 9.5%) | **3.66 s** (cv 1.5%) | 3.54 s | **6.99×** (2.53×) |
 | Alice ch.1 | warm resident pass | 9.27 s (cv 12.0%) | **1.88 s** (cv 1.9%) | 1.83 s | **4.92×** (1.73×) |
 
-Rust chapter attribution (attribution run, warm pass ≈ 8.1 s): GPU synth 7.34 s busy; GPU starved
-0.38 s at the start; writer backpressure 0.24 s; frontend 7.3 s CPU across 16 threads (fully
+Rust chapter attribution (attribution run, warm pass ≈ 8.1 s). The `gpu.synth` HOST SPAN (wall
+time of the GPU thread's synth calls, including host-side batch prep, transfers and syncs) totals
+7.34 s. This is a host-timeline scope, not measured device occupancy; no device trace was taken for
+this run, so it gives no Amdahl bound. The GPU thread waited for work 0.38 s at the start; writer
+backpressure was 0.24 s; frontend 7.3 s CPU across 16 threads (fully
 overlapped); writer 1.4 s CPU across 4 threads. Cold = 0.23 s outside main + model load 1.43 s
-(frontend load concurrent) + pass 8.16 s. The whole system is now GPU-bound (~90%).
+(frontend load concurrent) + pass 8.16 s. The GPU-thread synth span covers ~90% of the pass (host
+timeline; see the scope note above).
 The FMA build equals strict within noise at whole-system level.
 Python ratios are provisional where Python's own cv > 5% (host load 6–17 from other users,
 recorded per run).
+Harness-scope difference from the BASELINE: in the baseline, the Python harness hashed its WAVs
+inside the timed process, adding up to ~1.2–1.8 s including interpreter start and exit. From
+checkpoint 1 on, the driver hashes both engines' outputs outside the timed processes. The Python
+cold numbers of the baseline and of checkpoint 1 are therefore not strictly comparable; the
+baseline's are slightly inflated.
 
 ## Phase-1 lever receipts (approximately lossless; details in docs/PERF_LEDGER.md)
 Alice ch.1, sealed interleaved A/B (bench/ab_synth.py; identities, host/GPU state and coverage
@@ -94,13 +103,24 @@ before for these host-side levers.
 | lever | warm pass | cold process | status |
 |---|---|---|---|
 | PL-006 pipeline (parallel frontend, bounded window; 4 writers; fsync off; concurrent load) | 4.766 → 2.575 s, 1.85× (**provisional**: base cv 51.9% from one outlier; new cv 1.6%) | 9.749 → 5.504 s, 1.77× (cv 0.9% / 4.1%) | KEEP |
-| PL-007 load (ring SHA-256, contiguous .pth fast path) | 2.586 → 2.548 s (neutral) | 5.463 → 4.704 s, 1.16× | KEEP |
+| PL-007 load (ring SHA-256, contiguous .pth fast path) | 2.586 → 2.548 s (neutral) | 5.463 → 4.704 s, 1.16× (cv 5.2% / 2.4%; base slightly above the 5% gate → provisional) | KEEP |
 | PL-008 fused implicit-GEMM dilated conv (Cin ≤ 128; explicit FMA) — approx. lossless: 135 seams pass, fail set identical, RB-1 0 violations | 2.567 → 2.137 s, 1.20× | 4.862 → 4.532 s, 1.07× (cv ~8%, provisional) | KEEP |
 | PL-009 residual epilogue in the fused conv + mask skip (bitwise identical) | 2.149 → 2.101 s, 1.023× (marginal) | — | KEEP |
 | PL-010 fused-conv input-channel chunk 8 → 4 (occupancy; bitwise identical) | 2.077 → 2.022 s, 1.027× | — | KEEP |
 | PL-011 first batch window 32 (accepted batching variation) | 2.036 → 1.968 s, 1.035× (chapter neutral) | — | KEEP |
 | PL-012 strided fused conv for the noise conv (approx. lossless; gates as PL-008) | 1.964 → 1.861 s, 1.055× | — | KEEP |
-| PL-013 skip exit teardown + CUDA init concurrent with parsing (bitwise identical) | neutral | 4.031 → 3.399 s, 1.19× | KEEP |
+| PL-013 skip exit teardown + CUDA init concurrent with parsing (bitwise identical) | neutral | 4.031 → 3.399 s, 1.19× (cv 3.4% / 1.0%) | KEEP |
+| PL-014 single-pass per-item channel stats (batched AdaIN; approx. lossless) | 1.872 → 1.822 s, 1.027× (cv 0.6% / 0.4%) | — | KEEP (see disclosure below) |
+| PL-015 frontend prefetch during model load (bitwise identical) | neutral | Alice 3.638 → 3.508 s, 1.037× (cv 7.6% / 4.1% → provisional); chapter 9.892 → 9.289 s, 1.065× (cv 2.4% / 2.4%) | KEEP |
+
+PL-014 disclosure (exact failure sets). Batch-1 path: failure set unchanged. Batched path: two
+metric-level gate crossings were added, both on cases that already failed:
+- s03_moon/am_adam rel 0.0185 → 0.0191 (gate 0.019);
+- s06_long/af_heart max 0.0319 → 0.0517 (a localized peak; rel and spec essentially unchanged).
+The batched worst peak across all cases improved (0.0706 → 0.0541) and the mean rel improved
+slightly. Magnitudes stay within the owner-accepted envelope (batch 0.0706, FMA 0.0542). Raw rows
+are in the PL-014 evidence dir and evidence/phase1-quality/*-cumulative. The quality is
+approximately lossless by the accepted-variation policy, but it is not bit-identical.
 
 Rejected or neutral, all recorded in docs/NEGATIVE_EVIDENCE.md:
 - NE-004: 128-channel conv tile, 13% slower.

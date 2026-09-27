@@ -1,9 +1,12 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
 ## CURRENT PRIORITY (owner #21-#23, 2026-09-26): SPEED — PHASE 1 (approximately lossless, main) then PHASE 2 (lossy, separate branch)
-- Step 1 (in progress): whole-system baseline of the CURRENT native binary vs the ORIGINAL production
-  Python as used. Private chapter primary, Alice public. Cold and warm-resident measured separately,
-  with overlap-aware stage attribution and raw per-replicate evidence.
+- Step 1 DONE: whole-system baseline (tree 6e306b7). Chapter Python / Rust: cold 2.74×, warm 2.63×.
+- Step 2 IN PROGRESS (phase 1, approximately lossless):
+  - levers PL-006..PL-015 kept; NE-004..NE-008 rejected or neutral (docs/PERF_LEDGER.md,
+    docs/NEGATIVE_EVIDENCE.md);
+  - checkpoint 1 (tree 69dcf43): chapter cold 6.90×, warm 6.64×; Alice 6.99× / 4.92×
+    (docs/PERFORMANCE_REPORT.md).
 - Step 2: perf ritual on the measured bottleneck (one lever at a time, regression + negative controls,
   A/B, keep/revert). Continue across ALL meaningful bottlenecks until severely diminishing returns
   (owner #22 stopping criterion); then report the best config, gains vs incumbent, tried/rejected
@@ -18,7 +21,7 @@
   and a raw listening pack.
 - libespeak-ng 1.52 accepted (#19); ffmpeg approved (#18). The private corpus stays under /data only.
 
-## Milestone closeout (2026-09-26, documentation only; awaiting owner direction)
+## Single-binary milestone closeout (2026-09-26; HISTORICAL — superseded by the owner's speed authorization #21)
 - Execution logs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/ (README + SHA256SUMS).
   - strict + FMA integrated runs, before the fuzz fixes (a296b58) and after (dbe5bba);
   - sanitizer summary lines.

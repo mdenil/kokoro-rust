@@ -73,8 +73,8 @@ def main():
                 ent["attribution_warm"] = {
                     "pass_wall_s": stats([p["pass_wall_s"] for p in ps]),
                     "prepare.frontend_busy_s": stats([st(p, "prepare.frontend") for p in ps]),
-                    "gpu.synth_busy_s": stats([st(p, "gpu.synth") for p in ps]),
-                    "gpu.recv_wait_s (starved)": stats([st(p, "gpu.recv_wait") for p in ps]),
+                    "gpu.synth host span s (not device occupancy)": stats([st(p, "gpu.synth") for p in ps]),
+                    "gpu thread waiting for work s": stats([st(p, "gpu.recv_wait") for p in ps]),
                     "gpu.send_wait_s (writer backpressure)": stats([st(p, "gpu.send_wait") for p in ps]),
                     "writer.write_busy_s": stats([st(p, "writer.write") for p in ps]),
                     "union_any_work_s": stats([p["timing"]["thread_work_union_s"]["any_pipeline_work"] for p in ps]),

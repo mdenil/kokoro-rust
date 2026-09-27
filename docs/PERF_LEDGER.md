@@ -289,3 +289,24 @@ the frozen baseline is not.
   - Alice (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-024645-L15-prefetch-alice`): 3.638 → 3.508 s (1.037×, cv 7.6% / 4.1%);
   - private chapter: 9.892 → 9.289 s (**1.065×**, −0.6 s).
   Warm unchanged.
+- PL-014 addendum (audit): exact (case, metric) failure sets, not only counts.
+  - Raw rows: `/data/mdenil/code/kokoro-rust/evidence/ab/20260927-024207-L14-stats1pass-alice/batched_quality_stats1pass_{0,1}.txt`; sets in batched_failure_sets.json.
+  - Gates applied to the printed rows: v1 rel ≤ 0.019, max ≤ 0.033; G-SPEC ≤ 0.13948 dB.
+    Correlation is not in these rows.
+  - Single-item path: IDENTICAL (8 metrics).
+  - Batched path: 6 → 8 failing metrics, both on already-failing cases (5/15 cases unchanged):
+    - NEW s03_moon/am_adam rel 0.0185 → 0.0191 (gate 0.019; marginal crossing);
+    - NEW s06_long/af_heart max 0.0319 → 0.0517 (its rel 0.0187 → 0.0185 and spec 0.2226 →
+      0.2236 are essentially unchanged, so a localized peak).
+  - Cumulative check of every approximately lossless lever (PL-008/012/014 off vs defaults;
+    `/data/mdenil/code/kokoro-rust/evidence/phase1-quality/20260927-030524-cumulative`): the same two batched additions; the batch-1 set unchanged. The batched worst peak
+    IMPROVES (0.0706 s04_alice → 0.0541 s03_moon); batched mean rel 0.0121 → 0.0119.
+  - Assessment: reordering-level variation in the phase-amplified regime. Magnitudes are within
+    the already-heard, owner-accepted envelope (batch worst 0.0706, FMA worst 0.0542). Disclosed,
+    not a listening hold (owner #14: flag meaningful NEW loss).
+
+### NE-008 — host thread counts (--write-threads 8, --prep-threads 32)   [2026-09-27 | NEUTRAL, defaults unchanged]
+- Private chapter warm (`/data/mdenil/code/kokoro-rust/evidence/private/ab/20260927-030003-hostknobs-chapter`, 2 rounds): default 7.917 s; w8 7.938; p32 7.908; w8+p32 7.687.
+- Each knob alone is neutral. The combined 3% rests on 2 rounds and is not explained by either
+  knob, so it is treated as noise and the defaults stay 16 / 4. Host stages are fully overlapped
+  with the GPU (writer backpressure ≈ 0.24 s).
