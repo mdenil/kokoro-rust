@@ -64,6 +64,10 @@ struct Common {
     /// Chunks collected before scheduling batches in `synth` (window for length bucketing).
     #[arg(long, default_value_t = 256)]
     batch_window: usize,
+    /// Smaller window for the FIRST batch of a pass, so the GPU starts before the whole first
+    /// window is through the frontend (0 = same as --batch-window).
+    #[arg(long, default_value_t = 32)]
+    batch_first_window: usize,
 }
 
 #[derive(Subcommand)]
@@ -384,7 +388,7 @@ fn synth(
         phonemes: vec![],
         dropped_phoneme_chars: vec![],
         config: cfg.clone(),
-        synthesis: serde_json::json!({"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window}),
+        synthesis: serde_json::json!({"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window, "batch_first_window": common.batch_first_window}),
         wav: None,
         audio_sha256: None,
         samples: 0,
@@ -572,6 +576,7 @@ fn synth(
         let batching = common.batch_phonemes > 0;
         let mut pending: Vec<(Box<Sidecar>, Vec<String>, Instant)> = vec![];
         let mut pending_chunks = 0usize;
+        let mut flushed_once = false;
         let flush = |engine: &mut Engine, pending: &mut Vec<(Box<Sidecar>, Vec<String>, Instant)>, out_tx: &std::sync::mpsc::SyncSender<Out>| -> bool {
             let mut reqs = vec![];
             for (sc, chunks, _) in pending.iter() {
@@ -625,8 +630,10 @@ fn synth(
                 Job::Synth(sc, chunks, t0) if batching => {
                     pending_chunks += chunks.len();
                     pending.push((sc, chunks, t0));
-                    if pending_chunks >= common.batch_window {
+                    let window = if flushed_once || common.batch_first_window == 0 { common.batch_window } else { common.batch_first_window.min(common.batch_window) };
+                    if pending_chunks >= window {
                         pending_chunks = 0;
+                        flushed_once = true;
                         if !flush(&mut engine, &mut pending, &out_tx) {
                             break;
                         }
@@ -713,7 +720,7 @@ fn synth(
         let rec = serde_json::json!({
             "engine": cfg.engine, "frontend": cfg.frontend, "input_file": inp.display, "input_sha256": inp.sha256,
             "input_lines": inp.lines.len(), "bench_passes": bench_passes,
-            "synthesis": {"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window,
+            "synthesis": {"batch_phonemes": common.batch_phonemes, "batch_items": common.batch_items, "batch_window": common.batch_window, "batch_first_window": common.batch_first_window,
                 "prep_threads": prep_threads, "write_threads": write_threads, "fsync": fsync},
             "main_entered_s": t_main, "exit_s": now(), "load_s": load_s, "frontend_load_s": frontend_load_s,
             "passes": pass_records, "spans": tl.spans(),

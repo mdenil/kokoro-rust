@@ -217,3 +217,15 @@ the frozen baseline is not.
 - The chunk size is now a build knob (KOKORO_IG_BK, default 4), passed by build.rs to both nvcc
   (-DIG_BK) and the Rust launcher, so they cannot disagree.
 - Sealed A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-011907-L10-igbk4-alice`; PL-009 binary bd4e0cbd… vs 5dc9783e…): Alice warm 2.077 → 2.022 s (1.027×).
+
+### PL-011 — smaller first batch window (--batch-first-window 32)   [2026-09-27 | KEEP, marginal]
+- The GPU thread waited for a full 256-chunk window before its first flush, so on short files it
+  idled while the whole frontend ran.
+- Now the first flush of a pass happens at 32 chunks; later flushes still use 256.
+- Batch composition changes → audio changes within the accepted batching variation (PL-003):
+  - durations and sample counts are exact (batched vs batch-1 structure test);
+  - integrated suites pass incl. the private chapter and the fuzz corpus.
+- A/B:
+  - Alice (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-012259-L11-firstwindow-alice`) warm: fw0 2.036 → fw16 1.969, fw32 1.968 (1.035×), fw64 2.010 s;
+  - private chapter: fw0 8.566 → fw32 8.557 s (neutral; fw64 8.622).
+  Gain on short files, neutral on the chapter.
