@@ -4,6 +4,10 @@
 //! - `KOKORO_MODEL_DIR` (optional): model snapshot directory; default: the pinned snapshot under
 //!   `$KOKORO_DATA/hf`.
 //! - `KOKORO_FRONTEND_DIR` (optional): frontend data; default `$KOKORO_DATA/frontend`.
+//! - `KOKORO_ESPEAK_REFERENCE_DIR` (optional): the eSpeak NG 1.52.0 copy the Python reference ships
+//!   (library + espeak-ng-data), used by the tests that compare with the reference fixtures; default
+//!   `<frontend dir>/espeak-ng-1.52.0` (scripts/stage_espeak.sh). The product itself uses the system
+//!   eSpeak NG, which the system-backend tests exercise.
 //! - `CUDA_VISIBLE_DEVICES`: passed through unchanged to the binary under test when set; never forced.
 //! - `KOKORO_BIN` (optional): binary under test; default this crate's `kokoro`.
 //! - `KOKORO_PRIVATE_CHAPTER` (optional, private tests only): path of a private long-form text
@@ -31,6 +35,24 @@ pub fn model_dir() -> PathBuf {
 
 pub fn frontend_dir() -> PathBuf {
     env_path("KOKORO_FRONTEND_DIR").unwrap_or_else(|| data().join("frontend"))
+}
+
+/// The reference eSpeak NG copy (see module docs): (library file, directory containing espeak-ng-data).
+pub fn espeak_reference() -> (PathBuf, PathBuf) {
+    let d = env_path("KOKORO_ESPEAK_REFERENCE_DIR").unwrap_or_else(|| frontend_dir().join("espeak-ng-1.52.0"));
+    let lib = d.join("libespeak-ng.so.1.52.0");
+    assert!(
+        lib.is_file() && d.join("espeak-ng-data/phontab").is_file(),
+        "reference eSpeak NG 1.52.0 not found under {} (scripts/stage_espeak.sh or KOKORO_ESPEAK_REFERENCE_DIR); the reference comparisons cannot run - NOT a pass",
+        d.display()
+    );
+    (lib, d)
+}
+
+/// Make a child `kokoro` use the reference eSpeak NG copy (for comparisons with reference fixtures).
+pub fn pass_reference_espeak(cmd: &mut Command) -> &mut Command {
+    let (lib, data) = espeak_reference();
+    cmd.env("KOKORO_ESPEAK_LIB", lib).env("KOKORO_ESPEAK_DATA", data)
 }
 
 /// The optional private long-form text (see module docs). Unset = the private tests fail.

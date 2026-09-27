@@ -241,3 +241,19 @@ pub fn validator_negative_controls(p: &Pin) {
         }
     }
 }
+
+/// Words the reference left without a pronunciation in one oracle record: it silently drops them
+/// (e.g. "-12", or the "n’t" of "won’t"), whereas the native frontend fails such a line. Same rule as
+/// the native check: a token with a letter or digit, not an explicit [text](/phonemes/) feature
+/// (rating 5), whose phonemes contain no letter.
+pub fn reference_dropped_words(rec: &serde_json::Value) -> Vec<String> {
+    let Some(toks) = rec.get("tokens").and_then(|t| t.as_array()) else { return vec![] };
+    toks.iter()
+        .filter(|t| {
+            let text = t["text"].as_str().unwrap_or("");
+            let ph = t["phonemes"].as_str().unwrap_or("");
+            text.chars().any(char::is_alphanumeric) && t["rating"].as_i64() != Some(5) && !ph.chars().any(char::is_alphabetic)
+        })
+        .map(|t| t["text"].as_str().unwrap_or("").to_string())
+        .collect()
+}

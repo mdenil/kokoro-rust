@@ -13,8 +13,9 @@ pub fn sha256_file(p: &Path) -> String {
     kokoro::engine::sha256_bytes(&std::fs::read(p).unwrap())
 }
 
-/// Render `input` with the binary under test (cleared environment, no Python on PATH, the caller's
-/// CUDA_VISIBLE_DEVICES passed through, extra `env`); returns line -> WAV sha256.
+/// Render `input` with the binary under test (cleared environment, no Python on PATH, the reference
+/// eSpeak NG copy, the caller's CUDA_VISIBLE_DEVICES passed through, extra `env`); returns line -> WAV
+/// sha256 of the lines that succeeded.
 /// GPU renders inside one test binary run one at a time: concurrent processes can exhaust GPU memory,
 /// and a batch that fails is split into smaller batches. The BF16 predictor's results depend on the
 /// batch shape, so a split can change the output. Serializing keeps the comparisons meaningful.
@@ -24,7 +25,10 @@ pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &
     let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::remove_dir_all(out);
     let mut cmd = Command::new(paths::bin());
-    cmd.env_clear().envs(env.iter().copied()).env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
+    // the pinned tables were rendered with the reference eSpeak NG copy
+    cmd.env_clear();
+    paths::pass_reference_espeak(&mut cmd);
+    cmd.envs(env.iter().copied()).env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
     let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--model-dir"])
         .arg(paths::model_dir())
@@ -36,7 +40,8 @@ pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &
         .args(args)
         .output()
         .unwrap();
-    assert!(o.status.success(), "synth failed ({}): {}", o.status, String::from_utf8_lossy(&o.stderr));
+    // exit 1 is accepted only for lines refused because a word has no pronunciation (checked below)
+    assert!(o.status.success() || o.status.code() == Some(1), "synth failed ({}): {}", o.status, String::from_utf8_lossy(&o.stderr));
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(
         !stderr.contains("splitting"),
@@ -50,9 +55,21 @@ pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &
         if let Some(rest) = name.strip_prefix(&format!("{stem}_")).and_then(|r| r.strip_suffix(".wav")) {
             h.insert(rest.parse::<usize>().unwrap(), sha256_file(&p));
         }
+        if let Some(rest) = name.strip_prefix(&format!("{stem}_")).and_then(|r| r.strip_suffix(".json")) {
+            let sc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            if sc["status"] != "ok" {
+                let err = sc["error"].as_str().unwrap_or("");
+                assert!(err.contains("unresolved word"), "{name}: line failed: {err}");
+                h.insert(rest.parse::<usize>().unwrap(), UNRESOLVED.to_string());
+            }
+        }
     }
     h
 }
+
+/// Hash-table value for a line the binary refused because a word has no pronunciation (the
+/// no-dropped-words rule), so such lines stay visible in every comparison.
+pub const UNRESOLVED: &str = "refused:unresolved-word";
 
 pub fn render(input: &Path, voice: &str, args: &[String], out: &Path) -> BTreeMap<usize, String> {
     render_env(input, voice, args, out, &[])
@@ -66,7 +83,7 @@ pub fn diff(got: &BTreeMap<usize, String>, want: &serde_json::Map<String, serde_
         let line: usize = k.parse().unwrap();
         match got.get(&line) {
             None => d.push(format!("line {line}: missing")),
-            Some(h) if h != v.as_str().unwrap() => d.push(format!("line {line}: sha256 {} != pinned {}", &h[..12], &v.as_str().unwrap()[..12])),
+            Some(h) if h != v.as_str().unwrap() => d.push(format!("line {line}: sha256 {} != pinned {}", if h == UNRESOLVED { h } else { &h[..12] }, &v.as_str().unwrap()[..12])),
             _ => {}
         }
     }
