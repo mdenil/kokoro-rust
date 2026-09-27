@@ -5,6 +5,18 @@ Efficient batch text to speech on a local GPU. kokoro-rust runs the
 CUDA: give it a text file with one sentence or paragraph per line, and it reads the whole file
 into one WAV.
 
+## Speed
+
+On an RTX 4090, reading chapter I of *Alice's Adventures in Wonderland* (65 lines, 11 minutes of
+audio) into one WAV:
+
+| | Python Kokoro 0.9.4 | kokoro-rust | |
+|---|---|---|---|
+| Whole command, including startup and model loading | 25.2 s | 2.7 s | 9.4× faster |
+| With the model already loaded | 8.0 s | 1.3 s | 6.0× faster |
+
+Medians of 5 runs (model loaded: 6 passes). [How this was measured](docs/VALIDATION.md#performance)
+
 ## Install
 
 ```

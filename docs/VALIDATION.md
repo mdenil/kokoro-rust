@@ -62,31 +62,51 @@ between the two builds is 1.77 dB (maximum 13.4 dB). tests/strict_reference_diff
 differences.
 
 ## Performance
-Scope:
-- One comparison run (all arms in the same session) on the measurement host.
-- Built from the source state before FMA contraction was enabled, i.e. the strict-rounding BF16x
-  build, and the f32 implementation that has since been removed. The current FMA build has not been
-  re-timed.
+Measured with the current build (BF16x with FMA contraction, one WAV per input) against the
+unmodified Python pipeline, on the public text in this repository.
 
-Benchmark: a private 316-line long-form text (about 49 minutes of audio). The Python baseline is
-the unmodified `KPipeline` driven one line at a time by a usage harness (bench/system_reference.py).
-It is not a measurement of any particular deployed service.
+- Input: `bench/corpus_alice_ch1.txt`, chapter I of *Alice's Adventures in Wonderland* (65 lines;
+  sha256 `0056b945…`; [bench/CORPUS.md](../bench/CORPUS.md)), voice `af_heart`.
+- Both write the whole chapter as one 24 kHz 16-bit WAV: kokoro-rust with its default command,
+  Python with `KPipeline(lang_code='a')` (kokoro 0.9.4, torch 2.12.1, on the same GPU) called line by
+  line, the audio of all lines joined and written with `soundfile` at the end
+  (`bench/system_reference.py --single-wav`). The WAV write is timed in both.
+- Host: RTX 4090, CUDA 12.9, driver 580, Ubuntu 24.04; no other job on the GPU during any run.
+- Build: kokoro-rust commit `33b024d` (binary sha256 `8ae5879e…`).
 
-Median seconds per arm (6 warm passes, 3 cold processes), with the coefficient of variation:
-
-| | Python KPipeline | f32 implementation | BF16x (strict rounding) |
+| | Python KPipeline | kokoro-rust | |
 |---|---|---|---|
-| warm pass (model resident) | 54.31 s (CV 4.0%) | 7.45 s (1.9%) | 4.15 s (0.6%): 13.1× Python, 1.79× f32 |
-| cold process (load + synthesize) | 68.71 s (1.8%) | 8.69 s (2.2%) | 5.81 s (2.9%): 11.8× Python, 1.50× f32 |
+| whole command: start, load the model, synthesize, write (5 runs each) | 25.19 s (23.63–30.69) | 2.67 s (2.57–2.89) | 9.4× |
+| model already loaded: one pass over the file (6 passes each) | 8.01 s (7.37–9.45) | 1.33 s (1.31–1.44) | 6.0× |
 
-- A later, smaller check compared two BF16x builds with byte-identical output (before and after a
-  code restructuring). It showed more cold-start variation (CV 5.2%); the two builds' warm passes
-  agreed within 1.5%.
-- The main sources of speed:
-  - length-bucketed batching over a gap-separated ragged layout (docs/design/BATCHING.md);
-  - fused BF16 tensor-core convolutions with the AdaIN + Snake prologue fused in;
-  - a persistent cooperative LSTM kernel;
-  - a parallel frontend stage and pipelined WAV writing;
-  - loading the model while the frontend starts.
-- The private text itself is not distributed, so these figures cannot be reproduced from this
-  repository alone. `kokoro bench` times pure inference on any phoneme chunk file.
+Medians, with the range in brackets. The whole-command runs alternate between the two programs,
+each a fresh process with no earlier output to reuse. The Python figure includes loading Python,
+torch and the pipeline; its first run (30.7 s) was slower than the rest. The model-loaded rows
+come from benchmark harnesses that load once and then time repeated passes: Python's
+`--passes`, and kokoro-rust's hidden `--bench-passes` option, which is not a normal way to run
+kokoro. Both produced 10.9 minutes of audio (kokoro-rust 15,741,600 samples, Python 15,748,200;
+durations differ slightly because of the reduced precision, see above). They also differ in the
+eSpeak NG used for words missing from the dictionary: the installed 1.51 for kokoro-rust, and the
+1.52.0 bundled with the Python package.
+
+To reproduce (with the Python reference environment of `scripts/setup_reference_env.sh` and the
+test data root of [PORTABILITY.md](PORTABILITY.md)):
+```
+KOKORO_DATA=/path/to/data python3 bench/system_compare.py --corpus bench/corpus_alice_ch1.txt \
+    --out results --output single --engines py,rust --phases cold,warm \
+    --cold-reps 5 --warm-reps 2 --warm-passes 3
+```
+
+The main sources of speed:
+- length-bucketed batching over a gap-separated ragged layout ([design/BATCHING.md](design/BATCHING.md));
+- fused BF16 tensor-core convolutions with the AdaIN + Snake prologue fused in;
+- a persistent cooperative LSTM kernel;
+- a parallel frontend stage and pipelined WAV writing;
+- loading the model while the frontend starts.
+
+### Earlier measurement
+Before FMA contraction was enabled, the strict-rounding BF16x build was compared with the Python
+pipeline and with the since-removed f32 implementation on a private 316-line long-form text (about
+49 minutes of audio, one WAV per line). Medians: whole process 68.71 s (Python), 8.69 s (f32),
+5.81 s (BF16x); model loaded 54.31 s, 7.45 s and 4.15 s. That text is not distributed, so these
+figures can't be reproduced from this repository.
