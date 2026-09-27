@@ -1,7 +1,8 @@
 //! F3 differential test: native misaki EspeakFallback (phonemizer EspeakBackend semantics over the
-//! runtime-loaded pinned libespeak-ng 1.52.0) must reproduce every fallback call the pinned
-//! reference made on the corpora EXACTLY (phonemes + rating).
-use kokoro::frontend::espeak::Espeak;
+//! reference eSpeak NG copy, 1.52.0) must reproduce every fallback call the reference made on the
+//! corpora EXACTLY (phonemes + rating). The product uses the system eSpeak NG, whose version may
+//! pronounce fallback words differently (tests/frontend_system_espeak.rs).
+use kokoro::frontend::espeak::{Espeak, EspeakSource};
 use std::collections::BTreeSet;
 
 #[path = "support/mod.rs"]
@@ -9,8 +10,8 @@ mod support;
 use support::{Corpus, ALICE, CHAPTER, EDGE, LINKS};
 
 fn espeak() -> &'static Espeak {
-    let d = support::paths::frontend_dir().join("espeak-ng-1.52.0");
-    Espeak::get(&d.join("libespeak-ng.so.1.52.0"), &d).expect("pinned espeak-ng (scripts/stage_espeak.sh) — missing is NOT a pass")
+    let (library, data) = support::paths::espeak_reference();
+    Espeak::get(&EspeakSource { library: Some(library), data: Some(data) }).expect("reference eSpeak NG copy — missing is NOT a pass")
 }
 
 fn recorded(c: &Corpus) -> BTreeSet<(String, Option<String>, Option<i64>)> {

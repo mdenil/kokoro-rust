@@ -42,6 +42,8 @@ fn synth_path(input: &Path, out: &Path, extra: &[&str], path: &str) -> Run {
     std::fs::create_dir_all(out.parent().unwrap()).unwrap();
     let mut cmd = Command::new(strace());
     cmd.args(["-f", "-qq", "-e", "trace=execve,execveat", "-o"]).arg(&log).arg(bin()).env_clear().env("PATH", path).env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
+    // outputs are compared with the reference fixtures: use the reference eSpeak NG copy
+    paths::pass_reference_espeak(&mut cmd);
     let o = paths::pass_cuda_env(&mut cmd)
         .args(["synth", "--model-dir"])
         .arg(model_dir())
@@ -80,7 +82,8 @@ type Expected = Vec<(String, Vec<(String, String)>)>;
 fn oracle_lines(c: &Corpus, pick: impl Fn(u64) -> bool) -> Expected {
     let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
     recs.iter()
-        .filter(|r| r["blank"].as_bool() != Some(true) && r.get("error").is_none() && pick(r["line"].as_u64().unwrap()))
+        // lines where the reference dropped a word are refused natively (tests/frontend_system_espeak.rs)
+        .filter(|r| r["blank"].as_bool() != Some(true) && r.get("error").is_none() && support::reference_dropped_words(r).is_empty() && pick(r["line"].as_u64().unwrap()))
         .map(|r| {
             let ch = r["chunks"].as_array().unwrap().iter().map(|c| (c["graphemes"].as_str().unwrap().to_string(), c["phonemes"].as_str().unwrap().to_string())).collect();
             (r["text"].as_str().unwrap().to_string(), ch)
@@ -90,14 +93,15 @@ fn oracle_lines(c: &Corpus, pick: impl Fn(u64) -> bool) -> Expected {
 
 const ALICE_PICK: [u64; 13] = [5, 18, 49, 121, 332, 361, 866, 1399, 1400, 1401, 2, 3, 10];
 
-/// Public corpus for I1: all edge cases + link features + every multi-chunk Alice line + a few
-/// ordinary Alice lines. Cardinality pinned: 98 lines, 111 chunks, 11 multi-chunk lines.
+/// Public corpus for I1: all edge cases (except line 7, where the reference drops "-12") + link
+/// features + every multi-chunk Alice line + a few ordinary Alice lines. Cardinality pinned: 97
+/// lines, 110 chunks, 11 multi-chunk lines.
 fn corpus() -> Expected {
     let mut v = oracle_lines(&EDGE, |_| true);
     v.extend(oracle_lines(&LINKS, |_| true));
     v.extend(oracle_lines(&ALICE, |l| ALICE_PICK.contains(&l)));
-    assert_eq!(v.len(), 65 + 20 + ALICE_PICK.len());
-    assert_eq!(v.iter().map(|c| c.1.len()).sum::<usize>(), 111, "pinned chunk total");
+    assert_eq!(v.len(), 64 + 20 + ALICE_PICK.len());
+    assert_eq!(v.iter().map(|c| c.1.len()).sum::<usize>(), 110, "pinned chunk total");
     assert_eq!(v.iter().filter(|c| c.1.len() > 1).count(), 11, "pinned multi-chunk lines");
     v
 }
@@ -496,19 +500,21 @@ fn fuzz_corpus_through_binary() {
     let m = json(&d.join("out/fuzz.manifest.json"));
     let entries = m["lines"].as_array().unwrap();
     assert_eq!(entries.len(), FUZZ.lines);
-    let (mut ok, mut err, mut over, mut chunks) = (0, 0, 0, 0);
+    let (mut ok, mut err, mut over, mut refused, mut chunks) = (0, 0, 0, 0, 0);
     for (i, rec) in recs.iter().enumerate() {
         let line = i + 1;
         assert_eq!(entries[i]["line"].as_u64(), Some(line as u64));
         let sc = json(&d.join(format!("out/fuzz_{line:05}.json")));
         let want = if rec.get("error").is_some() {
             "error"
+        } else if !support::reference_dropped_words(rec).is_empty() {
+            "refused"
         } else if rec["chunks"].as_array().unwrap().iter().any(|c| c["oversize"] == true) {
             "oversize"
         } else {
             "ok"
         };
-        assert_eq!(sc["status"], want, "line {line}: {}", sc["error"]);
+        assert_eq!(sc["status"], if want == "refused" { "error" } else { want }, "line {line}: {}", sc["error"]);
         match want {
             "ok" => {
                 ok += 1;
@@ -519,6 +525,11 @@ fn fuzz_corpus_through_binary() {
                 chunks += exp.len();
                 let wav = std::fs::read(d.join(format!("out/fuzz_{line:05}.wav"))).unwrap();
                 assert_eq!(sc["audio_sha256"].as_str().unwrap(), sha256_hex(&wav));
+            }
+            "refused" => {
+                refused += 1;
+                assert!(sc["error"].as_str().unwrap().contains("unresolved word"), "line {line}: {}", sc["error"]);
+                assert!(!d.join(format!("out/fuzz_{line:05}.wav")).exists());
             }
             "error" => {
                 err += 1;
@@ -532,7 +543,8 @@ fn fuzz_corpus_through_binary() {
             }
         }
     }
-    assert_eq!((ok + err + over, err, over), (FUZZ.lines, 1, 2), "pinned status counts");
-    assert_eq!(m["counts"]["failed"], err + over);
-    println!("fuzz through binary: {ok} ok ({chunks} chunks, reference-identical), {err} error (reference TypeError), {over} oversize (refused), exit 1, 1 exec");
+    // 135 lines where the reference drops a word (line 292 is also oversize; it is refused first)
+    assert_eq!((ok + err + over + refused, err, over, refused), (FUZZ.lines, 1, 1, 135), "pinned status counts");
+    assert_eq!(m["counts"]["failed"], err + over + refused);
+    println!("fuzz through binary: {ok} ok ({chunks} chunks, reference-identical), {err} error (reference TypeError), {over} oversize (refused), {refused} refused (a word the reference drops), exit 1, 1 exec");
 }

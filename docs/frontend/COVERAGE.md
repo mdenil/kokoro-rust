@@ -16,13 +16,16 @@ Observations
 - The espeak-ng fallback (GPL-3) is rare per token but touches ~23% of the private long-form text's lines.
   A large share is compounds the spaCy tokenizer leaves glued to em-dashes / quotes (e.g. public
   Alice examples: `again—before`, `course—I`, `Alice)—“and`) plus names and rare words — so any
-  replacement for espeak is audible on many lines. Resolved: the product loads the pinned
-  libespeak-ng 1.52.0 at runtime (dynamic loading, never compiled in). Its licensing implications are
-  noted in docs/DEPENDENCIES.md.
+  replacement for espeak is audible on many lines. The product loads the system eSpeak NG at
+  runtime (dynamic loading, never compiled in); see docs/DEPENDENCIES.md. Fallback pronunciations
+  follow the installed eSpeak NG version; the reference comparisons use the reference's 1.52.0.
 - ~17–20% of tokens pass through POS/context-dependent rules (a/an/the/to/used, POS-keyed entries,
   NNP handling) → the spaCy tagger must be ported (F2); a tag-free approximation would change
   pronunciations.
-- No unresolved tokens (with fallback enabled) in any corpus.
+- Words left without a pronunciation: the reference silently drops them (for example "-12" in
+  public edge case 7, the "n’t" of "won’t" on two Alice lines, and many fuzz/soup tokens in other
+  scripts). The native frontend instead fails the line ("unresolved word"), so no word is ever
+  dropped from the audio; tests/frontend_pipeline.rs checks that exactly those lines are refused.
 
 Provenance (open item before any publication): misaki's us/gb gold/silver lexicons ship under the
 repository's Apache-2.0; the upstream README (pinned fba1236) documents no origin for the entries.

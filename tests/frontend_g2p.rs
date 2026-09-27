@@ -18,14 +18,14 @@ struct Recorded {
 }
 
 impl Fallback for Recorded {
-    fn g2p(&self, tk: &MToken) -> (Option<String>, Option<i32>) {
-        match self.map.get(&tk.text) {
+    fn g2p(&self, tk: &MToken) -> anyhow::Result<(Option<String>, Option<i32>)> {
+        Ok(match self.map.get(&tk.text) {
             Some(v) => v.clone(),
             None => {
                 self.missing.borrow_mut().push(tk.text.clone());
                 (None, None)
             }
-        }
+        })
     }
 }
 

@@ -10,6 +10,12 @@
 //!   must be a visible, separately reviewed commit.
 //! The earlier strict-rounding artifact is compared separately (tests/strict_reference_diff.rs,
 //! diagnostic only).
+//! Renders use the reference eSpeak NG copy the tables were made with (tests/support/paths.rs). The
+//! tables predate the no-dropped-words rule: the reference silently dropped "-12" on line 7 of
+//! bench/frontend_edge_cases.txt (its oracle record gives the token no phonemes). The binary now
+//! refuses that line (EXPECTED_REFUSED). In the batched edge cases this also changes how the other
+//! lines are batched, so those cases are reported rather than compared (BATCH_RECOMPOSED); every
+//! other pinned case, including the one-item-per-batch edge case, must still match line for line.
 
 #[path = "support/golden.rs"]
 mod golden;
@@ -63,11 +69,39 @@ fn checker_negative_controls() {
     assert_eq!(golden::diff(&extra, &want).len(), 1);
 }
 
+/// Pinned lines the binary now refuses under the no-dropped-words rule: (case input, lines).
+const EXPECTED_REFUSED: &[(&str, &[usize])] = &[("bench/frontend_edge_cases.txt", &[7])];
+
+/// Pinned cases whose batches contained a now-refused line. Without it the other lines are batched
+/// differently, and the BF16 predictor depends on the batch composition (docs/design/BATCHING.md),
+/// so their other lines are reported, not compared. edge_am_items1 (one item per batch) still
+/// compares every other line: the per-item outputs are unchanged.
+const BATCH_RECOMPOSED: &[&str] = &["edge_af", "edge_am", "edge_af_speed0.8"];
+
 fn check_table(table: &serde_json::Value, input_override: Option<&std::path::Path>, scratch: &std::path::Path) {
     let rows = golden::run_table(table, input_override, scratch);
     let mut failures = vec![];
     for (case, n, d) in &rows {
-        println!("{case}: {n} lines, {} differences from the FMA pin", d.len());
+        let input = table["cases"][case]["input"].as_str().unwrap_or("");
+        let expected: Vec<usize> = EXPECTED_REFUSED.iter().filter(|(i, _)| *i == input).flat_map(|(_, l)| l.iter().copied()).collect();
+        let (refused, d): (Vec<String>, Vec<String>) = d.iter().cloned().partition(|x| x.contains(golden::UNRESOLVED));
+        let refused_lines: Vec<usize> = refused.iter().map(|x| x.trim_start_matches("line ").split(':').next().unwrap().parse().unwrap()).collect();
+        let recomposed = BATCH_RECOMPOSED.contains(&case.as_str());
+        println!(
+            "{case}: {n} lines, {} refused (unresolved word: {refused_lines:?}), {} other differences from the FMA pin{}",
+            refused.len(),
+            d.len(),
+            if recomposed { " (batch recomposed: reported, not compared)" } else { "" }
+        );
+        if refused_lines != expected {
+            failures.push(format!("{case}: refused lines {refused_lines:?} != expected {expected:?}"));
+        }
+        if recomposed {
+            if d.iter().any(|x| x.contains("missing") || x.contains("extra")) {
+                failures.push(format!("{case}: line coverage differs: {d:?}"));
+            }
+            continue;
+        }
         if !d.is_empty() {
             failures.push(format!("{case}: {} lines differ; first: {:?}", d.len(), &d[..d.len().min(3)]));
         }

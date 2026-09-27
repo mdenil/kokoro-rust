@@ -1,6 +1,9 @@
 //! Integrated native frontend differential test: raw line text -> (misaki phoneme string, KPipeline
 //! chunks) with the NATIVE spaCy tokenizer/tagger and the NATIVE espeak fallback, vs the pinned
 //! reference (oracle/frontend_oracle.py). No oracle tokens/tags/fallback outputs are replayed.
+//! Runs with the reference eSpeak NG copy (the fixtures' backend). Lines where the reference silently
+//! dropped a word (a token left without phonemes) must instead FAIL natively (no dropped words).
+use kokoro::frontend::espeak::EspeakSource;
 use kokoro::frontend::pipeline::{Chunk, EnglishFrontend, FrontendPaths};
 use std::sync::OnceLock;
 
@@ -11,13 +14,18 @@ use support::{Corpus, ALICE, CHAPTER, EDGE, FUZZ, LINKS, SOUP};
 
 fn fe() -> &'static EnglishFrontend {
     static FE: OnceLock<EnglishFrontend> = OnceLock::new();
-    FE.get_or_init(|| EnglishFrontend::load(&FrontendPaths::under(&support::paths::frontend_dir())).expect("native frontend data — missing is NOT a pass"))
+    FE.get_or_init(|| {
+        let mut p = FrontendPaths::under(&support::paths::frontend_dir());
+        let (library, data) = support::paths::espeak_reference();
+        p.espeak = EspeakSource { library: Some(library), data: Some(data) };
+        EnglishFrontend::load(&p).expect("native frontend data — missing is NOT a pass")
+    })
 }
 
 fn check(c: &Corpus) {
     let (file, private) = (c.oracle.path, c.private);
     let recs = support::load_corpus(c).unwrap_or_else(|e| panic!("{e}"));
-    let (mut n, mut bad, mut nchunks, mut got_chunks) = (0usize, vec![], 0usize, 0usize);
+    let (mut n, mut bad, mut nchunks, mut got_chunks, mut refused, mut refused_chunks) = (0usize, vec![], 0usize, 0usize, 0usize, 0usize);
     for r in &recs {
         if r["blank"].as_bool() == Some(true) {
             continue;
@@ -26,7 +34,17 @@ fn check(c: &Corpus) {
         let line = r["line"].as_u64().unwrap();
         let t = r["text"].as_str().unwrap();
         let mut why = vec![];
-        if let Some(cls) = r.get("error").and_then(|e| e.as_str()) {
+        let dropped = support::reference_dropped_words(r);
+        if r.get("error").is_none() && !dropped.is_empty() {
+            refused += 1;
+            nchunks += r["chunks"].as_array().unwrap().len();
+            refused_chunks += r["chunks"].as_array().unwrap().len();
+            match fe().line_chunks(t) {
+                Ok(_) => why.push(format!("reference dropped {} word(s); native did not refuse the line", dropped.len())),
+                Err(e) if !format!("{e:#}").contains("unresolved word") => why.push("reference dropped a word; native failed differently".into()),
+                Err(_) => {}
+            }
+        } else if let Some(cls) = r.get("error").and_then(|e| e.as_str()) {
             match fe().line_chunks(t) {
                 Ok(_) => why.push("reference fails this line; native did not".to_string()),
                 Err(e) if !format!("{e:#}").contains(cls) => why.push(format!("reference raises {cls}; native fails differently")),
@@ -49,13 +67,13 @@ fn check(c: &Corpus) {
             bad.push(format!("line {line}: {}", why.join("; ")));
         }
     }
-    println!("{file}: {}/{n} lines exact (phonemes + chunks), {nchunks} chunks", n - bad.len());
+    println!("{file}: {}/{n} lines as expected (exact phonemes + chunks; {refused} refused where the reference dropped a word), {nchunks} chunks", n - bad.len());
     for b in bad.iter().take(10) {
         println!("  {b}");
     }
     assert_eq!(n, c.lines, "lines checked != pinned");
     assert_eq!(nchunks, c.chunks, "reference chunks != pinned");
-    assert_eq!(got_chunks, c.chunks, "native chunks != pinned");
+    assert_eq!(got_chunks + refused_chunks, c.chunks, "native chunks + reference chunks of refused lines != pinned");
     assert!(bad.is_empty(), "{} lines differ", bad.len());
 }
 

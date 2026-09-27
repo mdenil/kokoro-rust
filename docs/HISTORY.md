@@ -7,7 +7,8 @@ active instruction; the current product and its commands are in README.md.
 - Kokoro-82M and its English text pipeline were re-implemented natively in Rust:
   - model: StyleTTS2-style prosody predictor + iSTFTNet decoder;
   - frontend: misaki 0.9.4 G2P, spaCy en_core_web_sm 3.8.0 tokenizer/tagger, espeak-ng 1.52.0
-    fallback.
+    fallback (later: the separately installed system eSpeak NG, with lines that would drop a word
+    refused instead of synthesized).
 - The reference was the unmodified Python pipeline (kokoro 0.9.4, torch 2.12.1).
 - Frontend: phonemes, chunking and fallback calls reproduce the reference exactly on every test
   corpus: frontend edge cases, the full public-domain *Alice* text, link features, a grammar fuzz

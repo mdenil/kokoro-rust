@@ -37,7 +37,7 @@ pub fn subtokenize(word: &str) -> Vec<String> {
 
 /// Fallback G2P for words the lexicon cannot resolve (espeak-ng in production).
 pub trait Fallback {
-    fn g2p(&self, tk: &MToken) -> (Option<String>, Option<i32>);
+    fn g2p(&self, tk: &MToken) -> anyhow::Result<(Option<String>, Option<i32>)>;
 }
 
 pub enum Word {
@@ -278,6 +278,47 @@ pub fn fold_left(tokens: Vec<MToken>, unk: &str) -> Vec<MToken> {
 
 /// G2P.__call__ from the tokenize() output onwards (fold_left, retokenize, lexicon/fallback, merge).
 pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallback>, unk: &str) -> anyhow::Result<(String, Vec<MToken>)> {
+    g2p_tokens_unresolved(lex, toks, fallback, unk).map(|(ps, toks, _)| (ps, toks))
+}
+
+/// A token is a word if it contains a letter or digit (punctuation/symbol-only tokens are not).
+fn is_word(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
+}
+
+/// Pronounced = phonemes containing at least one phoneme letter (not only stress/punctuation).
+fn pronounced(p: Option<&str>) -> bool {
+    p.map_or(false, |p| p.chars().any(char::is_alphabetic))
+}
+
+/// Words the lexicon and the fallback left without a pronunciation (the reference replaces them
+/// with `unk`, i.e. silently drops them). Explicit [text](/phonemes/) features (rating 5) count as
+/// resolved.
+fn unresolved(words: &[Word]) -> Vec<String> {
+    let mut out = vec![];
+    for w in words {
+        match w {
+            Word::One(t) => {
+                if is_word(&t.text) && t.rating != Some(5) && !pronounced(t.phonemes.as_deref()) {
+                    out.push(t.text.clone());
+                }
+            }
+            Word::Many(l) => {
+                let text: String = l.iter().map(|t| format!("{}{}", t.text, t.whitespace)).collect();
+                let joined: String = l.iter().filter_map(|t| t.phonemes.as_deref()).collect();
+                let explicit = l.iter().any(|t| t.rating == Some(5));
+                let missing_part = l.iter().any(|t| is_word(&t.text) && t.phonemes.is_none());
+                if !explicit && is_word(&text) && (missing_part || !pronounced(Some(&joined))) {
+                    out.push(text.trim_end().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// g2p_tokens that also returns the unresolved words (in input order); see `unresolved`.
+pub fn g2p_tokens_unresolved(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallback>, unk: &str) -> anyhow::Result<(String, Vec<MToken>, Vec<String>)> {
     let toks = fold_left(toks, unk);
     let mut words = retokenize(&toks)?;
     let mut ctx = Ctx::default();
@@ -291,7 +332,7 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
                 }
                 if tk.phonemes.is_none() {
                     if let Some(fb) = fallback {
-                        let (p, r) = fb.g2p(tk);
+                        let (p, r) = fb.g2p(tk)?;
                         tk.phonemes = p;
                         tk.rating = r;
                     }
@@ -338,7 +379,7 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
                 }
                 if should_fallback {
                     let tk = merge_tokens(list, None);
-                    let (p, r) = fallback.unwrap().g2p(&tk);
+                    let (p, r) = fallback.unwrap().g2p(&tk)?;
                     list[0].phonemes = p;
                     list[0].rating = r;
                     for x in &mut list[1..] {
@@ -351,6 +392,7 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
             }
         }
     }
+    let missing = unresolved(&words);
     let mut out: Vec<MToken> = words
         .into_iter()
         .map(|w| match w {
@@ -366,7 +408,7 @@ pub fn g2p_tokens(lex: &Lexicon, toks: Vec<MToken>, fallback: Option<&dyn Fallba
         }
     }
     let result = out.iter().map(|t| format!("{}{}", t.phonemes.as_deref().unwrap_or(unk), t.whitespace)).collect::<String>();
-    Ok((result, out))
+    Ok((result, out, missing))
 }
 
 // ------------------------------------------------------------------ KPipeline chunking

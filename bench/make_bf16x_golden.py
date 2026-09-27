@@ -55,7 +55,11 @@ def sha(p):
 def render(binary, extra_env, inp, voice, extra, out):
     if out.exists():
         shutil.rmtree(out)
-    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), **extra_env)  # GPU: caller's CUDA_VISIBLE_DEVICES
+    # the tables use the reference's eSpeak NG 1.52.0 copy (scripts/stage_espeak.sh); binaries that
+    # predate the system-eSpeak change ignore these variables and use the same copy by default
+    ref = DATA / "frontend/espeak-ng-1.52.0"
+    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_ESPEAK_LIB=str(ref / "libespeak-ng.so.1.52.0"),
+               KOKORO_ESPEAK_DATA=str(ref), **extra_env)  # GPU: caller's CUDA_VISIBLE_DEVICES
     cmd = [str(binary), "synth", "--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     (out.parent / f"{out.name}.stderr.txt").write_text(r.stderr)

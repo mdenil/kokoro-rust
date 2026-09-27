@@ -21,8 +21,12 @@ GPUs and platforms are unverified (docs/PORTABILITY.md).
 - NVIDIA GPU with compute capability 8.9 (developed on an RTX 4090) and its driver.
 - CUDA 12.9 toolkit: `nvcc` at build time; cuBLAS at runtime.
 - Model snapshot directory: `config.json`, `kokoro-v1_0.pth`, `voices/`.
-- Frontend data directory: `misaki-0.9.4/`, `spacy-en_core_web_sm-3.8.0/`, `espeak-ng-1.52.0/`
-  (with `libespeak-ng.so.1.52.0`).
+- Frontend data directory: `misaki-0.9.4/`, `spacy-en_core_web_sm-3.8.0/`.
+- eSpeak NG, installed separately from your distribution (Debian/Ubuntu:
+  `sudo apt install libespeak-ng1`, which also installs its data; the `espeak-ng` package works
+  too). It is required for text input and pronounces words missing from the lexicon, so those
+  pronunciations depend on the installed version. eSpeak NG is GPL-3.0-or-later and is loaded at
+  runtime, not included here.
 - Optional: `ffmpeg`, only for `--encode`.
 
 Details and licenses of runtime libraries: docs/DEPENDENCIES.md.
@@ -73,8 +77,9 @@ KOKORO_DATA=/path/to/data cargo test --release --test strict_reference_diff -- -
 - The frontend and CLI suites cover pronunciation fidelity, line mapping, resume, failure handling
   and the Python-free process audit.
 Tests read their data root from `KOKORO_DATA` (required; outside Git). The GPU is the caller's
-`CUDA_VISIBLE_DEVICES` selection. They also need `strace` and `ffmpeg` on PATH and a non-pinned
-libespeak-ng for one negative control. Details and optional overrides: docs/PORTABILITY.md.
+`CUDA_VISIBLE_DEVICES` selection. They also need `strace` and `ffmpeg` on PATH, the system eSpeak
+NG, and, for the comparisons with the reference fixtures, the reference's eSpeak NG 1.52.0 copy
+(`KOKORO_ESPEAK_REFERENCE_DIR`). Details and optional overrides: docs/PORTABILITY.md.
 
 ## Documentation
 - docs/PORTABILITY.md: configuration, tested scope and test prerequisites.

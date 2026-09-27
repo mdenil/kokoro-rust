@@ -1,25 +1,48 @@
 //! OOV fallback: misaki 0.9.4 `EspeakFallback` over phonemizer-fork's EspeakBackend(en-us,
 //! preserve_punctuation=True, with_stress=True, tie='^'), driving libespeak-ng through its C API.
 //!
-//! libespeak-ng (GPL-3.0-or-later) is an EXTERNAL runtime dependency loaded with dlopen from an
-//! explicit path (default: the pinned 1.52.0 copy staged by scripts/stage_espeak.sh). It is never
-//! built into this binary, never a subprocess, and a missing/mismatched library is a hard error.
+//! libespeak-ng (GPL-3.0-or-later) is a separately installed system library, loaded at runtime with
+//! dlopen (default: `libespeak-ng.so.1` through the dynamic loader's search path) together with its
+//! language data (default: the library's own data location; `ESPEAK_DATA_PATH` is honoured by the
+//! library). It is never built into this binary or run as a subprocess. A missing or unusable
+//! library is a hard error. Pronunciations of fallback words follow the installed version; the
+//! version and the hashes of the library and the en-us data it actually loaded are part of the
+//! frontend identity (and so of the resume key).
 
 use super::g2p::Fallback;
 use super::MToken;
 use anyhow::{bail, ensure, Context, Result};
 use fancy_regex::Regex;
+use sha2::{Digest, Sha256};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-/// espeak-ng version the production reference ships (espeakng_loader 0.2.4).
-pub const PINNED_VERSION: &str = "1.52.0";
-/// phonemizer resolves language "en-us" to this voice identifier on the pinned data.
+/// Library name looked up through the dynamic loader when no explicit library is given.
+pub const DEFAULT_LIBRARY: &str = "libespeak-ng.so.1";
+/// phonemizer's tie mode (espeakPHONEMES_TIE) needs espeak-ng >= 1.49.
+pub const MIN_VERSION: (u32, u32) = (1, 49);
+pub const INSTALL_HINT: &str = "install eSpeak NG from your distribution (Debian/Ubuntu: sudo apt install libespeak-ng1), or pass --espeak-lib / --espeak-data";
+/// phonemizer resolves language "en-us" to this voice identifier.
 const VOICE: &str = "gmw/en-US";
 const PHONEMIZER_MARKS: &str = ";:,.!?¡¿—…\"«»“”(){}[]";
+/// Files of espeak-ng-data that en-us phonemization reads (hashed into the identity).
+const EN_US_DATA: [&str; 6] = ["phontab", "phonindex", "phondata", "intonations", "en_dict", "lang/gmw/en-US"];
+/// espeakINITIALIZE_DONT_EXIT: report initialization errors instead of calling exit().
+const INITIALIZE_DONT_EXIT: c_int = 0x8000;
+/// AUDIO_OUTPUT_SYNCHRONOUS, as phonemizer.
+const AUDIO_OUTPUT_SYNCHRONOUS: c_int = 0x02;
 
 type TextToPhonemes = unsafe extern "C" fn(*mut *const c_void, c_int, c_int) -> *const c_char;
+
+/// Which libespeak-ng and language data to load. `None` = the system defaults.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EspeakSource {
+    /// shared library file (default: `libespeak-ng.so.1` via the dynamic loader)
+    pub library: Option<PathBuf>,
+    /// directory CONTAINING `espeak-ng-data/` (default: the library's own data location)
+    pub data: Option<PathBuf>,
+}
 
 struct Api {
     _lib: libloading::Library,
@@ -29,59 +52,130 @@ struct Api {
 /// One process-wide espeak instance (the C library keeps global state; calls are serialized).
 pub struct Espeak {
     api: Mutex<Api>,
+    pub source: EspeakSource,
+    /// version reported by espeak_Info
     pub version: String,
+    /// the library file actually mapped into the process
     pub library: PathBuf,
+    pub library_sha256: String,
+    /// the espeak-ng-data directory the library selected after initialization
     pub data_dir: PathBuf,
+    /// sha256 over the en-us data files (EN_US_DATA: names and contents)
+    pub data_sha256: String,
     marks_re: Regex,
     syllabic_re: Regex,
 }
 
 static INSTANCE: OnceLock<std::result::Result<Espeak, String>> = OnceLock::new();
 
+#[repr(C)]
+struct DlInfo {
+    dli_fname: *const c_char,
+    dli_fbase: *mut c_void,
+    dli_sname: *const c_char,
+    dli_saddr: *mut c_void,
+}
+
+extern "C" {
+    fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// "1.51", "1.52.0", "1.51.1-dev ..." -> (major, minor)
+fn parse_version(v: &str) -> Option<(u32, u32)> {
+    let mut it = v.split(|c: char| !c.is_ascii_digit());
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+}
+
 impl Espeak {
-    /// Load (once per process) libespeak-ng from `library` with voice data `data_dir`
-    /// (the directory CONTAINING `espeak-ng-data`). Later calls must name the same paths.
-    pub fn get(library: &Path, data_dir: &Path) -> Result<&'static Espeak> {
-        let r = INSTANCE.get_or_init(|| Self::load(library, data_dir).map_err(|e| format!("{e:#}")));
+    /// Load (once per process) libespeak-ng and its data. Later calls must name the same source.
+    pub fn get(source: &EspeakSource) -> Result<&'static Espeak> {
+        let r = INSTANCE.get_or_init(|| Self::load(source).map_err(|e| format!("{e:#}")));
         match r {
             Ok(e) => {
-                ensure!(e.library == library && e.data_dir == data_dir, "espeak already loaded from {} / {}", e.library.display(), e.data_dir.display());
+                ensure!(e.source == *source, "espeak-ng already loaded from {} / {}", e.library.display(), e.data_dir.display());
                 Ok(e)
             }
             Err(msg) => bail!("{msg}"),
         }
     }
 
+    /// One line describing the backend (used in the frontend identity).
+    pub fn describe(&self) -> String {
+        format!("espeak-ng {} [lib sha256 {}, en-us data sha256 {}]", self.version, &self.library_sha256[..16], &self.data_sha256[..16])
+    }
+
     #[allow(unsafe_code)]
-    fn load(library: &Path, data_dir: &Path) -> Result<Espeak> {
-        ensure!(library.is_file(), "espeak-ng library not found: {} (run scripts/stage_espeak.sh or pass --espeak-lib)", library.display());
-        ensure!(data_dir.join("espeak-ng-data").is_dir(), "espeak-ng-data not found under {}", data_dir.display());
-        // SAFETY: loading a shared library runs its initializers; the path is an explicit,
-        // pinned libespeak-ng whose symbols are used with their documented C signatures.
-        let lib = unsafe { libloading::Library::new(library) }.with_context(|| format!("dlopen {}", library.display()))?;
-        let (version, t2p) = unsafe {
-            let init: libloading::Symbol<unsafe extern "C" fn(c_int, c_int, *const c_char, c_int) -> c_int> = lib.get(b"espeak_Initialize\0")?;
-            let info: libloading::Symbol<unsafe extern "C" fn(*mut *const c_char) -> *const c_char> = lib.get(b"espeak_Info\0")?;
-            let set_voice: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> c_int> = lib.get(b"espeak_SetVoiceByName\0")?;
-            let t2p: libloading::Symbol<TextToPhonemes> = lib.get(b"espeak_TextToPhonemes\0")?;
-            let path = CString::new(data_dir.as_os_str().as_encoded_bytes())?;
-            // AUDIO_OUTPUT_SYNCHRONOUS (0x02), as phonemizer
-            ensure!(init(0x02, 0, path.as_ptr(), 0) > 0, "espeak_Initialize failed");
-            let v = CStr::from_ptr(info(std::ptr::null_mut())).to_string_lossy().into_owned();
-            let voice = CString::new(VOICE)?;
-            ensure!(set_voice(voice.as_ptr()) == 0, "espeak_SetVoiceByName({VOICE}) failed");
-            (v, *t2p)
+    fn load(source: &EspeakSource) -> Result<Espeak> {
+        let lib_name: &std::ffi::OsStr = match &source.library {
+            Some(p) => {
+                ensure!(p.is_file(), "espeak-ng library not found: {} ({INSTALL_HINT})", p.display());
+                p.as_os_str()
+            }
+            None => DEFAULT_LIBRARY.as_ref(),
         };
-        ensure!(version.starts_with(PINNED_VERSION), "espeak-ng version {version} != pinned {PINNED_VERSION} (pronunciations would differ from the reference)");
+        if let Some(d) = &source.data {
+            ensure!(d.join("espeak-ng-data/phontab").is_file(), "espeak-ng-data (with phontab) not found under {} (--espeak-data names the directory CONTAINING espeak-ng-data)", d.display());
+        }
+        // SAFETY: loading a shared library runs its initializers; libespeak-ng's symbols are used
+        // with their documented C signatures (speak_lib.h).
+        let lib = unsafe { libloading::Library::new(lib_name) }.map_err(|e| anyhow::anyhow!("cannot load the eSpeak NG library {}: {e}; {INSTALL_HINT}", lib_name.to_string_lossy()))?;
+        let sym = |name: &str| format!("{} has no symbol {name}: not a usable libespeak-ng ({INSTALL_HINT})", lib_name.to_string_lossy());
+        let (version, library, data_dir, t2p) = unsafe {
+            let init: libloading::Symbol<unsafe extern "C" fn(c_int, c_int, *const c_char, c_int) -> c_int> = lib.get(b"espeak_Initialize\0").with_context(|| sym("espeak_Initialize"))?;
+            let info: libloading::Symbol<unsafe extern "C" fn(*mut *const c_char) -> *const c_char> = lib.get(b"espeak_Info\0").with_context(|| sym("espeak_Info"))?;
+            let set_voice: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> c_int> = lib.get(b"espeak_SetVoiceByName\0").with_context(|| sym("espeak_SetVoiceByName"))?;
+            let t2p: libloading::Symbol<TextToPhonemes> = lib.get(b"espeak_TextToPhonemes\0").with_context(|| sym("espeak_TextToPhonemes"))?;
+            let t2p: TextToPhonemes = *t2p;
+            // the file the loader actually mapped (the default name is resolved by the loader)
+            let mut dl = DlInfo { dli_fname: std::ptr::null(), dli_fbase: std::ptr::null_mut(), dli_sname: std::ptr::null(), dli_saddr: std::ptr::null_mut() };
+            ensure!(dladdr(t2p as *const c_void, &mut dl) != 0 && !dl.dli_fname.is_null(), "cannot locate the loaded eSpeak NG library file");
+            let library = PathBuf::from(CStr::from_ptr(dl.dli_fname).to_string_lossy().into_owned());
+            let version = CStr::from_ptr(info(std::ptr::null_mut())).to_string_lossy().into_owned();
+            match parse_version(&version) {
+                Some(v) if v >= MIN_VERSION => {}
+                _ => bail!("eSpeak NG {version} at {} is not supported (need >= {}.{}; {INSTALL_HINT})", library.display(), MIN_VERSION.0, MIN_VERSION.1),
+            }
+            let path = source.data.as_ref().map(|d| CString::new(d.as_os_str().as_encoded_bytes())).transpose()?;
+            // with DONT_EXIT a data error is printed by the library and initialization continues;
+            // the selected data directory is verified below
+            ensure!(init(AUDIO_OUTPUT_SYNCHRONOUS, 0, path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()), INITIALIZE_DONT_EXIT) > 0, "espeak_Initialize failed");
+            let mut data: *const c_char = std::ptr::null();
+            info(&mut data);
+            ensure!(!data.is_null(), "eSpeak NG did not report its data directory");
+            let data_dir = PathBuf::from(CStr::from_ptr(data).to_string_lossy().into_owned());
+            ensure!(data_dir.join("phontab").is_file(), "eSpeak NG language data not found (library {} looked in {}); {INSTALL_HINT}", library.display(), data_dir.display());
+            let voice = CString::new(VOICE)?;
+            ensure!(set_voice(voice.as_ptr()) == 0, "eSpeak NG voice {VOICE} not available in {} ({INSTALL_HINT})", data_dir.display());
+            (version, library, data_dir, t2p)
+        };
+        let library_sha256 = sha256_hex(&std::fs::read(&library).with_context(|| format!("hashing {}", library.display()))?);
+        let mut h = Sha256::new();
+        for f in EN_US_DATA {
+            let bytes = std::fs::read(data_dir.join(f)).with_context(|| format!("eSpeak NG data file {} missing ({INSTALL_HINT})", data_dir.join(f).display()))?;
+            h.update(f.as_bytes());
+            h.update(Sha256::digest(&bytes));
+        }
+        let data_sha256: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         let class: String = PHONEMIZER_MARKS.chars().map(|c| regex_escape(c)).collect();
-        Ok(Espeak {
+        let e = Espeak {
             api: Mutex::new(Api { _lib: lib, text_to_phonemes: t2p }),
+            source: source.clone(),
             version,
-            library: library.to_path_buf(),
-            data_dir: data_dir.to_path_buf(),
+            library,
+            library_sha256,
+            data_dir,
+            data_sha256,
             marks_re: Regex::new(&format!(r"(\s*[{class}]+\s*)+"))?,
             syllabic_re: Regex::new(r"(\S)\x{0329}")?,
-        })
+        };
+        // usability probe: an ordinary word must phonemize
+        let probe = e.fallback("hello")?;
+        ensure!(probe.as_deref().map_or(false, |p| p.chars().any(char::is_alphabetic)), "eSpeak NG {} produced no phonemes for a probe word (library {}, data {})", e.version, e.library.display(), e.data_dir.display());
+        Ok(e)
     }
 
     /// phonemizer EspeakWrapper.text_to_phonemes(text, tie=True): IPA with U+0361 ties, all clauses.
@@ -227,13 +321,12 @@ impl Espeak {
 }
 
 impl Fallback for Espeak {
-    fn g2p(&self, tk: &MToken) -> (Option<String>, Option<i32>) {
-        match self.fallback(&tk.text) {
-            Ok(Some(p)) => (Some(p), Some(2)),
-            Ok(None) => (None, None),
-            // an internal espeak failure must not silently drop words
-            Err(e) => panic!("espeak fallback failed on a token: {e:#}"),
-        }
+    fn g2p(&self, tk: &MToken) -> Result<(Option<String>, Option<i32>)> {
+        // an internal espeak failure fails the input line (never a silently dropped word)
+        Ok(match self.fallback(&tk.text).with_context(|| format!("eSpeak NG fallback on {:?}", tk.text))? {
+            Some(p) => (Some(p), Some(2)),
+            None => (None, None),
+        })
     }
 }
 

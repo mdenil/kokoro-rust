@@ -30,7 +30,7 @@ enum InputFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 enum Frontend {
-    /// Native English frontend (misaki 0.9.4 G2P + spaCy tokenizer/tagger + espeak-ng fallback).
+    /// Native English frontend (misaki 0.9.4 G2P + spaCy tokenizer/tagger + system eSpeak NG fallback).
     Native,
     /// No text frontend: only --input-format phonemes is accepted.
     None,
@@ -77,13 +77,17 @@ enum Cmd {
         input_format: InputFormat,
         #[arg(long, value_enum, default_value = "native")]
         frontend: Frontend,
-        /// Directory with the pinned frontend data (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/,
-        /// espeak-ng-1.52.0/) [env: KOKORO_FRONTEND_DIR]
+        /// Directory with the frontend data (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/)
         #[arg(long, env = "KOKORO_FRONTEND_DIR")]
         frontend_dir: Option<PathBuf>,
-        /// libespeak-ng 1.52.0 shared library (default: <frontend-dir>/espeak-ng-1.52.0/libespeak-ng.so.1.52.0)
-        #[arg(long)]
+        /// eSpeak NG shared library (default: the system libespeak-ng.so.1, found by the dynamic
+        /// loader; Debian/Ubuntu package libespeak-ng1)
+        #[arg(long, env = "KOKORO_ESPEAK_LIB")]
         espeak_lib: Option<PathBuf>,
+        /// Directory CONTAINING espeak-ng-data/ (default: the library's own data location, or
+        /// $ESPEAK_DATA_PATH)
+        #[arg(long, env = "KOKORO_ESPEAK_DATA")]
+        espeak_data: Option<PathBuf>,
         #[arg(long)]
         out_dir: PathBuf,
         #[arg(long, value_enum, default_value = "pcm16")]
@@ -271,6 +275,7 @@ fn synth(
     frontend: Frontend,
     frontend_dir: Option<PathBuf>,
     espeak_lib: Option<PathBuf>,
+    espeak_data: Option<PathBuf>,
     out_dir: PathBuf,
     format: Format,
     seed: u64,
@@ -310,10 +315,12 @@ fn synth(
             (InputFormat::Text, Frontend::Native) => {
                 let dir = frontend_dir.context("--frontend-dir (or KOKORO_FRONTEND_DIR) is required for text input")?;
                 let mut paths = FrontendPaths::under(&dir);
-                if let Some(lib) = espeak_lib {
-                    paths.espeak_lib = lib;
-                }
-                Some(EnglishFrontend::load(&paths).with_context(|| format!("loading the native text frontend from {} (--frontend-dir / KOKORO_FRONTEND_DIR; expects misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, espeak-ng-1.52.0/)", dir.display()))?)
+                paths.espeak.library = espeak_lib;
+                paths.espeak.data = espeak_data;
+                let fe = EnglishFrontend::load(&paths).with_context(|| format!("loading the native text frontend (data from {}: --frontend-dir / KOKORO_FRONTEND_DIR, expects misaki-0.9.4/ and spacy-en_core_web_sm-3.8.0/)", dir.display()))?;
+                let es = fe.espeak();
+                eprintln!("eSpeak NG {}: library {}, data {}", es.version, es.library.display(), es.data_dir.display());
+                Some(fe)
             }
             _ => None,
         };
@@ -690,6 +697,7 @@ fn synth(
         "bom_stripped": inp.bom_stripped, "crlf_lines": inp.crlf_lines, "blank_lines_policy": format!("{blank_lines:?}"),
         "naming": format!("{}_<1-based line, width {width}>.wav / .json", inp.stem),
         "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
+        "espeak": fe.as_ref().map(|f| { let e = f.espeak(); serde_json::json!({"version": e.version, "library": e.library, "library_sha256": e.library_sha256, "data_dir": e.data_dir, "en_us_data_sha256": e.data_sha256}) }),
         "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
     });
     let ts = now();
@@ -796,8 +804,8 @@ pub fn cli_main() -> Result<i32> {
         }
     }
     match Cli::parse().cmd {
-        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
-            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)
+        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
+            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)
         }
         Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out).map(|_| 0),
     }
