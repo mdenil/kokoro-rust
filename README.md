@@ -10,53 +10,38 @@ It is a port of the reference Python pipeline ([hexgrad/kokoro](https://github.c
 0.9.4 with misaki 0.9.4) and was checked against it; see [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Requirements
-Tested on Ubuntu 24.04 (x86_64) with an RTX 4090, NVIDIA driver 580, CUDA 12.9 and Rust 1.98.
-Other GPUs, distributions and versions are untested ([docs/PORTABILITY.md](docs/PORTABILITY.md)).
+Tested on Ubuntu 24.04 (x86_64) with an RTX 4090, NVIDIA driver 580 and CUDA 12.9. Other GPUs,
+distributions and versions are untested ([docs/PORTABILITY.md](docs/PORTABILITY.md)).
 
-- An NVIDIA GPU with compute capability 8.9 (Ada, e.g. RTX 40-series) and its driver. Older GPUs
-  are refused at startup; newer ones may work but are unverified.
-- The CUDA toolkit: `nvcc` to build, cuBLAS at run time.
-- A Rust toolchain (`cargo`).
-- eSpeak NG, installed from your distribution. On Debian/Ubuntu:
-  `sudo apt install libespeak-ng1` (this also installs its data; the `espeak-ng` package works too).
-- For the one-time asset download: `bash`, `curl`, `unzip`, `sha256sum`, and Python 3.12 with the
-  `venv` module (used once to export spaCy data; not needed afterwards).
+- Linux x86_64. Release binaries need glibc 2.35 or newer (e.g. Ubuntu 22.04 or later).
+- An NVIDIA GPU with compute capability 8.9 (Ada, e.g. RTX 40-series). Older GPUs are refused at
+  startup; newer ones may work but are unverified.
+- An NVIDIA driver that supports CUDA 12.9, and cuBLAS from CUDA 12 (`libcublas.so.12`, e.g.
+  NVIDIA's `libcublas-12-9` package or the CUDA Toolkit). The rest of the CUDA Toolkit is not
+  needed to run kokoro.
+- eSpeak NG, from your distribution (Debian/Ubuntu: `sudo apt install libespeak-ng1`).
 - Optional: `ffmpeg`, only for `--encode`.
 
-## Installation
-Build:
+## Install
 ```
-git clone https://github.com/mdenil/kokoro-rust.git
-cd kokoro-rust
-cargo build --release
+curl -fsSL https://raw.githubusercontent.com/mdenil/kokoro-rust/main/install.sh | bash
 ```
-The binary is `target/release/kokoro`. The build looks for `nvcc` in `$NVCC`, `$CUDA_HOME/bin`,
-`$CUDA_PATH/bin`, `PATH`, then `/usr/local/cuda/bin`.
-
-Download the model and language data into a directory of your choice (about 500 MB, of which the
-166 MB Python environment under `<dir>/tools/` can be deleted once setup has succeeded):
-```
-scripts/fetch_assets.sh ~/kokoro-data
-scripts/prepare_spacy_assets.sh ~/kokoro-data
-```
-- `fetch_assets.sh` downloads the Kokoro-82M weights, config and the voices `af_heart` and
-  `am_adam` from Hugging Face (revision `f3ff3571`), and the misaki 0.9.4 lexicons from PyPI.
-- `prepare_spacy_assets.sh` creates a Python virtual environment with exact package versions from PyPI
-  and the `en_core_web_sm` 3.8.0 model from GitHub, and exports the tokenizer and tagger data.
-- Checked against pinned SHA-256 hashes: the model files, the misaki and `en_core_web_sm` wheels,
-  the extracted lexicons and the six exported spaCy files. The Python packages of the export
-  environment are pinned to exact versions only, not hashes; the exported files are what is
-  verified. Both scripts can be re-run; files that already verify are kept.
-- eSpeak NG is not downloaded; it comes from your system (see Requirements).
+- Installs the latest release for your user only: the `kokoro` command in `~/.local/bin`, the
+  program and its language data in `~/.local/share/kokoro`, and the Kokoro-82M model and voices
+  (about 330 MB, from Hugging Face). No Python or compiler is needed.
+- It checks for the GPU libraries above and tells you what is missing; it never installs the
+  NVIDIA driver or CUDA. If eSpeak NG is missing, it asks before running
+  `sudo apt-get install libespeak-ng1`.
+- Every download is verified against a SHA-256 checksum. Running it again updates to the latest
+  release and reuses the downloaded model; a failed run leaves the existing installation as it was.
+- Options, the installed layout and how to uninstall: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Usage
 ```
-target/release/kokoro synth \
-    --model-dir ~/kokoro-data/model --frontend-dir ~/kokoro-data/frontend \
-    --input book.txt --out-dir out/
+kokoro synth --input book.txt --out-dir out/
 ```
-`--model-dir` and `--frontend-dir` can also be given as `KOKORO_MODEL_DIR` and
-`KOKORO_FRONTEND_DIR`.
+The installed command finds its model and language data by itself; `--model-dir` and
+`--frontend-dir` (or `KOKORO_MODEL_DIR` and `KOKORO_FRONTEND_DIR`) select others.
 
 Input: UTF-8 text, one utterance per line. Blank lines are errors by default
 (`--blank-lines skip` records them without audio instead).
@@ -77,8 +62,8 @@ recorded hash and nothing that affects it (text, voice, speed, model, frontend d
 installation, …) has changed. `--force` re-synthesizes everything.
 
 Common options:
-- `--voice am_adam`: voice (default `af_heart`); a `.pt` path or `a,b` (average) also work. The
-  setup script downloads only `af_heart` and `am_adam`, the two tested voices.
+- `--voice am_adam`: voice (default `af_heart`); a `.pt` path or `a,b` (average) also work. Only
+  `af_heart` and `am_adam`, the two tested voices, are downloaded.
 - `--speed 1.1`: speaking rate.
 - `--encode flac` (or `mp3`, `opus`, …): also encode each WAV with `ffmpeg`.
 - `--cuda-device N`: GPU index among the visible devices.
@@ -88,6 +73,40 @@ Common options:
   `--prep-threads`, `--write-threads`): performance tuning only.
 
 `kokoro synth --help` lists everything.
+
+## Build from source
+Additionally needed: the CUDA Toolkit's `nvcc` (12.9 tested), a Rust toolchain (1.98 tested), and
+for the one-time data setup `bash`, `curl`, `unzip`, `sha256sum` and Python 3.12 with the `venv`
+module.
+```
+git clone https://github.com/mdenil/kokoro-rust.git
+cd kokoro-rust
+cargo build --release
+```
+The binary is `target/release/kokoro`. The build looks for `nvcc` in `$NVCC`, `$CUDA_HOME/bin`,
+`$CUDA_PATH/bin`, `PATH`, then `/usr/local/cuda/bin`.
+
+Download the model and language data into a directory of your choice (about 500 MB, of which the
+166 MB Python environment under `<dir>/tools/` can be deleted once setup has succeeded):
+```
+scripts/fetch_assets.sh ~/kokoro-data
+scripts/prepare_spacy_assets.sh ~/kokoro-data
+```
+- `fetch_assets.sh` downloads the Kokoro-82M weights, config and the voices `af_heart` and
+  `am_adam` from Hugging Face (revision `f3ff3571`), and the misaki 0.9.4 lexicons from PyPI.
+- `prepare_spacy_assets.sh` creates a Python virtual environment with exact package versions from
+  PyPI and the `en_core_web_sm` 3.8.0 model from GitHub, and exports the tokenizer and tagger data.
+- Checked against pinned SHA-256 hashes: the model files, the misaki and `en_core_web_sm` wheels,
+  the extracted lexicons and the six exported spaCy files. The Python packages of the export
+  environment are pinned to exact versions only, not hashes; the exported files are what is
+  verified. Both scripts can be re-run; files that already verify are kept.
+
+Then point the command at that data:
+```
+target/release/kokoro synth \
+    --model-dir ~/kokoro-data/model --frontend-dir ~/kokoro-data/frontend \
+    --input book.txt --out-dir out/
+```
 
 ## Limitations
 - American English only, GPU only (there is no CPU mode), one tested GPU model.
@@ -116,6 +135,7 @@ These keep their own licenses (details in [docs/THIRD_PARTY.md](docs/THIRD_PARTY
 - CUDA driver and cuBLAS: NVIDIA's license terms. They are not included here.
 
 ## Documentation
+- [docs/INSTALL.md](docs/INSTALL.md): installer options, installed layout, release packages.
 - [docs/PORTABILITY.md](docs/PORTABILITY.md): configuration reference, tested scope, and how to run the tests.
 - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md): what the program loads at run time.
 - [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md): third-party components, origins and licenses.

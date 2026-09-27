@@ -14,7 +14,7 @@ use std::time::Instant;
 pub const ENGINE_VERSION: &str = concat!("kokoro-rust ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser)]
-#[command(name = "kokoro", version, about = "Native Rust + CUDA speech synthesis for hexgrad/Kokoro-82M (BF16 mixed precision, the accepted configuration)")]
+#[command(name = "kokoro", version, about = "Native Rust + CUDA speech synthesis for hexgrad/Kokoro-82M (BF16 mixed precision)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

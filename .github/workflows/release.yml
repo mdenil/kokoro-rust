@@ -1,0 +1,97 @@
+# Builds the release packages for a pushed v* tag and attaches them to a DRAFT GitHub release.
+# Publishing the draft is a manual step. The tag may point to any commit.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    # built in an Ubuntu 22.04 container so the binary runs on glibc 2.35 and newer
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    env:
+      CUDA_KEYRING_SHA256: d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df
+      RUSTUP_INIT_SHA256: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+      RUST_TOOLCHAIN: 1.98.1
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential python3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install CUDA 12.9 nvcc (NVIDIA apt repository)
+        run: |
+          curl -fsSL -o /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          echo "$CUDA_KEYRING_SHA256  /tmp/cuda-keyring.deb" | sha256sum -c -
+          dpkg -i /tmp/cuda-keyring.deb
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cuda-nvcc-12-9=12.9.86-1
+          echo "NVCC=/usr/local/cuda-12.9/bin/nvcc" >> "$GITHUB_ENV"
+      - name: Install Rust
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init
+          echo "$RUSTUP_INIT_SHA256  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build and package the binary
+        run: scripts/package_release.sh binary "$GITHUB_REF_NAME" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary
+          path: dist/kokoro-x86_64-linux.tar.gz
+          if-no-files-found: error
+
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Export the frontend data
+        # Python 3.12 (Ubuntu 24.04's python3) is used here only, at build time
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-venv unzip
+          scripts/fetch_assets.sh --frontend-only "$RUNNER_TEMP/data"
+          PYTHON=python3 scripts/prepare_spacy_assets.sh "$RUNNER_TEMP/data"
+          scripts/package_release.sh frontend "$GITHUB_REF_NAME" dist "$RUNNER_TEMP/data"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend
+          path: dist/kokoro-frontend.tar.gz
+          if-no-files-found: error
+
+  draft-release:
+    needs: [binary, frontend]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: scripts/package_release.sh sums dist
+      - name: Create the draft release with all packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes "Install: see README.md" \
+            dist/kokoro-x86_64-linux.tar.gz dist/kokoro-frontend.tar.gz dist/SHA256SUMS
