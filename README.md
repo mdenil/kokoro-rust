@@ -2,8 +2,8 @@
 
 Efficient batch text to speech on a local GPU. kokoro-rust runs the
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) text-to-speech model natively in Rust and
-CUDA: give it a text file with one sentence or paragraph per line, and it writes one WAV file per
-line.
+CUDA: give it a text file with one sentence or paragraph per line, and it reads the whole file
+into one WAV.
 
 ## Install
 
@@ -17,10 +17,10 @@ compatible NVIDIA GPU with CUDA installed ([hardware requirements](docs/USAGE.md
 ## Use
 
 ```
-kokoro synth --input book.txt --out-dir out/
+kokoro synth book.txt
 ```
 
-Each line of `book.txt` becomes `out/book_00001.wav`, `out/book_00002.wav`, and so on.
+This writes `book.wav` in the current directory.
 
 ## More
 

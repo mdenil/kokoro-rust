@@ -60,7 +60,9 @@ def render(binary, extra_env, inp, voice, extra, out):
     ref = DATA / "frontend/espeak-ng-1.52.0"
     env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_ESPEAK_LIB=str(ref / "libespeak-ng.so.1.52.0"),
                KOKORO_ESPEAK_DATA=str(ref), **extra_env)  # GPU: caller's CUDA_VISIBLE_DEVICES
-    cmd = [str(binary), "synth", "--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
+    # current binaries write one WAV per input by default; the tables are per line
+    per_line = [] if binary == ACCEPTED else ["--per-line", "--diagnostics"]
+    cmd = [str(binary), "synth"] + per_line + ["--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     (out.parent / f"{out.name}.stderr.txt").write_text(r.stderr)
     if r.returncode != 0:

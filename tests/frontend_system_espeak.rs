@@ -94,7 +94,7 @@ fn run(input: &Path, out: &Path, extra: &[&str], env: &[(&str, &Path)]) -> (i32,
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let o = paths::pass_cuda_env(&mut cmd).args(["synth", "--model-dir"]).arg(paths::model_dir()).arg("--input").arg(input).arg("--out-dir").arg(out).args(extra).output().unwrap();
+    let o = paths::pass_cuda_env(&mut cmd).args(["synth", "--per-line", "--diagnostics", "--model-dir"]).arg(paths::model_dir()).arg("--input").arg(input).arg("--out-dir").arg(out).args(extra).output().unwrap();
     (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stderr).into_owned())
 }
 

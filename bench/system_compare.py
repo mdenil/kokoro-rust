@@ -173,7 +173,9 @@ def main():
         if engine == "py":
             c = [PY, str(HERE / "system_reference.py"), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice, "--passes", str(passes)]
             return c + (["--attribute"] if attribute else [])
-        c = [str(BINS[engine]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
+        # current binaries write one WAV per input by default; this harness reads per-line outputs
+        per_line = ["--per-line", "--diagnostics"] if engine == "rust" else []
+        c = [str(BINS[engine]), "synth"] + per_line + ["--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
              "--timeline", str(logs / f"{name}.timeline.json")]
         return c + (["--bench-passes", str(passes)] if passes else [])
 

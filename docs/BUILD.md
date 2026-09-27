@@ -30,9 +30,8 @@ scripts/prepare_spacy_assets.sh ~/kokoro-data
 
 Then point the command at that data:
 ```
-target/release/kokoro synth \
-    --model-dir ~/kokoro-data/model --frontend-dir ~/kokoro-data/frontend \
-    --input book.txt --out-dir out/
+target/release/kokoro synth --model-dir ~/kokoro-data/model --frontend-dir ~/kokoro-data/frontend book.txt
 ```
+This writes `book.wav` in the current directory; see [USAGE.md](USAGE.md) for the options.
 
 Release packages are built with `scripts/package_release.sh` ([INSTALL.md](INSTALL.md#release-packages)).

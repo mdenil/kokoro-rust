@@ -41,7 +41,7 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
   message that names the option to fix.
 - The eSpeak NG version and the sha256 of the library file and of the en-us data it loaded are
   part of the frontend identity: switching to another installation re-synthesizes instead of
-  reusing outputs. They are also recorded in `<stem>.manifest.json` (`espeak`).
+  reusing outputs. With `--diagnostics` they are also recorded in `<stem>.manifest.json` (`espeak`).
 - Relative paths resolve against the working directory.
 - Apart from the variables in the table, the binary reads no environment variables, except two:
   - `KOKORO_PRECISION`, only to refuse values other than `bf16x`;

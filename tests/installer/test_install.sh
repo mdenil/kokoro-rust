@@ -123,12 +123,14 @@ no_file() { [[ ! -e $1 ]]; }
 launcher_points_to() { grep -qF "$2/bin/kokoro" "$1/.local/bin/kokoro"; }
 no_staging() { ! compgen -G "$1/.install.*" > /dev/null; }
 
-synth() {  # synth PREFIX NAME [args...]: the installed command, no paths given; sets SYNTH_RC
+synth() {  # synth PREFIX NAME [args...]: `kokoro synth NAME.txt --diagnostics` run inside NAME-out/
+  # (the installed command, no paths given); sets SYNTH_RC
   local prefix=$1 name=$2
   shift 2
   [[ -e $WORK/$name.txt ]] || printf 'Hello from the installed kokoro command.\n' > "$WORK/$name.txt"
-  env -i HOME="$prefix" PATH="$prefix/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-    kokoro synth --input "$WORK/$name.txt" --out-dir "$WORK/$name-out" "$@" > "$WORK/$name.synth.log" 2>&1
+  mkdir -p "$WORK/$name-out"
+  (cd "$WORK/$name-out" && env -i HOME="$prefix" PATH="$prefix/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+    kokoro synth "$WORK/$name.txt" --diagnostics "$@" > "$WORK/$name.synth.log" 2>&1)
   SYNTH_RC=$?
   echo "  [synth $name] exit=$SYNTH_RC"
 }
@@ -167,12 +169,13 @@ check "PATH hint printed (bin dir not on PATH)" has "is not on your PATH"
 synth "$P" s1
 check "installed command, no path options: synthesis exit 0" test "$SYNTH_RC" = 0
 check "manifest: 1 done, 0 resumed, 0 failed, complete" manifest_is s1 1 0 0
-check "WAV is 24 kHz mono 16-bit PCM" wav_is_audio "$WORK/s1-out/s1_00001.wav"
-wav1=$(sha256sum < "$WORK/s1-out/s1_00001.wav")
+check "WAV is 24 kHz mono 16-bit PCM" wav_is_audio "$WORK/s1-out/s1.wav"
+check "one WAV + the manifest in the current directory" test "$(ls "$WORK/s1-out")" = "$(printf 's1.manifest.json\ns1.wav')"
+wav1=$(sha256sum < "$WORK/s1-out/s1.wav")
 synth "$P" s1
 check "installed command rerun (resume): exit 0" test "$SYNTH_RC" = 0
 check "resume manifest: 0 done, 1 resumed, 0 failed, complete" manifest_is s1 0 1 0
-check "resumed WAV unchanged" test "$(sha256sum < "$WORK/s1-out/s1_00001.wav")" = "$wav1"
+check "resumed WAV unchanged" test "$(sha256sum < "$WORK/s1-out/s1.wav")" = "$wav1"
 mkdir -p "$MIRROR"
 cp -r "$D/models/$REV/." "$MIRROR/"
 MIRROR_URL="file://$MIRROR"
@@ -358,11 +361,11 @@ fi
 
 echo "S20 explicit paths still override the installed defaults"
 env -i HOME="$P" PATH="$P/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-  kokoro synth --model-dir "$WORK/no-such-model" --input "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20a.log" 2>&1
+  kokoro synth --model-dir "$WORK/no-such-model" "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20a.log" 2>&1
 RC=$?; OUT=$(cat "$WORK/s20a.log")
 check "--model-dir override used (exit 2 naming it)" bash -c "[[ $RC == 2 ]] && grep -qF '$WORK/no-such-model' '$WORK/s20a.log'"
 env -i HOME="$P" PATH="$P/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" KOKORO_FRONTEND_DIR="$WORK/no-such-frontend" \
-  kokoro synth --input "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20b.log" 2>&1
+  kokoro synth "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20b.log" 2>&1
 RC=$?
 check "KOKORO_FRONTEND_DIR override used (exit 2 naming it)" bash -c "[[ $RC == 2 ]] && grep -qF '$WORK/no-such-frontend' '$WORK/s20b.log'"
 

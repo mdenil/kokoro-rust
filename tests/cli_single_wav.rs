@@ -173,8 +173,11 @@ fn resume_reuses_line_audio_and_the_finished_file() {
     assert_eq!(std::fs::metadata(cwd.join("book.wav")).unwrap().modified().unwrap(), mtime, "finished file not rewritten");
     let m = json(&cwd.join("book.manifest.json"));
     assert_eq!(m["counts"], serde_json::json!({"done": 0, "resumed": 3, "failed": 0}));
-    // a damaged and a missing cached line are synthesized again; the result is the same file
+    // a damaged and a missing cached line are synthesized again. They are batched differently
+    // from the first run, and the BF16 predictor depends on the batch, so their audio may differ
+    // slightly; the file must be exactly the current line audio, and line 1 is kept as it was.
     let cache = cwd.join(".kokoro/book");
+    let line1 = sha(&cache.join("book_00001.wav"));
     let mut b = std::fs::read(cache.join("book_00002.wav")).unwrap();
     b[100] ^= 0xff;
     std::fs::write(cache.join("book_00002.wav"), &b).unwrap();
@@ -183,7 +186,9 @@ fn resume_reuses_line_audio_and_the_finished_file() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     let m = json(&cwd.join("book.manifest.json"));
     assert_eq!(m["counts"], serde_json::json!({"done": 2, "resumed": 1, "failed": 0}));
-    assert_eq!(sha(&cwd.join("book.wav")), before, "same audio after re-synthesis");
+    assert_eq!(sha(&cache.join("book_00001.wav")), line1, "resumed line untouched");
+    let concat: Vec<u8> = (1..=3).flat_map(|l| payload(&cache.join(format!("book_{l:05}.wav")))).collect();
+    assert_eq!(payload(&cwd.join("book.wav")), concat, "rebuilt from the current line audio, in order");
     // editing one line changes only that line and rebuilds the file
     std::fs::write(&input, LINES.replace("wˈɜɹld.", "wˈɜɹldz.")).unwrap();
     let r = ph(&cwd, &["--diagnostics", inp]);
