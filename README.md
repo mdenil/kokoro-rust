@@ -106,11 +106,8 @@ Common options:
   f32 elsewhere. Output is close to, but not identical with, the reference Python pipeline
   ([docs/VALIDATION.md](docs/VALIDATION.md)).
 
-## License
-The license of this project's own code has not been decided yet. (Cargo.toml contains
-`license = "Apache-2.0"`; that field is not a decision and may change.)
-
-Third-party components keep their own licenses (details in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)):
+## Third-party components
+These keep their own licenses (details in [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)):
 - Kokoro-82M weights and voices: Apache-2.0.
 - misaki lexicons: Apache-2.0.
 - spaCy and en_core_web_sm: MIT.

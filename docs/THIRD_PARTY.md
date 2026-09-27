@@ -1,8 +1,7 @@
 # Third-party components and licenses
 
 This lists what the program and its setup use from others, where it comes from, and the license
-stated by its source. It records facts as found; it is not legal advice. The license of this
-project's own code has not been decided yet (see README.md).
+stated by its source. It records facts as found; it is not legal advice.
 
 ## Downloaded by the setup scripts (not in this repository)
 | component | used for | origin (pinned) | license (as stated by the source) |
