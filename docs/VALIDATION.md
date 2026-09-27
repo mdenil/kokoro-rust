@@ -76,8 +76,11 @@ pipeline, as whole commands on the public text in this repository.
   the text frontend, synthesis, and writing the WAV.
 - Disk cache warm: each program ran once untimed first, so its files were in the page cache. The
   timed runs then alternated between the two programs.
-- Host: RTX 4090, CUDA 12.9, driver 580, Ubuntu 24.04; no other job on the GPU during any run
-  (other CPU work on the shared host: 1-minute load average 4.4–11.4).
+- Host: RTX 4090, CUDA 12.9, driver 580, Ubuntu 24.04, 80 CPU threads. No other GPU process was
+  seen in the snapshots taken at the start and end of each run (the GPU was not monitored in
+  between). Other CPU work on the shared host: 1-minute load average 4.4–11.4.
+- CPU settings: Python used torch's default of 40 CPU threads; kokoro-rust its defaults (16 text
+  preparation threads, 4 writer threads).
 - Build: kokoro-rust commit `d94db53` (binary sha256 `8ae5879e…`, the same binary as the tested
   commit `a389b1a`).
 
@@ -87,10 +90,11 @@ pipeline, as whole commands on the public text in this repository.
 | range | 49.98–55.62 s | 4.95–5.94 s |
 | all runs | 52.46, 51.57, 55.62, 53.77, 49.98 | 4.95, 5.94, 5.51, 5.06, 5.01 |
 
-The ratio of the medians is 10.4. Both produced 31.1 minutes of audio (kokoro-rust 44,799,000
-samples, Python 44,808,600; durations differ slightly because of the reduced precision, see
-above). They also differ in the eSpeak NG used for words missing from the dictionary: the
-installed 1.51 for kokoro-rust, and the 1.52.0 bundled with the Python package.
+The ratio of the medians is 10.4; the coefficient of variation of the runs is 4.1% (Python) and
+8.0% (kokoro-rust). The outputs were 44,808,600 samples (Python) and 44,799,000 samples
+(kokoro-rust), both 31.1 minutes. The two differ in numerics (reduced precision, see above) and in
+the eSpeak NG used for words missing from the dictionary: the installed 1.51 for kokoro-rust, and
+the 1.52.0 bundled with the Python package.
 
 To reproduce (with the Python reference environment of `scripts/setup_reference_env.sh` and the
 test data root of [PORTABILITY.md](PORTABILITY.md)):
