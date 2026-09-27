@@ -1,23 +1,32 @@
-"""Export the pinned en_core_web_sm 3.8.0 tokenizer data, lexeme norms and tok2vec+tagger weights
-for the native frontend (F2). Data only (MIT-licensed model); the Rust port implements the
-algorithms itself. Output: $KOKORO_DATA/frontend/spacy-en_core_web_sm-3.8.0/
+"""Export the tokenizer data, lexeme norms and tok2vec + tagger weights of spaCy's
+en_core_web_sm 3.8.0 model into the directory the native frontend reads
+(<frontend-dir>/spacy-en_core_web_sm-3.8.0/). Data only; the Rust frontend implements the algorithms.
+
+Run inside a Python environment with the pinned packages (scripts/prepare_spacy_assets.sh does this):
+    python scripts/export_spacy_assets.py <output-dir>
+The output is deterministic for the pinned versions; scripts/prepare_spacy_assets.sh checks its hashes.
 """
+import importlib.metadata
 import json
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import common  # noqa: E402
+PINS = {"spacy": "3.8.14", "en_core_web_sm": "3.8.0", "thinc": "8.3.13", "numpy": "2.4.6", "safetensors": "0.8.0"}
 
 
 def main():
-    common.assert_pins()
+    if len(sys.argv) != 2:
+        sys.exit("usage: export_spacy_assets.py <output-dir>")
+    for pkg, want in PINS.items():
+        got = importlib.metadata.version(pkg)
+        if got != want:
+            sys.exit(f"{pkg} {got} is installed; this export is pinned to {pkg}=={want}")
+    out = pathlib.Path(sys.argv[1])
+    out.mkdir(parents=True, exist_ok=True)
     import numpy as np
     import spacy
     from safetensors.numpy import save_file
     from spacy import symbols
-    out = common.DATA / "frontend/spacy-en_core_web_sm-3.8.0"
-    out.mkdir(parents=True, exist_ok=True)
     nlp = spacy.load("en_core_web_sm", enable=["tok2vec", "tagger"])
     tok = nlp.tokenizer
     data = {
@@ -53,10 +62,8 @@ def main():
             nodes.append(info)
     save_file(arrays, str(out / "tagger_weights.safetensors"))
     (out / "model_structure.json").write_text(json.dumps({"labels": list(tagger.labels), "nodes": nodes}, indent=1, default=str))
-    print("rules", len(data["rules"]), "lookup tables", {k: len(v) for k, v in tables.items()}, "params", len(arrays),
-          "labels", len(tagger.labels), "faster_heuristics", data["faster_heuristics"], "token_match", data["token_match"] is not None)
-    for n in nodes:
-        print(n["model"], n["i"], n["name"], n["dims"], [ (p["name"], p["shape"]) for p in n["params"]], {k: v for k, v in n["attrs"].items() if k in ("seed", "column", "window_size", "nP", "normalize")})
+    print(f"exported {len(data['rules'])} tokenizer rules, {len(tables)} lookup tables, {len(arrays)} weight arrays, "
+          f"{len(tagger.labels)} tags -> {out}")
 
 
 if __name__ == "__main__":
