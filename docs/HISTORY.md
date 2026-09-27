@@ -65,9 +65,12 @@ on 130 public lines):
   - **INT8 was rejected** for audible hiss.
 - bf16x end to end on the long-form benchmark:
   - Warm: 4.15 s, 1.80× the f32 engine and about 13× the Python KPipeline baseline above.
-  - Cold: 5.81 s, about 1.5× / about 12×. These cold ratios are PROVISIONAL: three replicates per
-    arm, and a later cold re-measurement of the same bf16x artifact had a coefficient of
-    variation above 5%. The warm numbers stand.
+  - Cold: 5.81 s, about 1.5× / about 12×. Measured in the same final comparison run: 3 cold
+    replicates per arm, coefficient of variation 2.9% (bf16x), 2.2% (f32), 1.8% (Python), all
+    within the 5% gate.
+  - A later, smaller pre/post check of the same bf16x artifact (after the code cleanup) was more
+    variable in cold starts: coefficient of variation 5.2% on the chapter. Its warm passes matched
+    within 1.5%.
 
 ## 4. BF16x-only product
 - Everything but the selected configuration was removed: the other precision levels, the f32
