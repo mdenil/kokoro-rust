@@ -1,14 +1,9 @@
 # kokoro-rust
 
-Turn a book into audio on your own NVIDIA GPU. kokoro-rust runs the
+Efficient batch text to speech on a local GPU. kokoro-rust runs the
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) text-to-speech model natively in Rust and
 CUDA: give it a text file with one sentence or paragraph per line, and it writes one WAV file per
 line.
-
-- Runs locally, with no Python and no cloud service.
-- Picks up where it left off: running it again skips lines that are already done.
-- Never drops a word silently. A line it can't pronounce is reported, so you can fix the text.
-- American English, with two voices included.
 
 ## Install
 
