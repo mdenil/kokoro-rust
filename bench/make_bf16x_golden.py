@@ -1,12 +1,17 @@
-"""Render the BF16x regression goldens with the immutable accepted reference binary.
+"""Render per-line WAV hash tables for the BF16x regression and diagnostic tests.
 
-Every case runs the accepted artifact (phase2-9b39d48, `KOKORO_PRECISION=bf16x`, defaults otherwise)
-on a public input with fixed options, twice, and records the per-line WAV sha256 (both runs must
-agree: determinism). The pinned table tests/pinned/bf16x_golden.json is what tests/strict_reference_diff.rs
-checks the current binary against; the WAVs themselves stay under $KOKORO_DATA (outside Git) for
-diagnosing any difference.
+Every case runs a binary on a public input with fixed options, twice, and records the per-line WAV
+sha256 (both runs must agree: determinism). The WAVs stay under $KOKORO_DATA (outside Git).
 
-Usage: python3 bench/make_bf16x_golden.py [--private PRIVATE_TEXT_FILE]
+Two tables:
+- strict (default): the earlier strict-rounding artifact (phase2-9b39d48, built with -fmad=false, run
+  with KOKORO_PRECISION=bf16x) -> tests/pinned/bf16x_golden.json, used by the diagnostic
+  tests/strict_reference_diff.rs.
+- --fma-pin BINARY --commit SHA: the current FMA-contraction build (-fmad=true) ->
+  tests/pinned/bf16x_fma_golden.json, the regression pin of tests/bf16x_regression.rs. It records the
+  binary hash and source commit. It is a reproducibility pin, not a quality acceptance.
+
+Usage: python3 bench/make_bf16x_golden.py [--fma-pin BINARY --commit SHA] [--private PRIVATE_TEXT_FILE]
 """
 import argparse
 import hashlib
@@ -47,15 +52,15 @@ def sha(p):
     return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 
 
-def render(inp, voice, extra, out):
+def render(binary, extra_env, inp, voice, extra, out):
     if out.exists():
         shutil.rmtree(out)
-    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), KOKORO_PRECISION="bf16x")  # GPU: caller's CUDA_VISIBLE_DEVICES
-    cmd = [str(ACCEPTED), "synth", "--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
+    env = dict(os.environ, KOKORO_FRONTEND_DIR=str(DATA / "frontend"), **extra_env)  # GPU: caller's CUDA_VISIBLE_DEVICES
+    cmd = [str(binary), "synth", "--model-dir", str(SNAP), "--input", str(inp), "--out-dir", str(out), "--voice", voice] + extra
     r = subprocess.run(cmd, env=env, capture_output=True, text=True)
     (out.parent / f"{out.name}.stderr.txt").write_text(r.stderr)
     if r.returncode != 0:
-        raise SystemExit(f"accepted binary failed on {inp} ({voice} {extra}): exit {r.returncode}")
+        raise SystemExit(f"{binary} failed on {inp} ({voice} {extra}): exit {r.returncode}")
     stem = pathlib.Path(inp).stem
     return {int(w.stem.rsplit("_", 1)[1]): sha(w) for w in sorted(out.glob(f"{stem}_*.wav"))}
 
@@ -63,27 +68,45 @@ def render(inp, voice, extra, out):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--private", help="optional private text file: pin its hashes under $KOKORO_DATA/evidence/private only (never in Git)")
+    ap.add_argument("--fma-pin", metavar="BINARY", help="pin this FMA-contraction build instead of the strict artifact")
+    ap.add_argument("--commit", help="source commit the --fma-pin binary was built from")
     a = ap.parse_args()
-    assert sha(ACCEPTED) == ACCEPTED_SHA256, "accepted binary hash mismatch"
-    gold = DATA / "evidence/release-cleanup/golden"
-    table = {"accepted_binary": "$KOKORO_DATA/bin/" + ACCEPTED.name, "accepted_sha256": ACCEPTED_SHA256, "tree": "9b39d48",
-             "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (the accepted configuration)",
-             "compare": "per-line WAV bytes (sha256); sidecars carry the engine identity and are not compared",
-             "cases": {}}
+    if a.fma_pin:
+        assert a.commit, "--fma-pin needs --commit"
+        binary, extra_env = pathlib.Path(a.fma_pin), {}
+        gold = DATA / "evidence/fma-golden"
+        table = {"reference_binary_sha256": sha(binary), "source_commit": a.commit, "build": "nvcc -arch=compute_89 -fmad=true -O3 (FMA contraction)",
+                 "engine_identity": "cuda bf16x kernels=fma(-fmad=true)", "run_as": "defaults otherwise",
+                 "status": "regression pin of the FMA build (reproducibility); not a listening/quality acceptance",
+                 "compare": "per-line WAV bytes (sha256); sidecars carry the engine identity and are not compared",
+                 "cases": {}}
+        out_public = ROOT / "tests/pinned/bf16x_fma_golden.json"
+        out_private = DATA / "evidence/private/fma-golden/private_fma_golden.json"
+    else:
+        assert sha(ACCEPTED) == ACCEPTED_SHA256, "accepted binary hash mismatch"
+        binary, extra_env = ACCEPTED, {"KOKORO_PRECISION": "bf16x"}
+        gold = DATA / "evidence/release-cleanup/golden"
+        table = {"accepted_binary": "$KOKORO_DATA/bin/" + ACCEPTED.name, "accepted_sha256": ACCEPTED_SHA256, "tree": "9b39d48",
+                 "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (the accepted configuration)",
+                 "compare": "per-line WAV bytes (sha256); sidecars carry the engine identity and are not compared",
+                 "cases": {}}
+        out_public = ROOT / "tests/pinned/bf16x_golden.json"
+        out_private = DATA / "evidence/private/release-cleanup/golden/private_golden.json"
     cases = list(CASES)
     if a.private:
-        gold = DATA / "evidence/private/release-cleanup/golden"
+        gold = out_private.parent
         cases = [("chapter_af", a.private, "af_heart", ["--format", "float32"]), ("chapter_am", a.private, "am_adam", ["--format", "float32"])]
     for case, inp, voice, extra in cases:
         path = pathlib.Path(inp) if a.private else ROOT / inp
-        h1 = render(path, voice, extra, gold / case)
-        h2 = render(path, voice, extra, gold / f"{case}.rerun")
-        assert h1 == h2, f"{case}: accepted binary is not deterministic across runs"
+        h1 = render(binary, extra_env, path, voice, extra, gold / case)
+        h2 = render(binary, extra_env, path, voice, extra, gold / f"{case}.rerun")
+        assert h1 == h2, f"{case}: {binary} is not deterministic across runs"
         shutil.rmtree(gold / f"{case}.rerun")
         table["cases"][case] = {"input": inp if not a.private else "<private text>", "input_sha256": sha(path), "voice": voice, "args": extra,
                                 "lines": len(h1), "wav_sha256": {str(k): v for k, v in sorted(h1.items())}}
         print(f"{case}: {len(h1)} lines, deterministic across 2 runs", flush=True)
-    dst = (gold / "private_golden.json") if a.private else (ROOT / "tests/pinned/bf16x_golden.json")
+    dst = out_private if a.private else out_public
+    dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps(table, indent=1) + "\n")
     print("wrote", dst)
 

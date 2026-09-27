@@ -15,7 +15,13 @@ pub fn sha256_file(p: &Path) -> String {
 
 /// Render `input` with the binary under test (cleared environment, no Python on PATH, the caller's
 /// CUDA_VISIBLE_DEVICES passed through, extra `env`); returns line -> WAV sha256.
+/// GPU renders inside one test binary run one at a time: concurrent processes can exhaust GPU memory,
+/// and a batch that fails is split into smaller batches. The BF16 predictor's results depend on the
+/// batch shape, so a split can change the output. Serializing keeps the comparisons meaningful.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &[(&str, &str)]) -> BTreeMap<usize, String> {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::remove_dir_all(out);
     let mut cmd = Command::new(paths::bin());
     cmd.env_clear().envs(env.iter().copied()).env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
@@ -31,6 +37,11 @@ pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &
         .output()
         .unwrap();
     assert!(o.status.success(), "synth failed ({}): {}", o.status, String::from_utf8_lossy(&o.stderr));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        !stderr.contains("splitting"),
+        "a batch was split under GPU memory pressure (other GPU work running?); byte comparisons are not meaningful for this run:\n{stderr}"
+    );
     let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
     let mut h = BTreeMap::new();
     for e in std::fs::read_dir(out).unwrap() {

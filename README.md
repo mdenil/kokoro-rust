@@ -48,7 +48,9 @@ kokoro synth --model-dir <snapshot> --frontend-dir <frontend-data> \
 Other options, all operational (they do not change the numerical mode):
 - `--cuda-device`;
 - batching budget: `--batch-phonemes`, `--batch-items`, `--batch-window`, `--batch-first-window`.
-  A batch that fails (for example out of memory) is split down to single items automatically;
+  A batch that fails (for example out of memory) is split down to single items automatically.
+  Because batch shape affects the BF16 predictor, such a split can change the audio of those
+  lines, so outputs are byte-reproducible only when no split occurs (see docs/design/BATCHING.md);
 - `--input-format phonemes`;
 - `--seed`;
 - `--blank-lines`;
