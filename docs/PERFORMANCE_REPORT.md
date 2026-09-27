@@ -113,11 +113,13 @@ Evidence that returns are severely diminishing (not an assumed roofline, not one
 ## PHASE 2 (lossy, branch experiment/reduced-precision) — pointer only; nothing on main changes
 - Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS"; head 537bcc4). Receipts:
   `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`.
-- Status: every non-f32 level is EXPERIMENTAL and UNREVIEWED. No merge and no default change without
-  owner approval. The numbers below do not change the phase-1 headline above.
+- Status: every non-f32 level is EXPERIMENTAL and UNREVIEWED. Adoption, merge or any default change
+  is solely the owner's decision. The numbers below do not change the phase-1 headline above.
 - Headline (fresh whole-system matrix, final binary phase2-9b39d48; private chapter; medians):
-  - fp16 vs the Rust f32 engine: warm 7.45 → 4.27 s (1.74×), cold 8.69 → 5.79 s (1.50×).
-  - vs production Python in the same matrix: 12.73× warm, 11.86× cold (Python cv 4.0% / 1.8%).
+  - Clean: WARM fp16 7.45 → 4.27 s = 1.74× vs the Rust f32 control, 12.73× vs production Python
+    (cv fp16 0.8%, f32 1.9%, Python 4.0%).
+  - PROVISIONAL: COLD fp16 8.69 → 5.79 s = 1.50× vs f32, 11.86× vs Python. The fp16 cold arm has cv
+    6.6% (> 5%) even though Python cold is 1.8%; bf16 cold (cv 5.5%) is likewise provisional.
   - Alice ch. 1 Python ratios are provisional (Python warm cv 9.2%).
   - Core (in-process) kernel-lever timings are reported separately on the branch and are not
     multiplied into these ratios.
