@@ -7,11 +7,11 @@
 #   scripts/package_release.sh sums     OUT_DIR                   # SHA256SUMS of the packages
 #
 # binary:   OUT_DIR/kokoro-x86_64-linux.tar.gz, containing kokoro-x86_64-linux/
-#             bin/kokoro, VERSION, README.md, THIRD_PARTY.md,
+#             bin/kokoro, VERSION, LICENSE, README.md, THIRD_PARTY.md,
 #             licenses/crates/<crate>-<version>/ (license files of the Rust crates used to build it),
 #             licenses/CRATES.tsv (name, version, license expression, source)
 # frontend: OUT_DIR/kokoro-frontend.tar.gz, containing frontend/
-#             misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, VERSION,
+#             misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, VERSION, LICENSE, THIRD_PARTY.md,
 #             licenses/ (misaki, spaCy, en_core_web_sm license files)
 #           DATA_DIR must hold the output of scripts/fetch_assets.sh --frontend-only DATA_DIR and
 #           scripts/prepare_spacy_assets.sh DATA_DIR (frontend/, downloads/, tools/spacy-export/).
@@ -46,7 +46,7 @@ package_binary() {
   mkdir -p "$pkg/bin" "$pkg/licenses/crates"
   install -m 755 "$ROOT/target/release/kokoro" "$pkg/bin/kokoro"
   echo "$version" > "$pkg/VERSION"
-  cp "$ROOT/README.md" "$ROOT/docs/THIRD_PARTY.md" "$pkg/"
+  cp "$ROOT/LICENSE" "$ROOT/README.md" "$ROOT/docs/THIRD_PARTY.md" "$pkg/"
   # license files of every crate used to build the Linux x86_64 binary (normal and build deps)
   (cd "$ROOT" && cargo metadata --format-version 1 --locked --filter-platform x86_64-unknown-linux-gnu) \
     | python3 "$ROOT/scripts/collect_crate_licenses.py" "$pkg/licenses"
@@ -73,6 +73,7 @@ package_frontend() {
   local pkg=$stage/frontend
   mkdir -p "$pkg/licenses"
   cp -r "$misaki" "$spacy" "$pkg/"
+  cp "$ROOT/LICENSE" "$ROOT/docs/THIRD_PARTY.md" "$pkg/"
   echo "$version" > "$pkg/VERSION"
   unzip -p "$data/downloads/misaki-0.9.4-py3-none-any.whl" misaki-0.9.4.dist-info/licenses/LICENSE > "$pkg/licenses/misaki-0.9.4-LICENSE"
   unzip -p "$data/downloads/en_core_web_sm-3.8.0-py3-none-any.whl" en_core_web_sm-3.8.0.dist-info/LICENSE > "$pkg/licenses/en_core_web_sm-3.8.0-LICENSE"

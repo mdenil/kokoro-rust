@@ -73,8 +73,8 @@ For example: `curl -fsSL …/install.sh | KOKORO_VERSION=v0.1.0 bash`.
 ## Release packages
 | file | contents |
 |---|---|
-| `kokoro-x86_64-linux.tar.gz` | `kokoro-x86_64-linux/`: `bin/kokoro`, `VERSION`, `README.md`, `THIRD_PARTY.md`, `licenses/crates/` (license files of the Rust crates used to build the program) and `licenses/CRATES.tsv` |
-| `kokoro-frontend.tar.gz` | `frontend/`: `misaki-0.9.4/` (lexicons), `spacy-en_core_web_sm-3.8.0/` (exported tokenizer and tagger data), `VERSION`, `licenses/` (misaki, spaCy, en_core_web_sm) |
+| `kokoro-x86_64-linux.tar.gz` | `kokoro-x86_64-linux/`: `bin/kokoro`, `VERSION`, `LICENSE` (Apache-2.0), `README.md`, `THIRD_PARTY.md`, `licenses/crates/` (license files of the Rust crates used to build the program) and `licenses/CRATES.tsv` |
+| `kokoro-frontend.tar.gz` | `frontend/`: `misaki-0.9.4/` (lexicons), `spacy-en_core_web_sm-3.8.0/` (exported tokenizer and tagger data), `VERSION`, `LICENSE`, `THIRD_PARTY.md`, `licenses/` (misaki, spaCy, en_core_web_sm) |
 | `SHA256SUMS` | SHA-256 of the two packages |
 
 The model is not part of the release; the installer downloads it from Hugging Face. eSpeak NG,

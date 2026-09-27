@@ -28,4 +28,4 @@ This writes `book.wav` in the current directory.
 - [Installing](docs/INSTALL.md): what the installer does, and how to uninstall
 - [Building from source](docs/BUILD.md)
 - [Validation](docs/VALIDATION.md): how it was checked against the original Python implementation
-- [Third-party licenses](docs/THIRD_PARTY.md)
+- [License](LICENSE): Apache-2.0; [third-party licenses](docs/THIRD_PARTY.md)
