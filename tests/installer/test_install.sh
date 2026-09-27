@@ -85,7 +85,7 @@ cat > "$MOCKS/sudo-pty" << 'EOF'
 # read and from where, then runs the command unprivileged (it only ever reaches the apt-get mock)
 printf '[sudo] password for tester: ' > /dev/tty
 IFS= read -r pw < /dev/tty
-echo "sudo $* ; password_chars=${#pw} ; tty=$(tty < /dev/tty)" >> "$MOCK_STATE/sudo.log"
+echo "sudo $* ; password_chars=${#pw} ; controlling_tty=$(ps -o tty= -p $$ | tr -d ' ')" >> "$MOCK_STATE/sudo.log"
 exec "$@"
 EOF
 chmod +x "$MOCKS"/*
@@ -448,7 +448,7 @@ check "question shown on the terminal" has "[y/N]"
 check "password explanation shown" has "sudo may ask for your password"
 check "mock sudo prompted on the terminal" has "[sudo] password for tester:"
 check "sudo ran apt-get install -y libespeak-ng1 once, after consent" test "$(grep -c 'sudo apt-get install -y libespeak-ng1' "$WORK/state/t1/sudo.log" 2>/dev/null)" = 1
-check "password read from the pty" grep -q "password_chars=6 ; tty=/dev/pts/" "$WORK/state/t1/sudo.log"
+check "password read from /dev/tty, a pty" grep -q "password_chars=6 ; controlling_tty=pts/" "$WORK/state/t1/sudo.log"
 check "apt-get stdin is /dev/tty, not the piped script" grep -q "stdin=/dev/tty$" "$WORK/state/t1/apt.log"
 check "installed" test -x "$WORK/home-pty-yes/.local/bin/kokoro"
 
