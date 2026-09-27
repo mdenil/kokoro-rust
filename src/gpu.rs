@@ -42,6 +42,7 @@ kernels!(
     upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
     sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
     cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s, chan_stats_seg1,
+    conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
 );
 
 macro_rules! launch {
@@ -251,6 +252,7 @@ static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
 /// Input-channel chunk of conv1d_igemm; MUST equal IG_BK in kernels/kokoro.cu (build.rs passes it).
 const IG_BK: usize = crate::gpu::IG_BK_CU;
 static IGEMM_STRIDED_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_STRIDED").map(|v| v != "0").unwrap_or(true));
+static SW_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_SW").map(|v| v != "0").unwrap_or(true));
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -304,9 +306,49 @@ impl GConv {
         self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4 <= 48 * 1024
     }
 
+    /// LEVER PL-016: the sliding-window kernel instance for (k, dil), if one exists.
+    fn sw_kernel<'a>(&self, g: &'a Gpu, res: bool) -> Option<&'a CudaFunction> {
+        if !*SW_ON {
+            return None;
+        }
+        let k = &g.k;
+        Some(match (res, self.k, self.dil) {
+            (false, 3, 1) => &k.conv1d_sw_k3d1, (false, 3, 3) => &k.conv1d_sw_k3d3, (false, 3, 5) => &k.conv1d_sw_k3d5,
+            (false, 7, 1) => &k.conv1d_sw_k7d1, (false, 7, 3) => &k.conv1d_sw_k7d3, (false, 7, 5) => &k.conv1d_sw_k7d5,
+            (false, 11, 1) => &k.conv1d_sw_k11d1, (false, 11, 3) => &k.conv1d_sw_k11d3, (false, 11, 5) => &k.conv1d_sw_k11d5,
+            (true, 3, 1) => &k.conv1d_sw_res_k3d1, (true, 3, 3) => &k.conv1d_sw_res_k3d3, (true, 3, 5) => &k.conv1d_sw_res_k3d5,
+            (true, 7, 1) => &k.conv1d_sw_res_k7d1, (true, 7, 3) => &k.conv1d_sw_res_k7d3, (true, 7, 5) => &k.conv1d_sw_res_k7d5,
+            (true, 11, 1) => &k.conv1d_sw_res_k11d1, (true, 11, 3) => &k.conv1d_sw_res_k11d3, (true, 11, 5) => &k.conv1d_sw_res_k11d5,
+            _ => return None,
+        })
+    }
+
+    fn launch_sw(&self, g: &Gpu, f: &CudaFunction, x: &Buf, t: usize, y: &mut Buf) -> Result<()> {
+        let w_ig = self.w_ig.as_ref().unwrap();
+        let xw = (128 + (self.k - 1) * self.dil + 3) & !3;
+        let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
+        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+        let a = [self.cin as i32, t as i32, self.cout as i32, self.pad as i32];
+        let null = 0u64;
+        let mut lb = g.stream.launch_builder(f);
+        lb.arg(x).arg(w_ig);
+        match &self.b {
+            Some(b) => lb.arg(b),
+            None => lb.arg(&null),
+        };
+        lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]);
+        // SAFETY: argument list matches conv1d_sw_*: (x, w_ig [Cin][K][Cout], bias|null, y [Cout][T],
+        // Cin, T, Cout, pad); buffers sized cin*t / cout*t (checked by callers); smem as computed.
+        unsafe { lb.launch(cfg) }.context("conv1d_sw")?;
+        Ok(())
+    }
+
     /// res += conv(x) in place via the fused kernel's residual epilogue (x must already be masked).
     pub(crate) fn fwd_igemm_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
         ensure!(self.igemm_applicable() && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
+        if let Some(f) = self.sw_kernel(g, true) {
+            return self.launch_sw(g, f, x, t, res);
+        }
         let w_ig = self.w_ig.as_ref().unwrap();
         let smem = (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4;
         let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
@@ -367,6 +409,10 @@ impl GConv {
         }
         if let Some(w_ig) = &self.w_ig {
             if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN {
+                if let Some(f) = self.sw_kernel(g, false) {
+                    self.launch_sw(g, f, x, t, &mut y)?;
+                    return Ok((y, tout));
+                }
                 // LEVER PL-008 (kill switch KOKORO_CONV_IGEMM=0): fused implicit-GEMM conv
                 let xw = 128 + (self.k - 1) * self.dil;
                 let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;

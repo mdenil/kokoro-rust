@@ -158,3 +158,13 @@ cv%>5 rows are noise. Interleaved same-window stage pairs only.
 - Likely cause: the doubled smem lowers occupancy by as much as the load/compute overlap gains.
 - Do-not-retry predicate: double buffering without also cutting per-stage smem (e.g. staging
   weights per tap group) or raising compute per block.
+
+## NE-009 — sliding-window fused conv for the 256-channel generator stage (Cin ≤ 256)   [2026-09-27 | NOT DEFAULT; exceeds RB-1]
+- Speed: forward 1.486 → 1.412 s (Alice 69 chunks).
+- Numerics: all 135 stage seams pass (max rel 1.43e-5), but end-to-end drift vs the strict baseline
+  exceeds RB-1: 11 drift violations and a new binding failure s06_long/af_heart v1. The original-gate
+  fail set changed (1 new; 3 historical rows resolved).
+- Why the difference from stage 1 (PL-008 had 0 RB-1 violations): stage 0 is earlier in the
+  generator, so reordering differences are amplified through more layers and the F0 phase.
+- Status: available via KOKORO_CONV_IGEMM_MAX_CIN=256; not approximately lossless under RB-1.
+  Phase-2 / owner-listening material only; no default change.

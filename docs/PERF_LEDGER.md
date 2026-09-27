@@ -310,3 +310,23 @@ the frozen baseline is not.
 - Each knob alone is neutral. The combined 3% rests on 2 rounds and is not explained by either
   knob, so it is treated as noise and the defaults stay 16 / 4. Host stages are fully overlapped
   with the GPU (writer backpressure ≈ 0.24 s).
+
+### PL-016 — sliding-window fused conv, templated on (K, dil)   [2026-09-27 | KEEP; bitwise identical]
+- Profile: the fused conv (PL-008/010) was ~40% of batched GPU time and shared-memory-load bound:
+  8 scalar LDS + 2 LDS.128 per 64 FMA.
+- Lever: `conv1d_sw_k{3,7,11}d{1,3,5}` (+ residual variants).
+  - Each thread takes 8 contiguous time steps and loads its window x[8tx .. 8tx + 8 + (K−1)·dil)
+    into registers once per input channel, then reuses it across all K taps.
+  - Per-(K, dil) templates keep the window in registers (no spills in any instance).
+  - Row stride padded to 4 floats. Kill switch KOKORO_CONV_SW=0; the generic kernel covers other
+    shapes.
+  - Accumulation order is unchanged, so WAVs are bitwise identical (Alice 65/65); RB-1 0
+    violations; integrated suites pass (5/5, 7/7 incl. the private chapter and fuzz).
+- Speed:
+  - forward 1.626 / 1.631 → 1.504 / 1.501 s;
+  - sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-031641-L16-slidingwindow-alice`) Alice warm 1.836 → 1.696 s (**1.082×**, cv 0.8% / 0.8%).
+- NOT kept (NE-009): routing the 256-ch layers to it too (KOKORO_CONV_IGEMM_MAX_CIN=256) is faster
+  (forward 1.486 → 1.412 s). But it changes stage-0 numerics beyond RB-1: 11 drift violations and a
+  new binding failure s06_long/af_heart v1, with 3 historical rows resolved (ladder-gpu-1790475260).
+  All 135 seams still pass (max 1.43e-5). That is FMA-class variation, not approximately lossless
+  under the authoritative RB-1, so it stays opt-in only; a candidate for the phase-2 matrix.

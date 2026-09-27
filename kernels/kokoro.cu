@@ -927,3 +927,85 @@ extern "C" __global__ void chan_stats_seg1(const float* x, int L, const int* seg
         rstd_out[b * C + c] = 1.0f / sqrtf((float)var + eps);
     }
 }
+
+// ---- LEVER PL-016 candidate: sliding-window fused conv, templated on (K, DIL) for the generator's
+// Snake-block convs. Thread = 8 out-channels x 8 CONTIGUOUS time steps; per input channel the thread
+// loads its window x[8tx .. 8tx + 8 + (K-1)DIL) once into registers and reuses it for all K taps.
+// Accumulation order per output is unchanged (input-channel-major, tap-minor) -> bitwise identical
+// to conv1d_igemm. smem row stride padded to a multiple of 4 floats.
+template <int K, int DIL, bool RES>
+__device__ __forceinline__ void conv1d_sw_body(const float* __restrict__ x, const float* __restrict__ w,
+                                               const float* __restrict__ b, float* __restrict__ y,
+                                               int Cin, int T, int Cout, int pad) {
+    constexpr int SPAN = 8 + (K - 1) * DIL;
+    constexpr int XW = ((IG_BN + (K - 1) * DIL) + 3) & ~3;
+    extern __shared__ float smem[];
+    float* xs = smem;                  // [IG_BK][XW]
+    float* ws = smem + IG_BK * XW;     // [IG_BK][K][IG_BM]
+    const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
+    const int tx = threadIdx.x & 15, ty = threadIdx.x >> 4;
+    float acc[8][8];
+#pragma unroll
+    for (int i = 0; i < 8; i++)
+#pragma unroll
+        for (int j = 0; j < 8; j++) acc[i][j] = 0.0f;
+    for (int c0 = 0; c0 < Cin; c0 += IG_BK) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < IG_BK * XW; i += 128) {
+            int c = i / XW, j = i - c * XW;
+            int ci = c0 + c, t = t0 - pad + j;
+            xs[i] = (ci < Cin && t >= 0 && t < T && j < IG_BN + (K - 1) * DIL) ? x[(long)ci * T + t] : 0.0f;
+        }
+        for (int i = threadIdx.x; i < IG_BK * K * IG_BM; i += 128) {
+            int co = i & (IG_BM - 1), ck = i >> 6;
+            int k = ck % K, c = ck / K;
+            int ci = c0 + c;
+            ws[i] = (ci < Cin && co0 + co < Cout) ? w[((long)ci * K + k) * Cout + co0 + co] : 0.0f;
+        }
+        __syncthreads();
+#pragma unroll 1
+        for (int c = 0; c < IG_BK; c++) {
+            float win[SPAN];
+            const float* xp = xs + c * XW + 8 * tx;
+#pragma unroll
+            for (int j = 0; j < SPAN; j++) win[j] = xp[j];
+#pragma unroll
+            for (int k = 0; k < K; k++) {
+                const float* wp = ws + (c * K + k) * IG_BM + ty * 8;
+                float a[8];
+#pragma unroll
+                for (int i = 0; i < 8; i++) a[i] = wp[i];
+#pragma unroll
+                for (int i = 0; i < 8; i++)
+#pragma unroll
+                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], win[k * DIL + j], acc[i][j]);
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        int co = co0 + ty * 8 + i;
+        if (co >= Cout) continue;
+        float bias = b ? b[co] : 0.0f;
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            int t = t0 + 8 * tx + j;
+            if (t < T) {
+                long o = (long)co * T + t;
+                float v = acc[i][j] + bias;
+                if (RES) y[o] = y[o] + v;
+                else y[o] = v;
+            }
+        }
+    }
+}
+#define SW_KERNEL(K, D)                                                                                        \
+    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_k##K##d##D(const float* __restrict__ x,     \
+        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
+        int Cout, int pad) { conv1d_sw_body<K, D, false>(x, w, b, y, Cin, T, Cout, pad); }                  \
+    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_res_k##K##d##D(const float* __restrict__ x, \
+        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
+        int Cout, int pad) { conv1d_sw_body<K, D, true>(x, w, b, y, Cin, T, Cout, pad); }
+SW_KERNEL(3, 1) SW_KERNEL(3, 3) SW_KERNEL(3, 5)
+SW_KERNEL(7, 1) SW_KERNEL(7, 3) SW_KERNEL(7, 5)
+SW_KERNEL(11, 1) SW_KERNEL(11, 3) SW_KERNEL(11, 5)
