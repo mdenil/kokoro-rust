@@ -29,7 +29,7 @@ check_version() {
 }
 
 archive() {  # archive SRC_PARENT NAME OUT_FILE
-  tar -C "$1" --sort=name --owner=0 --group=0 --numeric-owner --mtime="$MTIME" \
+  tar -C "$1" --sort=name --owner=0 --group=0 --numeric-owner --mtime="$MTIME" --mode=u+rwX,go+rX,go-w \
     --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime -cf - "$2" | gzip -n -9 > "$3.part"
   mv "$3.part" "$3"
 }
