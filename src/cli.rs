@@ -316,7 +316,11 @@ fn synth(
     // Model and frontend load concurrently (independent; the frontend is CPU/disk, the model is
     // parse + GPU upload).
     let tl_ref = &tl;
-    let load_frontend = move || -> Result<(Option<EnglishFrontend>, f64)> {
+    // LEVER PL-015 (kill switch KOKORO_PREFETCH_FRONTEND=0): while the model loads, the loader thread
+    // also runs the (deterministic) frontend for the first lines; pass 0 uses those chunks.
+    type Prefetch = Vec<Option<std::result::Result<Vec<crate::frontend::pipeline::Chunk>, String>>>;
+    let lines_ref = &inp.lines;
+    let load_frontend = move || -> Result<(Option<EnglishFrontend>, f64, Prefetch)> {
         let ts = now();
         let fe = match (input_format, frontend) {
             (InputFormat::Text, Frontend::Native) => {
@@ -330,7 +334,33 @@ fn synth(
             _ => None,
         };
         tl_ref.push(0, "loader", "frontend_load", ts, 1);
-        Ok((fe, now() - ts))
+        let fe_s = now() - ts;
+        let mut pre: Prefetch = vec![];
+        if let Some(f) = fe.as_ref().filter(|_| *PREFETCH_ON) {
+            let ts = now();
+            let n = lines_ref.len().min(512);
+            pre = (0..n).map(|_| None).collect();
+            let threads = std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(4).clamp(1, 16);
+            crate::ordered::ordered_parallel_map(
+                n,
+                threads,
+                4 * threads,
+                |i| {
+                    let t = &lines_ref[i];
+                    // only lines that will reach the frontend (validation happens in the pipeline)
+                    if t.trim().is_empty() || control_char(t).is_some() {
+                        return Ok(None);
+                    }
+                    Ok(Some(f.line_chunks(t).map_err(|e| format!("{e:#}"))))
+                },
+                |i, r| {
+                    pre[i] = r;
+                    true
+                },
+            )?;
+            tl_ref.push(0, "loader", "frontend_prefetch", ts, n);
+        }
+        Ok((fe, fe_s, pre))
     };
     let (engine_res, fe_res) = std::thread::scope(|s| {
         let fe_h = s.spawn(load_frontend);
@@ -344,7 +374,8 @@ fn synth(
         (r, fe_h.join())
     });
     let (mut engine, voice_sha, load_s) = engine_res?;
-    let (fe, frontend_load_s) = fe_res.map_err(|_| anyhow::anyhow!("frontend loader panicked"))??;
+    let (fe, frontend_load_s, prefetch) = fe_res.map_err(|_| anyhow::anyhow!("frontend loader panicked"))??;
+    let prefetch = &prefetch;
     eprintln!("loaded model + voice in {load_s:.2}s (frontend {frontend_load_s:.2}s, concurrently)");
     let cfg = Config {
         engine: format!("{ENGINE_VERSION} [{}]", engine.identity()),
@@ -449,7 +480,12 @@ fn synth(
                     }
                     let chunks = match fe_ref {
                         Some(f) => {
-                            let ch = f.line_chunks(text)?;
+                            let cached = if pass == 0 { prefetch.get(i).and_then(|c| c.as_ref()) } else { None };
+                            let ch = match cached {
+                                Some(Ok(ch)) => ch.clone(),
+                                Some(Err(msg)) => anyhow::bail!("{msg}"),
+                                None => f.line_chunks(text)?,
+                            };
                             sc.graphemes = ch.iter().map(|c| c.graphemes.clone()).collect();
                             ch.into_iter().map(|c| c.phonemes).collect()
                         }
@@ -736,6 +772,7 @@ fn synth(
     Ok(code)
 }
 
+static PREFETCH_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_PREFETCH_FRONTEND").map(|v| v != "0").unwrap_or(true));
 static SKIP_TEARDOWN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_SKIP_TEARDOWN").map(|v| v != "0").unwrap_or(true));
 
 fn peak_rss_mb() -> f64 {

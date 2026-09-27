@@ -276,3 +276,16 @@ the frozen baseline is not.
     reference.
 - Speed: forward 1.677 / 1.679 → 1.638 / 1.637 s; sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-024207-L14-stats1pass-alice`) Alice warm
   1.872 → 1.822 s (1.027×).
+
+### PL-015 — frontend prefetch during model load (pass 0)   [2026-09-27 | KEEP; bitwise identical]
+- While the model loads (~1.4 s on the chapter), the loader thread runs the deterministic frontend
+  for the first ≤ 512 valid lines: 16 workers via crate::ordered.
+- Pass 0 uses the cached chunks. Errors are cached as their formatted message, so the sidecar error
+  text is unchanged. Later (warm) passes still run the frontend. Kill switch
+  KOKORO_PREFETCH_FRONTEND=0.
+- Correctness: WAVs bitwise identical to PL-014 (Alice 65/65); integrated suites pass incl. the
+  fuzz corpus (reference-error line via the cached error path) and the private chapter.
+- Sealed cold A/B:
+  - Alice (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-024645-L15-prefetch-alice`): 3.638 → 3.508 s (1.037×, cv 7.6% / 4.1%);
+  - private chapter: 9.892 → 9.289 s (**1.065×**, −0.6 s).
+  Warm unchanged.
