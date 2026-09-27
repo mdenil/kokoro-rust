@@ -58,6 +58,9 @@ impl Dom {
 }
 
 static STATS_1PASS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_STATS_1PASS").map(|v| v != "0").unwrap_or(true));
+/// PHASE 2 lever P2-L5 (non-f32 levels only; kill switch KOKORO_LP_STATS_F32=0): float per-thread
+/// partials in the channel statistics (FP64 throughput bound on GeForce).
+static LP_STATS_F32: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_STATS_F32").map(|v| v != "0").unwrap_or(true));
 static FUSE_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_FUSE_RES_CONV").map(|v| v != "0").unwrap_or(true));
 
 impl GpuKokoro {
@@ -88,7 +91,9 @@ impl GpuKokoro {
         let mut rstd = g.alloc(d.b() * a.c)?;
         let (li, eps, ci) = (d.l as i32, 1e-5f32, a.c as i32);
         let cfg = LaunchConfig { grid_dim: (a.c as u32, d.b() as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        if *STATS_1PASS {
+        if *LP_STATS_F32 && g.prec != crate::gpu::Precision::F32 {
+            launch!(g, chan_stats_seg1f, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
+        } else if *STATS_1PASS {
             // LEVER PL-014 (kill switch KOKORO_STATS_1PASS=0): single-pass statistics
             launch!(g, chan_stats_seg1, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
         } else {

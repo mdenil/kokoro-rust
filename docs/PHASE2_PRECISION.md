@@ -41,9 +41,14 @@ interleaved rounds of 5 reps, total median, cv ≤ 0.5%. Bitwise identity was ch
 | P2-L3 | v2 with 128-co blocks (8 warps): each staged input window feeds twice the MMAs; the 128-ch stage stages its input once. Kill switch KOKORO_LP_WMMA2W=0 | 0.915 → 0.895 s (−2.2%) | KEEP |
 | P2-L4 | AdaIN + Snake applied inside the v2 conv's input staging (exactly adain_apply_seg's float expression; `-fmad=false` build) instead of a separate apply kernel: saves one activation write + read per AdaIN in every Snake block. Kill switch KOKORO_LP_PROLOGUE=0 | 0.895 → 0.855 s (−4.5%) | KEEP |
 | (neutral) | v2 staging with each warp streaming whole channel rows (no per-element divides, unrolled loads) | 0.933 vs 0.931 s | NEUTRAL, reverted |
+| P2-L5 | channel statistics with float per-thread partials over shifted values (x − segment's first element), combined in double. The PL-014 kernel is FP64-bound on GeForce (ncu: SM 71.5%, DRAM 40%). Non-f32 levels only (the f32 control keeps PL-014). Kill switch KOKORO_LP_STATS_F32=0 | 0.856 → 0.823 s (−3.9%) | KEEP, **approximately lossless, NOT bitwise**: fp16 vs f32 on Alice median 0.030 → 0.048 dB, max 0.039 → 0.127 dB; vs the pre-L5 fp16 median 0.045 dB, rel 4.4e-3. This is the size of the PL-014 reordering drift (3.9e-3), i.e. rounding-level changes amplified through the F0/phase path |
+| (neutral) | v2 with 64 input channels (4 slices) per stage (XLD 80) | 0.822 vs 0.822 s | NEUTRAL, reverted |
 
-- Cumulative fp16 forward: 1.105 → 0.855 s (1.29×). fp16 output is bitwise identical to the matrix
-  binary's, so every quality number above still applies to fp16/bf16 unchanged.
+- Cumulative fp16 forward (in-process core timing; NOT a whole-system or production ratio):
+  1.105 → 0.855 s through P2-L4, output bitwise identical to the matrix binary; 0.823 s with P2-L5,
+  which changes output (approximately lossless).
+- Whole-system numbers and quality for the final binary come only from the fresh matrix and quality
+  sweep in the final validation below. Core gains are not multiplied into production ratios.
 - Hardware counters after P2-L2 (ncu, same method as above): tensor pipe 30–36% active (v1 ~20%),
   DRAM 48–57%, warps active ~31% (98 registers/thread), top stall long-scoreboard (global loads).
 
@@ -74,9 +79,10 @@ interleaved rounds of 5 reps, total median, cv ≤ 0.5%. Bitwise identity was ch
   - Voices af_heart and am_adam, speed 1.0, excitation seed 0.
 - Metric: mean |ΔdB| of the log spectrum (Hann 1024 / hop 256). Waveform rel is misleading here: an
   F0 or phase shift gives rel ≈ 1 while the audio can sound identical.
-- **Scale for these numbers:** the Rust f32 control vs the Python reference is 1.22 / 1.49 dB. Most of
-  that is a different excitation-noise draw (the reference uses torch's RNG), not a model difference.
-  A same-engine seed-floor calibration (f32 with seed 1 vs seed 0) is below.
+- **Scale for these numbers:** the Rust f32 control vs the Python reference is 1.22 / 1.49 dB. The
+  reference draws its excitation noise from torch's RNG, so it never shares Rust's noise. For scale
+  only, a same-engine alternate-seed distance (f32 seed 1 vs seed 0) is given below. It does NOT show
+  how much of any cross-engine difference is caused by noise.
 - Functional failures: **0** at every level for both voices: every line rendered, 24 kHz mono float
   WAV, finite, non-empty. The Python reference also rendered all 130 lines per voice without failures.
 
@@ -94,12 +100,14 @@ interleaved rounds of 5 reps, total median, cv ≤ 0.5%. Bitwise identity was ch
 **Seed-floor calibration** (`$KOKORO_DATA/evidence/phase2/20260927-051206-seedfloor-public130`):
 - The same f32 engine rendered with excitation seed 1 vs seed 0 is 1.188 / 1.486 dB apart (median;
   max 1.35 / 1.69), af_heart / am_adam.
-- So the f32 vs Python distance (1.22 / 1.49 dB) is at the noise-draw floor.
-- In units of that floor:
-  - fp16 moves the audio about 1/40 of a noise redraw;
-  - bf16 about 1/5;
-  - tf32 / fp16x about one redraw (plus timing changes on a few lines);
-  - int8 about 2.5 redraws, and not from noise: durations and noise are identical.
+- This is noise-scale context only. The f32-vs-Python distance (1.22 / 1.49 dB) is of the same size,
+  but that does not show that noise explains most of the cross-engine difference: the metric is not
+  additive, and other differences can hide inside a distance of that size.
+- Relative to that scale (a comparison of magnitudes, not a decomposition):
+  - fp16's distance from f32 is about 1/40 of it;
+  - bf16's about 1/5;
+  - tf32 / fp16x about 1× (plus timing changes on a few lines);
+  - int8's about 2.5×, with durations and noise draws identical to f32.
 - The f32 seed-0 renders reproduced the earlier quality run bitwise (130/130 lines, both voices).
 
 **Held-out passages** (`bench/corpus_heldout.txt`, sha256 0e7d9a68…3326: Alice ch. 2, Pride and
@@ -170,18 +178,20 @@ Notes:
   (+~2 bytes per parameter of the decoder/generator convs, on the order of +100 MB of device memory
   at most). Not separately measured.
 
-### Summary for the owner (speed/quality matrix; ALL UNREVIEWED)
+### Summary for the owner (matrix binary phase2-c5686da; ALL UNREVIEWED; Python ratios PROVISIONAL: Python arm cv 11–12% under recorded host contention)
 - **fp16** is the clear candidate. It captures nearly all of the available speed: chapter 1.27× cold
   and 1.32× warm over the phase-1 f32 engine, i.e. 11.3× / 9.1× over production Python. Its
-  spectral distance is 0.03 dB, 1/40 of an excitation-noise redraw, with no timing change on any of
-  133 lines × 2 voices. It remains UNREVIEWED until listened to.
+  spectral distance from f32 was 0.03 dB in the matrix binary (1/40 of the alternate-seed distance,
+  scale context only), with no timing change on any of 133 lines × 2 voices. It remains UNREVIEWED
+  until listened to. Later kernel levers (below) change these numbers: see the final validation.
 - **bf16** is slightly slower than fp16 and 8× farther from f32. No reason to prefer it on this GPU.
 - **fp16x / bf16x** gain only 1–2% more than fp16 (the linears/predictor are a small share of time).
   They change the predicted durations and F0 on some lines. Poor trade.
-- **tf32** is 3–5% faster than f32 but moves the audio about one noise redraw (predictor GEMMs).
+- **tf32** is 3–5% faster than f32 but its distance from f32 is about the size of the
+  alternate-seed distance (predictor GEMMs).
   Poor trade; tf32all is identical in quality and slower.
 - **int8** (no calibration, dynamic per-tensor activation scales) is no faster than fp16 warm, slower
-  cold, and the farthest from f32 (~3.3 dB, 2.5× the noise floor, broadband). Not recommended
+  cold, and the farthest from f32 (~3.3 dB, 2.5× the alternate-seed distance, broadband). Not recommended
   without calibration work.
 - **Where time goes now (measured):**
   - Whole-system warm pass at fp16 (Alice, `--timeline`): the GPU stage is 1.09 of 1.28 s, still

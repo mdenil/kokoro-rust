@@ -1400,3 +1400,40 @@ extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_pro_res(con
     AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
     conv1d_wmma2_body<__nv_bfloat16, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
 }
+
+// PHASE 2 lever P2-L5 (non-f32 levels only): chan_stats_seg1 is FP64-throughput-bound on GeForce
+// (1/64 rate). Per-thread partials are accumulated in float over values shifted by the segment's first
+// element (limits cancellation in E[x^2] - m^2), then combined across threads in double.
+// Approximately lossless (different rounding), not bitwise identical to chan_stats_seg1.
+extern "C" __global__ void chan_stats_seg1f(const float* x, int L, const int* seg_start, const int* seg_len,
+                                            float eps, float* mean_out, float* rstd_out, int C) {
+    __shared__ double sh[256];
+    __shared__ double sq[256];
+    int c = blockIdx.x, b = blockIdx.y;
+    const float* row = x + (long)c * L + seg_start[b];
+    int T = seg_len[b];
+    const float shift = T > 0 ? row[0] : 0.0f;
+    float s = 0.0f, s2 = 0.0f;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+        float v = row[t] - shift;
+        s += v;
+        s2 += v * v;
+    }
+    sh[threadIdx.x] = (double)s;
+    sq[threadIdx.x] = (double)s2;
+    __syncthreads();
+    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
+        if (threadIdx.x < k) {
+            sh[threadIdx.x] += sh[threadIdx.x + k];
+            sq[threadIdx.x] += sq[threadIdx.x + k];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        double d = sh[0] / (double)T;
+        double var = sq[0] / (double)T - d * d;
+        if (var < 0.0) var = 0.0;
+        mean_out[b * C + c] = (float)((double)shift + d);
+        rstd_out[b * C + c] = 1.0f / sqrtf((float)var + eps);
+    }
+}

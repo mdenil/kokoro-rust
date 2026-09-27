@@ -46,7 +46,7 @@ kernels!(
     lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb, conv1d_wmma_f16_res, conv1d_wmma_bf16_res, conv1d_wmma_s8_res,
     lp_layout_a, conv1d_wmma2_f16, conv1d_wmma2_f16_res, conv1d_wmma2_bf16, conv1d_wmma2_bf16_res,
     conv1d_wmma2w_f16, conv1d_wmma2w_f16_res, conv1d_wmma2w_bf16, conv1d_wmma2w_bf16_res,
-    conv1d_wmma2w_f16_pro, conv1d_wmma2w_f16_pro_res, conv1d_wmma2w_bf16_pro, conv1d_wmma2w_bf16_pro_res,
+    conv1d_wmma2w_f16_pro, conv1d_wmma2w_f16_pro_res, conv1d_wmma2w_bf16_pro, conv1d_wmma2w_bf16_pro_res, chan_stats_seg1f,
     conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
 );
 
