@@ -209,12 +209,17 @@ install_model() {  # install_model BASE_URL DATA STAGING -> sets MODEL_DIR
   say "Model $MODEL_REV is in place."
 }
 
-write_launcher() {  # write_launcher BIN_DIR RELEASE_DIR MODEL_DIR
-  local bin_dir=$1 release=$2 model=$3 target=$1/kokoro
-  mkdir -p "$bin_dir"
+check_launcher_target() {  # never replace a kokoro command this installer did not write
+  local target=$1/kokoro
   if [[ -e $target || -L $target ]] && ! grep -qxF "$LAUNCHER_MARK" "$target" 2> /dev/null; then
     die "$target exists and was not written by this installer; move it away or set KOKORO_INSTALL_DIR"
   fi
+}
+
+write_launcher() {  # write_launcher BIN_DIR RELEASE_DIR MODEL_DIR
+  local bin_dir=$1 release=$2 model=$3 target=$1/kokoro
+  mkdir -p "$bin_dir"
+  check_launcher_target "$bin_dir"
   local tmp
   tmp=$(mktemp "$bin_dir/.kokoro.XXXXXX")
   cat > "$tmp" << EOF
@@ -244,6 +249,7 @@ main() {
   for p in "$data" "$bin_dir"; do
     [[ $p != *"'"* ]] || die "installation path contains a single quote: $p"
   done
+  check_launcher_target "$bin_dir"
   local release_base=${KOKORO_RELEASE_URL:-https://github.com/$REPO/releases/download/$version}
   local model_base=${KOKORO_MODEL_URL:-https://huggingface.co/hexgrad/Kokoro-82M/resolve/$MODEL_REV}
 
@@ -252,6 +258,7 @@ main() {
   staging=$(mktemp -d "$data/.install.XXXXXX")
   # shellcheck disable=SC2064  # expand now: remove this run's staging directory on any exit
   trap "rm -rf '$staging'" EXIT
+  trap 'exit 130' INT TERM HUP
 
   install_release "$version" "$release_base" "$data" "$staging"
   install_model "$model_base" "$data" "$staging"
