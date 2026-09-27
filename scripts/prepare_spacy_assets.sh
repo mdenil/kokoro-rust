@@ -5,7 +5,7 @@
 #   scripts/prepare_spacy_assets.sh DATA_DIR
 #
 # This is the only setup step that uses Python (CPython 3.12 with the standard venv module). It
-# creates an isolated virtual environment in DATA_DIR/tools/spacy-export (packages from PyPI, the
+# creates an isolated virtual environment in DATA_DIR/tools/spacy-export (pinned packages from PyPI, the
 # model wheel from explosion/spacy-models on GitHub) and runs scripts/export_spacy_assets.py.
 # The synthesizer itself never runs Python.
 set -euo pipefail
@@ -48,8 +48,9 @@ fi
 if [[ ! -x "$VENV/bin/python" ]]; then
   "$PY" -m venv "$VENV"
 fi
-"$VENV/bin/python" -m pip install --quiet --no-cache-dir --disable-pip-version-check \
-  spacy==3.8.14 thinc==8.3.13 numpy==2.4.6 safetensors==0.8.0 "$MODEL_WHL"
+# exact versions, no dependency resolution (scripts/spacy_export_requirements.txt)
+"$VENV/bin/python" -m pip install --quiet --no-cache-dir --disable-pip-version-check --no-deps \
+  -r "$HERE/spacy_export_requirements.txt" "$MODEL_WHL"
 "$VENV/bin/python" "$HERE/export_spacy_assets.py" "$OUT"
 (cd "$OUT" && echo "$EXPECTED" | sha256sum --check --quiet) || { echo "$0: exported files differ from the pinned hashes" >&2; exit 1; }
 echo "ok (verified) $OUT"

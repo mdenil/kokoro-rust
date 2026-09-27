@@ -7,10 +7,9 @@
 # Result:
 #   DATA_DIR/model/                             Kokoro-82M config, weights, voices af_heart + am_adam
 #   DATA_DIR/frontend/misaki-0.9.4/             misaki 0.9.4 US lexicons (from the misaki wheel)
-#   DATA_DIR/frontend/espeak-ng-1.52.0/         libespeak-ng 1.52.0 + espeak-ng-data (from the
-#                                               espeakng-loader 0.2.4 manylinux x86_64 wheel)
 #   DATA_DIR/downloads/                         the downloaded wheels
 # The spaCy part of the frontend data needs a Python step: scripts/prepare_spacy_assets.sh.
+# eSpeak NG is NOT downloaded: it is a system dependency (Debian/Ubuntu: sudo apt install libespeak-ng1).
 # Re-running is safe: files that already verify are not downloaded again.
 set -euo pipefail
 
@@ -28,8 +27,6 @@ REV=f3ff3571791e39611d31c381e3a41a3af07b4987
 HF="https://huggingface.co/hexgrad/Kokoro-82M/resolve/$REV"
 MISAKI_WHL=misaki-0.9.4-py3-none-any.whl
 MISAKI_URL=https://files.pythonhosted.org/packages/82/ec/0ee4110ddb54278b8f21c40a140370ae8f687036c4edf578316602697c56/$MISAKI_WHL
-ESPEAK_WHL=espeakng_loader-0.2.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-ESPEAK_URL=https://files.pythonhosted.org/packages/de/1e/25ec5ab07528c0fbb215a61800a38eca05c8a99445515a02d7fa5debcb32/$ESPEAK_WHL
 
 verify() {  # verify FILE SHA256 -> 0 if the file exists with that hash
   [[ -f "$1" ]] && [[ "$(sha256sum "$1" | cut -d' ' -f1)" == "$2" ]]
@@ -72,24 +69,10 @@ fetch "$MISAKI_URL" "$DATA/downloads/$MISAKI_WHL" 90e2eeb169786c014c429e5058d2ea
 extract "$DATA/downloads/$MISAKI_WHL" misaki/data/us_gold.json   "$DATA/frontend/misaki-0.9.4/us_gold.json"   dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f
 extract "$DATA/downloads/$MISAKI_WHL" misaki/data/us_silver.json "$DATA/frontend/misaki-0.9.4/us_silver.json" de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475
 
-# --- espeak-ng 1.52.0 library + data (GPL-3.0-or-later), from the espeakng-loader 0.2.4 wheel
-fetch "$ESPEAK_URL" "$DATA/downloads/$ESPEAK_WHL" 08721baf27d13d461f6be6eed9a65277e70d68234ff484fd8b9897b222cdcb6d
-ES="$DATA/frontend/espeak-ng-1.52.0"
-extract "$DATA/downloads/$ESPEAK_WHL" espeakng_loader/libespeak-ng.so.1.52.0 "$ES/libespeak-ng.so.1.52.0" b15ce0803b26254e8a0d088c6b9281a2637b2b02613147cc320cfdefaf2c3ccf
-ESPEAK_DATA_DIGEST=3c70a30029ed60daf705682bf2991611c0cca49b4158b75f2ec7abaa7e34ef29
-tree_digest() { (cd "$1" && find espeak-ng-data -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); }
-if [[ -d "$ES/espeak-ng-data" && "$(tree_digest "$ES")" == "$ESPEAK_DATA_DIGEST" ]]; then
-  echo "ok (present)  $ES/espeak-ng-data"
-else
-  tmp=$(mktemp -d "$DATA/downloads/unpack.XXXXXX")
-  unzip -q "$DATA/downloads/$ESPEAK_WHL" 'espeakng_loader/espeak-ng-data/*' -d "$tmp"
-  [[ "$(tree_digest "$tmp/espeakng_loader")" == "$ESPEAK_DATA_DIGEST" ]] || { echo "$0: unexpected espeak-ng-data content in $ESPEAK_WHL" >&2; rm -rf "$tmp"; exit 1; }
-  rm -rf "$ES/espeak-ng-data"
-  mv "$tmp/espeakng_loader/espeak-ng-data" "$ES/espeak-ng-data"
-  rm -rf "$tmp"
-  echo "ok (extracted) $ES/espeak-ng-data (364 files)"
-fi
-
 echo
 echo "Model:    $DATA/model"
 echo "Frontend: $DATA/frontend (run scripts/prepare_spacy_assets.sh $DATA to add the spaCy data)"
+if ! ldconfig -p 2>/dev/null | grep -q 'libespeak-ng\.so\.1 '; then
+  echo "Note: the system eSpeak NG library (libespeak-ng.so.1) was not found; text input needs it."
+  echo "      Debian/Ubuntu: sudo apt install libespeak-ng1"
+fi
