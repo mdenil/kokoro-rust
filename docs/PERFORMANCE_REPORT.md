@@ -66,6 +66,26 @@ Attribution, private chapter.
 - FMA vs strict is within noise at the whole-system level; the GPU kernels are not the only
   bottleneck.
 
+## PHASE-1 CHECKPOINT 1 — whole system after PL-006..PL-013 (2026-09-27 ~03:00; tree 69dcf43)
+Same harness and protocol as the baseline: production Python unchanged vs Rust strict (default) and
+FMA builds; cold = 3 interleaved processes; warm = 2 resident processes × 3 timed passes. Raw
+evidence: `/data/mdenil/code/kokoro-rust/evidence/system-baseline/20260927-021032-checkpoint1-alice`; private chapter `/data/mdenil/code/kokoro-rust/evidence/private/system-baseline/20260927-021032-checkpoint1-chapter` (aggregates only).
+
+| workload | metric | production Python | Rust strict | Rust FMA | Python / Rust strict (baseline) |
+|---|---|---|---|---|---|
+| private chapter (316 lines, 2915 s audio) | cold process wall | 67.71 s (cv 21.6%: one 96.55 s outlier kept) | **9.82 s** (cv 1.1%) | 9.58 s | **6.90×** (2.74×), provisional (Python cv) |
+| private chapter | warm resident pass | 53.69 s (cv 7.6%) | **8.08 s** (cv 0.5%) | 8.05 s | **6.64×** (2.63×), provisional (Python cv) |
+| Alice ch.1 (65 lines, 656 s audio) | cold process wall | 25.57 s (cv 9.5%) | **3.66 s** (cv 1.5%) | 3.54 s | **6.99×** (2.53×) |
+| Alice ch.1 | warm resident pass | 9.27 s (cv 12.0%) | **1.88 s** (cv 1.9%) | 1.83 s | **4.92×** (1.73×) |
+
+Rust chapter attribution (attribution run, warm pass ≈ 8.1 s): GPU synth 7.34 s busy; GPU starved
+0.38 s at the start; writer backpressure 0.24 s; frontend 7.3 s CPU across 16 threads (fully
+overlapped); writer 1.4 s CPU across 4 threads. Cold = 0.23 s outside main + model load 1.43 s
+(frontend load concurrent) + pass 8.16 s. The whole system is now GPU-bound (~90%).
+The FMA build equals strict within noise at whole-system level.
+Python ratios are provisional where Python's own cv > 5% (host load 6–17 from other users,
+recorded per run).
+
 ## Phase-1 lever receipts (approximately lossless; details in docs/PERF_LEDGER.md)
 Alice ch.1, sealed interleaved A/B (bench/ab_synth.py; identities, host/GPU state and coverage
 digests per run); warm = resident pass median, cold = process wall. All WAVs are bit-identical to
@@ -75,6 +95,18 @@ before for these host-side levers.
 |---|---|---|---|
 | PL-006 pipeline (parallel frontend, bounded window; 4 writers; fsync off; concurrent load) | 4.766 → 2.575 s, 1.85× (**provisional**: base cv 51.9% from one outlier; new cv 1.6%) | 9.749 → 5.504 s, 1.77× (cv 0.9% / 4.1%) | KEEP |
 | PL-007 load (ring SHA-256, contiguous .pth fast path) | 2.586 → 2.548 s (neutral) | 5.463 → 4.704 s, 1.16× | KEEP |
+| PL-008 fused implicit-GEMM dilated conv (Cin ≤ 128; explicit FMA) — approx. lossless: 135 seams pass, fail set identical, RB-1 0 violations | 2.567 → 2.137 s, 1.20× | 4.862 → 4.532 s, 1.07× (cv ~8%, provisional) | KEEP |
+| PL-009 residual epilogue in the fused conv + mask skip (bitwise identical) | 2.149 → 2.101 s, 1.023× (marginal) | — | KEEP |
+| PL-010 fused-conv input-channel chunk 8 → 4 (occupancy; bitwise identical) | 2.077 → 2.022 s, 1.027× | — | KEEP |
+| PL-011 first batch window 32 (accepted batching variation) | 2.036 → 1.968 s, 1.035× (chapter neutral) | — | KEEP |
+| PL-012 strided fused conv for the noise conv (approx. lossless; gates as PL-008) | 1.964 → 1.861 s, 1.055× | — | KEEP |
+| PL-013 skip exit teardown + CUDA init concurrent with parsing (bitwise identical) | neutral | 4.031 → 3.399 s, 1.19× | KEEP |
+
+Rejected or neutral, all recorded in docs/NEGATIVE_EVIDENCE.md:
+- NE-004: 128-channel conv tile, 13% slower.
+- NE-005: larger batches; the chapter OOMs and splits, no gain.
+- NE-006: AdaIN+Snake conv prologue; bitwise identical but slower.
+- NE-007: cp.async double buffering; neutral.
 
 Full-chapter checkpoints are pending after the next GPU-side levers.
 
