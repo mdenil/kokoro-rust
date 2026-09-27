@@ -1,4 +1,4 @@
-//! Milestone I1 (owner #15/#17): the ACTUAL `kokoro` binary, text line file -> per-line WAVs on the
+//! Integration: the ACTUAL `kokoro` binary, text line file -> per-line WAVs on the
 //! RTX 4090 with the NATIVE frontend, Python unavailable (scrubbed env, PATH without Python) and an
 //! execve audit (strace -f: the only exec is the binary itself; no helper processes).
 //! Pronunciation fidelity: each line's chunk graphemes/phonemes must equal the pinned reference
@@ -411,21 +411,23 @@ fn failures_restart_and_invalidation() {
     assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
-/// Complete private chapter acceptance (owner #15): the prepared chapter line file -> all per-line
+/// Complete private long-form acceptance (optional, local; KOKORO_PRIVATE_CHAPTER): the prepared line file -> all per-line
 /// WAVs through the binary, both voices, Python unavailable + execve audit; pronunciations vs the
 /// pinned reference. Private-safe: outputs under evidence/private (outside Git), only aggregates
 /// printed, no text/phonemes in messages.
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn private_chapter_acceptance() {
     // pinned input (sha256 + 316 lines) and pinned reference oracle (sha256, 316 records 1..=316,
     // 317 chunks, 9137 tokens) — a missing/truncated/duplicated/altered fixture fails here
-    support::read_pinned_bytes(&support::CHAPTER_INPUT).unwrap_or_else(|e| panic!("{e}"));
-    let input = support::data().join(support::CHAPTER_INPUT.path);
+    let pin = support::chapter_input();
+    support::read_pinned_bytes(&pin).unwrap_or_else(|e| panic!("{e}"));
+    let input = paths::private_chapter();
     let expected = oracle_lines(&CHAPTER, |_| true);
     assert_eq!(expected.len(), CHAPTER.lines);
     assert_eq!(expected.iter().map(|c| c.1.len()).sum::<usize>(), CHAPTER.chunks);
-    let stem = "002_hidden_curriculum_of_youth_whaddaya_want_from_me";
+    let stem = input.file_stem().unwrap().to_string_lossy().into_owned();
+    let stem = stem.as_str();
     let tag = bin().file_name().unwrap().to_string_lossy().into_owned();
     for voice in ["af_heart", "am_adam"] {
         let out = support::data().join("evidence/private/acceptance").join(&tag).join(voice);
@@ -454,7 +456,7 @@ fn private_chapter_acceptance() {
     }
 }
 
-/// Optional `--encode` (owner-approved external ffmpeg, #18): encoded files exist, hashes recorded,
+/// Optional `--encode` (external ffmpeg): encoded files exist, hashes recorded,
 /// and the only extra processes are ffmpeg (one per line) — still no Python.
 #[test]
 fn encode_with_ffmpeg_when_enabled() {

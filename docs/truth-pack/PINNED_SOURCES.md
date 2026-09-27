@@ -4,8 +4,8 @@ Pinned 2026-09-26 (all fetches executed on this host; see SOURCE_HASHES.md).
 
 ## Model (weights + config + voices)
 - HF repo: `hexgrad/Kokoro-82M` @ snapshot `f3ff3571791e39611d31c381e3a41a3af07b4987`
-  (production-observed revision; matches openclaw production cache per HERMES_BRIEF.md)
-- Local: `/data/mdenil/code/kokoro-rust/hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987`
+  (the revision observed in production use)
+- Local: `$KOKORO_DATA/hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987`
 - Weights: `kokoro-v1_0.pth` — 327,212,226 bytes, sha256 `496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4`
   (HF blob is content-addressed by this same sha256 ⇒ matches LFS etag by construction)
 - License: **apache-2.0** (README front-matter). Redistribution of converted derivatives: permitted
@@ -19,18 +19,18 @@ Pinned 2026-09-26 (all fetches executed on this host; see SOURCE_HASHES.md).
   - hexgrad/misaki HEAD `fba1236595f2d2bf21d414ba6e57d25256afada3`
 - kokoro license: Apache-2.0; misaki license: Apache-2.0 (verify in installed dist-info — OQ-L).
 
-## Runtime pins (from OBSERVED PRODUCTION, per HERMES_BRIEF — not from config.json)
+## Runtime pins (from observed production use, not from config.json)
 Python 3.12.3; torch==2.12.1; numpy==2.4.6; soundfile==0.14.0; transformers==5.12.1;
 espeakng-loader==0.2.4; spacy==3.8.14; en-core-web-sm==3.8.0; huggingface-hub==1.20.1;
 kokoro==0.9.4; misaki==0.9.4. CUDA_VISIBLE_DEVICES=0 (RTX 4090). Output: 24,000 Hz.
 The oracle scripts assert these pins at runtime and refuse on mismatch.
 
-- Reference venv: `/data/mdenil/code/kokoro-rust/reference/venv-prod` (uv-managed;
+- Reference venv: `$KOKORO_DATA/reference/venv-prod` (uv-managed;
   re-create with `scripts/setup_reference_env.sh`)
 
 ## Production contract being compared against (headline comparison scope)
 - KPipeline(lang_code='a'), voices af_heart / am_adam, selectable speed, CUDA:0,
-  resident/warm model. Baseline receipts under `/data/mdenil/code/kokoro-rust/evidence/`.
+  resident/warm model. Baseline receipts under `$KOKORO_DATA/evidence/` (outside Git).
 
 ## Host
 - CPU: 2× Intel Xeon E5-2698 v4 (Broadwell, 80 HT threads; AVX2/FMA/F16C — NO AVX-512/VNNI)

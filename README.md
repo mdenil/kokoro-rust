@@ -5,14 +5,15 @@ Native Rust + CUDA speech synthesis for [hexgrad/Kokoro-82M](https://huggingface
 text frontend (misaki 0.9.4 G2P, spaCy tokenizer/tagger and the espeak-ng fallback) is native;
 there is no Python at runtime.
 
-The model runs in the owner-accepted **BF16x** mixed-precision configuration (owner decision #25):
+The model runs in the **BF16x** mixed-precision configuration, selected after a listening review
+(docs/HISTORY.md):
 - BF16 tensor-core operands with f32 accumulation for the convolutions and linear layers;
 - f32 for LSTM recurrences, attention products, normalization and the source/STFT/iSTFT stages;
 - kernels built with strict rounding (`-fmad=false`).
 This is the only numerical mode.
 
-Status: main (canonical). Not released, not published, and no license chosen by the owner yet (the
-`license` field in Cargo.toml predates any owner decision).
+Status: not released or published. No project license has been decided yet: the `license` field in
+Cargo.toml predates that decision.
 
 ## Requirements
 Tested scope: Linux x86_64, RTX 4090 (compute capability 8.9), CUDA 12.9, American English. Other
@@ -61,10 +62,10 @@ Other options, all operational (they do not change the numerical mode):
 ## Tests
 ```
 KOKORO_DATA=/path/to/data cargo test --release -- --test-threads=2
-KOKORO_DATA=/path/to/data cargo test --release --test bf16x_golden -- --include-ignored   # + private chapter, local data only
+KOKORO_DATA=/path/to/data cargo test --release --test bf16x_golden -- --include-ignored   # + optional private case (local data)
 ```
-- `tests/bf16x_golden.rs` checks, byte for byte, that the build reproduces the owner-accepted
-  artifact on pinned public cases.
+- `tests/bf16x_golden.rs` checks, byte for byte, that the build reproduces the accepted BF16x
+  reference artifact on pinned public cases.
 - `tests/bf16x_reference.rs` pins the model inputs against the Python reference fixtures.
 - The frontend and CLI suites cover pronunciation fidelity, line mapping, resume, failure handling
   and the Python-free process audit.
@@ -72,7 +73,11 @@ Tests read their data root from `KOKORO_DATA` (required; outside Git). The GPU i
 `CUDA_VISIBLE_DEVICES` selection. They also need `strace` and `ffmpeg` on PATH and a non-pinned
 libespeak-ng for one negative control. Details and optional overrides: docs/PORTABILITY.md.
 
-## History (archival)
-- Porting, conformance and performance records: PORT_STATE.md, docs/PERFORMANCE_REPORT.md,
-  docs/PERF_LEDGER.md, docs/PHASE2_PRECISION.md, docs/conformance/.
-- The BF16x-only cleanup record: docs/RELEASE_CLEANUP.md.
+## Documentation
+- docs/PORTABILITY.md: configuration, tested scope and test prerequisites.
+- docs/DEPENDENCIES.md: runtime dependencies and their licenses.
+- docs/design/BATCHING.md: the batched inference layout.
+- docs/frontend/: the text frontend specification and coverage.
+- docs/truth-pack/: pinned upstream sources and hashes.
+- docs/HISTORY.md: how the product was reached (conformance, speed work, precision study).
+- bench/CORPUS.md: public benchmark and test corpora.

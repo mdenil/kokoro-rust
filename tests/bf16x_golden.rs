@@ -1,8 +1,8 @@
-//! BF16x product regression (owner #25/#26): the binary under test must reproduce, byte for byte,
-//! the per-line WAVs of the owner-accepted artifact (phase2-9b39d48, sha256 6fde9d88…12ea) on the
+//! BF16x product regression: the binary under test must reproduce, byte for byte,
+//! the per-line WAVs of the accepted reference artifact (phase2-9b39d48, sha256 6fde9d88…12ea) on the
 //! pinned public cases (tests/pinned/bf16x_golden.json, rendered by bench/make_bf16x_golden.py:
 //! deterministic across two runs of the accepted binary). Covers both voices, the float32 and default
-//! pcm16 outputs, speed, seed and one-item-per-batch execution. The private chapter case reads its
+//! pcm16 outputs, speed, seed and one-item-per-batch execution. The optional private-text case reads its
 //! hashes from $KOKORO_DATA/evidence/private (never in Git).
 //! Binary under test: $KOKORO_BIN or this crate's binary.
 
@@ -128,13 +128,13 @@ fn golden_detects_cross_item_leakage() {
     assert!(!d.is_empty(), "cross-item leakage was not detected by the golden comparison");
 }
 
-/// Private chapter (316 lines, both voices) vs the accepted artifact; hashes and text stay under
+/// Optional private long-form text (316 lines, both voices; KOKORO_PRIVATE_CHAPTER) vs the accepted artifact; hashes and text stay under
 /// $KOKORO_DATA/evidence/private.
 #[test]
 #[ignore = "private corpus; run explicitly"]
 fn private_chapter_matches_accepted_artifact() {
     let dir = data().join("evidence/private/release-cleanup/golden");
     let table: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("private_golden.json")).unwrap()).unwrap();
-    let input = data().join("bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt");
+    let input = paths::private_chapter();
     run_table(&table, Some(&input), &paths::scratch(&["bf16x_golden_private"]));
 }

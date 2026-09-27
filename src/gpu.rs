@@ -1,4 +1,4 @@
-//! CUDA engine: the owner-accepted BF16x mixed-precision forward (owner #25), hydrated from the host
+//! CUDA engine: the accepted BF16x mixed-precision forward, hydrated from the host
 //! weight structs (weight norm, AdaIN affine defaults, ... resolved once), run on one stream.
 //! - BF16 operands, f32 accumulation: every stride-1 convolution of the text encoder, predictor,
 //!   decoder and generator (fused tensor-core kernel where the shape allows, per-tap cuBLAS

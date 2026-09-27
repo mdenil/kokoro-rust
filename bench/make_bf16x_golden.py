@@ -1,4 +1,4 @@
-"""Render the BF16x regression goldens with the immutable owner-accepted binary (owner #25).
+"""Render the BF16x regression goldens with the immutable accepted reference binary.
 
 Every case runs the accepted artifact (phase2-9b39d48, `KOKORO_PRECISION=bf16x`, defaults otherwise)
 on a public input with fixed options, twice, and records the per-line WAV sha256 (both runs must
@@ -6,7 +6,7 @@ agree: determinism). The pinned table tests/pinned/bf16x_golden.json is what tes
 checks the current binary against; the WAVs themselves stay under $KOKORO_DATA (outside Git) for
 diagnosing any difference.
 
-Usage: python3 bench/make_bf16x_golden.py [--private CHAPTER_FILE]
+Usage: python3 bench/make_bf16x_golden.py [--private PRIVATE_TEXT_FILE]
 """
 import argparse
 import hashlib
@@ -62,12 +62,12 @@ def render(inp, voice, extra, out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--private", help="private chapter file: pin its hashes under $KOKORO_DATA/evidence/private only")
+    ap.add_argument("--private", help="optional private text file: pin its hashes under $KOKORO_DATA/evidence/private only (never in Git)")
     a = ap.parse_args()
     assert sha(ACCEPTED) == ACCEPTED_SHA256, "accepted binary hash mismatch"
     gold = DATA / "evidence/release-cleanup/golden"
     table = {"accepted_binary": "$KOKORO_DATA/bin/" + ACCEPTED.name, "accepted_sha256": ACCEPTED_SHA256, "tree": "9b39d48",
-             "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (owner #25 accepted configuration)",
+             "run_as": "KOKORO_PRECISION=bf16x, defaults otherwise (the accepted configuration)",
              "compare": "per-line WAV bytes (sha256); sidecars carry the engine identity and are not compared",
              "cases": {}}
     cases = list(CASES)
@@ -80,7 +80,7 @@ def main():
         h2 = render(path, voice, extra, gold / f"{case}.rerun")
         assert h1 == h2, f"{case}: accepted binary is not deterministic across runs"
         shutil.rmtree(gold / f"{case}.rerun")
-        table["cases"][case] = {"input": inp if not a.private else "<private chapter>", "input_sha256": sha(path), "voice": voice, "args": extra,
+        table["cases"][case] = {"input": inp if not a.private else "<private text>", "input_sha256": sha(path), "voice": voice, "args": extra,
                                 "lines": len(h1), "wav_sha256": {str(k): v for k, v in sorted(h1.items())}}
         print(f"{case}: {len(h1)} lines, deterministic across 2 runs", flush=True)
     dst = (gold / "private_golden.json") if a.private else (ROOT / "tests/pinned/bf16x_golden.json")

@@ -1,4 +1,4 @@
-"""Whole-system timing of the ORIGINAL production Python usage (owner #21): line file -> one WAV per
+"""Whole-system timing of the ORIGINAL production Python usage: line file -> one WAV per
 line, exactly as production uses kokoro 0.9.4 — KPipeline(lang_code='a') per line, concatenate the
 chunk audio, soundfile.write. Unchanged: torch default threads, default device selection (CUDA),
 no batching, no optimization.

@@ -1,9 +1,9 @@
-"""Whole-system comparison driver (owner #21): line file -> ALL per-line WAVs (+ Rust metadata).
+"""Whole-system comparison driver: line file -> ALL per-line WAVs (+ Rust metadata).
 
 Engines:
   py      ORIGINAL production Python as used (bench/system_reference.py; unchanged KPipeline per line)
   rust     the native binary under test (target/release/kokoro or $KOKORO_BIN_RUST), default settings
-  accepted the immutable owner-accepted BF16x artifact (owner #25; $KOKORO_BIN_ACCEPTED), run exactly
+  accepted the immutable accepted BF16x reference artifact ($KOKORO_BIN_ACCEPTED), run exactly
            as accepted (KOKORO_PRECISION=bf16x, default settings): the pre/post reference
 Phases (separate, never mixed):
   cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines

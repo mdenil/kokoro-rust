@@ -60,7 +60,7 @@ fn tokenizer_matches_oracle_public() {
 }
 
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn tokenizer_matches_oracle_private() {
     check_tokens(&CHAPTER);
 }
@@ -136,7 +136,7 @@ fn tagger_matches_oracle_public() {
 }
 
 #[test]
-#[ignore = "private chapter (local only)"]
+#[ignore = "private text (local only; KOKORO_PRIVATE_CHAPTER)"]
 fn tagger_matches_oracle_private() {
     check_tagger(&CHAPTER);
 }

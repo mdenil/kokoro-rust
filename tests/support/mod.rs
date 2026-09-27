@@ -111,14 +111,12 @@ pub const SOUP: Corpus = Corpus {
     private: false,
 };
 
-/// The prepared private chapter line file (primary workload; owner #8).
-pub const CHAPTER_INPUT: Pin = pin(
-    "bench/private/in-over-our-heads-ch01/002_hidden_curriculum_of_youth_whaddaya_want_from_me.txt",
-    "8129112a801ffb67d8974dddaa1de492232ea896f84bd121d45f8cf115b7aaad",
-    316,
-    false,
-    false,
-);
+/// The optional private long-form text (316 lines; location from KOKORO_PRIVATE_CHAPTER, content
+/// pinned by sha256; never in Git).
+pub fn chapter_input() -> Pin {
+    let path: &'static str = Box::leak(paths::private_chapter().to_string_lossy().into_owned().into_boxed_str());
+    pin(path, "8129112a801ffb67d8974dddaa1de492232ea896f84bd121d45f8cf115b7aaad", 316, false, false)
+}
 
 pub const ESPEAK_SYNTHETIC: Pin = pin("fixtures/frontend/espeak_synthetic.oracle.jsonl", "e46f396becce138f193017d46239917aaaa58054d8a038774ada089dd11d4daf", 83, false, false);
 pub const NUM2WORDS: Pin = pin("fixtures/frontend/num2words_en.oracle.jsonl", "b1864ab2c33126df92d902d954e091cb4625a219d49d27f8f3940a83c452915e", 37048, false, false);

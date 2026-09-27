@@ -39,7 +39,7 @@ reference venv. Cites are `en.py:<line>`. Configuration used by production: `KPi
 
 ## S3 Fallback (espeak.py)
 espeak-ng `en-us` via phonemizer (with_stress, tie '^', preserve punctuation) + E2M mapping table and
-post-rules (US: o^ʊ→O, ɜː(ɹ)→ɜɹ, ɪə→iə, drop ː; 'o'→'ɔ'; ɾ→T, ʔ→t); rating 2. GPL-3 (owner decision).
+post-rules (US: o^ʊ→O, ɜː(ɹ)→ɜɹ, ɪə→iə, drop ː; 'o'→'ɔ'; ɾ→T, ʔ→t); rating 2. GPL-3 (runtime-loaded; see docs/DEPENDENCIES.md).
 
 ## S4 Chunking (pipeline.py:174-221, 369-386)
 Input split on `\n+`; per segment `g2p` then `en_tokenize`: accumulate tokens while phoneme count

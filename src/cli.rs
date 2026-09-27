@@ -14,7 +14,7 @@ use std::time::Instant;
 pub const ENGINE_VERSION: &str = concat!("kokoro-rust ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser)]
-#[command(name = "kokoro", version, about = "Native Rust + CUDA speech synthesis for hexgrad/Kokoro-82M (BF16 mixed precision, the owner-accepted configuration)")]
+#[command(name = "kokoro", version, about = "Native Rust + CUDA speech synthesis for hexgrad/Kokoro-82M (BF16 mixed precision, the accepted configuration)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -164,8 +164,8 @@ struct Sidecar {
     phonemes: Vec<String>,
     dropped_phoneme_chars: Vec<String>,
     config: Config,
-    /// batching policy the line was synthesized under (provenance; not a resume key — batched and
-    /// batch-1 outputs are both owner-accepted)
+    /// batching policy the line was synthesized under (provenance only, not a resume key: outputs
+    /// made under different batching options are all valid)
     #[serde(default)]
     synthesis: serde_json::Value,
     wav: Option<String>,
@@ -789,7 +789,7 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
 /// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
 pub fn cli_main() -> Result<i32> {
     // The experimental precision selector is gone: this build has exactly one numerical mode, the
-    // owner-accepted BF16x path. Refuse any other requested mode instead of silently ignoring it.
+    // accepted BF16x path. Refuse any other requested mode instead of silently ignoring it.
     if let Some(v) = std::env::var_os("KOKORO_PRECISION") {
         if v != "bf16x" {
             anyhow::bail!("KOKORO_PRECISION={} is not supported: this engine has a single numerical mode (BF16x); unset it", v.to_string_lossy());

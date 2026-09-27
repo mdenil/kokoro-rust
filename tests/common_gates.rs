@@ -1,10 +1,10 @@
 // Shared spectral metric (G-SPEC definition, included via `#[path]`; used by the BF16x reference
 // diagnostic, tests/bf16x_reference.rs).
 //
-// G-SPEC (NONDET_FLOOR.md original text): "log-magnitude STFT (n_fft 1024, hop 256) mean |Δ dB|
+// G-SPEC (original gate text): "log-magnitude STFT (n_fft 1024, hop 256) mean |Δ dB|
 // ≤ 2 × floor-pair value (computed by the same comparator on the t1/t8 pair)". The original text
 // leaves the dB floor and framing unspecified; the literal reading implemented here was FIXED
-// BEFORE its first evaluation (2026-09-26) and is flagged for owner confirmation:
+// BEFORE its first evaluation (2026-09-26):
 //   periodic Hann(1024), hop 256, frames fully inside the signal (no padding),
 //   dB = 20·log10(max(|X|, 1e-5)), metric = mean over all bins×frames of |dB_a − dB_b|,
 //   floor pair = pinned reference cpu-t1 vs cpu-t8 on the floor case s02_fox__af_heart__s1.0.
