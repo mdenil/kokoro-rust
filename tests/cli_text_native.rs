@@ -1,4 +1,4 @@
-//! Integration: the ACTUAL `kokoro` binary, text line file -> per-line WAVs on the
+//! Integration (per-line output mode, `--per-line --diagnostics`): the ACTUAL `kokoro` binary, text line file -> per-line WAVs on the
 //! RTX 4090 with the NATIVE frontend, Python unavailable (scrubbed env, PATH without Python) and an
 //! execve audit (strace -f: the only exec is the binary itself; no helper processes).
 //! Pronunciation fidelity: each line's chunk graphemes/phonemes must equal the pinned reference
@@ -45,7 +45,7 @@ fn synth_path(input: &Path, out: &Path, extra: &[&str], path: &str) -> Run {
     // outputs are compared with the reference fixtures: use the reference eSpeak NG copy
     paths::pass_reference_espeak(&mut cmd);
     let o = paths::pass_cuda_env(&mut cmd)
-        .args(["synth", "--model-dir"])
+        .args(["synth", "--per-line", "--diagnostics", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
         .arg(input)
@@ -249,9 +249,12 @@ fn output_negative_controls(good: &Path, stem: &str, corpus: &Expected, voice: &
         let d = good.with_file_name(format!("negctl-{}", name.replace(' ', "_")));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
+        // the deliverables only (not the internal .kokoro/ bookkeeping directory)
         for e in std::fs::read_dir(good).unwrap() {
             let e = e.unwrap();
-            std::fs::copy(e.path(), d.join(e.file_name())).unwrap();
+            if e.file_type().unwrap().is_file() {
+                std::fs::copy(e.path(), d.join(e.file_name())).unwrap();
+            }
         }
         damage(&d);
         let r = verify_outputs(&d, stem, corpus, voice);
@@ -404,7 +407,7 @@ fn failures_restart_and_invalidation() {
     let mut cmd = Command::new(bin());
     cmd.env_clear().env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", d.join("no-such-dir"));
     let o = paths::pass_cuda_env(&mut cmd)
-        .args(["synth", "--model-dir"])
+        .args(["synth", "--per-line", "--diagnostics", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
         .arg(&input)

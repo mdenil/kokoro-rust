@@ -6,14 +6,19 @@ Engines:
   accepted the immutable accepted BF16x reference artifact ($KOKORO_BIN_ACCEPTED), run exactly
            as accepted (KOKORO_PRECISION=bf16x, default settings): the pre/post reference
 Phases (separate, never mixed):
-  cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines
+  cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines.
+          With --cache-warmup, each engine first runs once untimed (recorded as cachewarm-<engine>,
+          excluded from results) so the timed runs start with the disk/page cache warm.
   warm    one resident process per replicate: load, 1 untimed warm-up pass, P timed passes
   attr    one ATTRIBUTION process per engine (Python per-call timers; Rust timeline is always on) —
           stage breakdowns only, never headline timings
 Evidence (raw, unfiltered): <out>/raw.jsonl (one record per process: command, env, wall, rc, host state
 before/after, parsed stdout record, coverage), <out>/logs/<run>.{stdout,stderr}, Rust timelines,
 manifests; WAVs are hashed then deleted (coverage + identity kept).
-Usage: python bench/system_compare.py --corpus FILE --out DIR [--cold-reps 3 --warm-reps 2 --warm-passes 3]
+--output single: both engines write ONE WAV for the whole input (kokoro's default output; the Python
+reference with --single-wav); coverage is read from that WAV. --output per-line (default): the
+original per-line comparison.
+Usage: python bench/system_compare.py --corpus FILE --out DIR [--output single] [--cold-reps 3 --warm-reps 2 --warm-passes 3]
 """
 import argparse
 import hashlib
@@ -80,6 +85,30 @@ def wav_digest(d):
     return len(files), h.hexdigest()
 
 
+def wav_info(p):
+    """(sample count, sha256) of a PCM16 mono 24 kHz WAV with the canonical 44-byte header."""
+    b = pathlib.Path(p).read_bytes()
+    assert b[:4] == b"RIFF" and b[8:16] == b"WAVEfmt " and b[36:40] == b"data", f"{p}: unexpected WAV layout"
+    fmt, ch, rate, bits = int.from_bytes(b[20:22], "little"), int.from_bytes(b[22:24], "little"), int.from_bytes(b[24:28], "little"), int.from_bytes(b[34:36], "little")
+    data = int.from_bytes(b[40:44], "little")
+    assert (fmt, ch, rate, bits) == (1, 1, 24000, 16) and len(b) == 44 + data, f"{p}: not PCM16 mono 24 kHz"
+    return data // 2, hashlib.sha256(b).hexdigest()
+
+
+def single_coverage(out, passes, stem):
+    dirs = [out] if passes == 0 else [out / f"pass{k}" for k in range(passes + 1)]
+    cov = []
+    for d in dirs:
+        files = sorted(f.name for f in d.iterdir() if f.is_file())
+        entry = {"dir": d.name, "files": files}
+        w = d / f"{stem}.wav"
+        if w.exists():
+            entry["samples"], entry["wav_sha256"] = wav_info(w)
+            entry["audio_s"] = entry["samples"] / 24000
+        cov.append(entry)
+    return cov
+
+
 def rust_coverage(out, passes):
     dirs = [out] if passes == 0 else [out / f"pass{k}" for k in range(passes + 1)]
     cov = []
@@ -93,7 +122,7 @@ def rust_coverage(out, passes):
     return cov
 
 
-def run(rec_file, logs, name, cmd, env, out, engine, passes):
+def run(rec_file, logs, name, cmd, env, out, engine, passes, single_stem=None):
     host_before, waited = wait_quiet()
     shutil.rmtree(out, ignore_errors=True)
     t = time.perf_counter()
@@ -104,7 +133,23 @@ def run(rec_file, logs, name, cmd, env, out, engine, passes):
     rec = {"run": name, "engine": engine, "passes": passes, "cmd": cmd, "env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "KOKORO_FRONTEND_DIR", "KOKORO_PRECISION") if k in env},
            "rc": rc, "wall_s": wall, "waited_for_quiet_s": waited, "host_before": host_before, "host_after": host_after}
     stdout = (logs / f"{name}.stdout").read_text(errors="replace").strip()
-    if engine == "py":
+    if single_stem is not None:
+        if engine == "py":
+            try:
+                rec["record"] = json.loads(stdout.splitlines()[-1])
+            except Exception as e:  # noqa: BLE001
+                rec["record_error"] = repr(e)
+        else:
+            tlp = logs / f"{name}.timeline.json"
+            if tlp.exists():
+                tl = json.loads(tlp.read_text())
+                rec["record"] = {k: v for k, v in tl.items() if k != "spans"}
+                rec["timeline_file"] = tlp.name
+        try:
+            rec["coverage"] = single_coverage(out, passes, single_stem)
+        except Exception as e:  # noqa: BLE001
+            rec["coverage_error"] = repr(e)
+    elif engine == "py":
         try:
             rec["record"] = json.loads(stdout.splitlines()[-1])
         except Exception as e:  # noqa: BLE001
@@ -140,6 +185,8 @@ def main():
     ap.add_argument("--warm-passes", type=int, default=3)
     ap.add_argument("--engines", default="py,rust")
     ap.add_argument("--phases", default="cold,warm,attr")
+    ap.add_argument("--output", choices=["per-line", "single"], default="per-line")
+    ap.add_argument("--cache-warmup", action="store_true", help="one untimed run per engine before the cold phase")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -155,7 +202,7 @@ def main():
              "corpus_lines": corpus.read_text(encoding="utf-8").count("\n"), "voice": args.voice,
              "binaries": {k: {"path": str(v), "sha256": sha256_file(v)} for k, v in BINS.items() if k in engines},
              "python": PY, "reference_script_sha256": sha256_file(HERE / "system_reference.py"),
-             "args": vars(args), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "host": os.uname().nodename,
+             "compare_script_sha256": sha256_file(pathlib.Path(__file__)), "args": vars(args), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "host": os.uname().nodename,
              "nproc": os.cpu_count(), "host_start": host_state()}
     (out / "identity.json").write_text(json.dumps(ident, indent=1))
 
@@ -169,31 +216,45 @@ def main():
         e["KOKORO_FRONTEND_DIR"] = str(DATA / "frontend")
         return e
 
+    single = args.output == "single"
+
     def cmd(engine, name, o, passes, attribute=False):
         if engine == "py":
             c = [PY, str(HERE / "system_reference.py"), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice, "--passes", str(passes)]
-            return c + (["--attribute"] if attribute else [])
-        c = [str(BINS[engine]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
+            return c + (["--attribute"] if attribute else []) + (["--single-wav"] if single else [])
+        if single:
+            # the default command; the timeline (a small JSON) only where per-pass times are needed
+            c = [str(BINS[engine]), "synth", str(corpus), "--model-dir", str(SNAP), "--out-dir", str(o), "--voice", args.voice]
+            if passes or attribute:
+                c += ["--timeline", str(logs / f"{name}.timeline.json")]
+            return c + (["--bench-passes", str(passes)] if passes else [])
+        # current binaries write one WAV per input by default; this harness reads per-line outputs
+        per_line = ["--per-line", "--diagnostics"] if engine == "rust" else []
+        c = [str(BINS[engine]), "synth"] + per_line + ["--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
              "--timeline", str(logs / f"{name}.timeline.json")]
         return c + (["--bench-passes", str(passes)] if passes else [])
 
     phases = args.phases.split(",")
     if "cold" in phases:
+        if args.cache_warmup:
+            for e in engines:
+                name = f"cachewarm-{e}"
+                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0, corpus.stem if single else None)
         for k in range(args.cold_reps):
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"cold-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0)
+                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0, corpus.stem if single else None)
     if "warm" in phases:
         for k in range(args.warm_reps):
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"warm-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(e), work / name, e, args.warm_passes)
+                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(e), work / name, e, args.warm_passes, corpus.stem if single else None)
     if "attr" in phases:
         for e in engines:
             name = f"attr-{e}"
-            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(e), work / name, e, args.warm_passes)
+            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(e), work / name, e, args.warm_passes, corpus.stem if single else None)
     (out / "SHA256SUMS").write_text("".join(f"{sha256_file(p)}  {p.relative_to(out)}\n" for p in sorted(out.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"))
     print("done:", out)
 

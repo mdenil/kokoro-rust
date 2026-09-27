@@ -322,7 +322,7 @@ main() {
   local other
   other=$(find "$data/releases" -mindepth 1 -maxdepth 1 -type d ! -name "$version" ! -name '.*' -printf '%f ' 2> /dev/null || true)
   [[ -z $other ]] || say "Other installed versions (can be deleted from $data/releases): $other"
-  say "Try: kokoro synth --input book.txt --out-dir out/"
+  say "Try: kokoro synth book.txt   (writes book.wav in the current directory)"
   if ! command -v ffmpeg > /dev/null; then
     say "(Optional: install ffmpeg to use --encode for FLAC/MP3/Opus output.)"
   fi

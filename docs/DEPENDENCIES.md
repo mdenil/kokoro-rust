@@ -18,7 +18,7 @@ from explicit paths at runtime, except eSpeak NG, which is the system installati
 | item | detail |
 |---|---|
 | `target/release/kokoro` | Rust, built `cargo build --release` (CUDA is always required; there is no CPU build). `ldd` shows only libc, libm and libgcc_s. The CUDA kernels are compiled to PTX at build time (nvcc 12.9, compute_89) and embedded in the binary (`include_str!`). They are JIT-loaded by the driver. |
-| build configuration | One configuration: the BF16x build, kernels compiled with FMA contraction (`-fmad=true`). Recorded in every sidecar as `cuda bf16x kernels=fma(-fmad=true)`. (Other precision configurations were evaluated and are not included; see docs/VALIDATION.md.) |
+| build configuration | One configuration: the BF16x build, kernels compiled with FMA contraction (`-fmad=true`). Recorded in every per-line record (and in the `--diagnostics` JSON) as `cuda bf16x kernels=fma(-fmad=true)`. (Other precision configurations were evaluated and are not included; see docs/VALIDATION.md.) |
 
 ## Native libraries loaded at runtime
 | library | how | version on this host | license / note |
@@ -42,10 +42,12 @@ created on GPU 1.
 
 ## Optional (off by default)
 - `--encode <ext>` runs the external **`ffmpeg`** executable (found on PATH) as a subprocess, to
-  also write FLAC/MP3/Opus next to each WAV. The encoded file's sha256 is recorded in the sidecar.
-  It is not used by the default WAV path or by the no-Python /
-  no-subprocess runs. `tests/cli_text_native.rs::encode_with_ffmpeg_when_enabled`
-  covers it. With `--encode`, the execve audit shows the binary plus one ffmpeg per line.
+  also write FLAC/MP3/Opus: once for the whole-file WAV, or next to each WAV with `--per-line`. The
+  encoded file's sha256 is recorded in the per-line records (and with `--diagnostics` in the JSON
+  output). It is not used for WAV output or by the no-Python / no-subprocess runs.
+  `tests/cli_single_wav.rs::encode_converts_the_whole_file_once` and
+  `tests/cli_text_native.rs::encode_with_ffmpeg_when_enabled` (per-line) cover it. With `--encode
+  --per-line`, the execve audit shows the binary plus one ffmpeg per line.
 
 ## Build-time only
 Rust toolchain plus crates (Cargo.lock), and the CUDA toolkit nvcc 12.9 for the PTX. The oracle/,

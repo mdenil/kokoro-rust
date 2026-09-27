@@ -24,8 +24,8 @@ set -uo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 RELEASES=${1:?usage: $0 RELEASES_DIR WORK_DIR}
 WORK=${2:?usage: $0 RELEASES_DIR WORK_DIR}
-V1=v0.1.0-test1
-V2=v0.1.0-test2
+V1=${TEST_V1:-v0.1.0-test1}
+V2=${TEST_V2:-v0.1.0-test2}
 REV=f3ff3571791e39611d31c381e3a41a3af07b4987
 MODEL_COPY=${3:-}
 REAL_LDCONFIG=$(PATH="$PATH:/sbin:/usr/sbin" command -v ldconfig)
@@ -123,12 +123,14 @@ no_file() { [[ ! -e $1 ]]; }
 launcher_points_to() { grep -qF "$2/bin/kokoro" "$1/.local/bin/kokoro"; }
 no_staging() { ! compgen -G "$1/.install.*" > /dev/null; }
 
-synth() {  # synth PREFIX NAME [args...]: the installed command, no paths given; sets SYNTH_RC
+synth() {  # synth PREFIX NAME [args...]: `kokoro synth NAME.txt --diagnostics` run inside NAME-out/
+  # (the installed command, no paths given); sets SYNTH_RC
   local prefix=$1 name=$2
   shift 2
   [[ -e $WORK/$name.txt ]] || printf 'Hello from the installed kokoro command.\n' > "$WORK/$name.txt"
-  env -i HOME="$prefix" PATH="$prefix/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-    kokoro synth --input "$WORK/$name.txt" --out-dir "$WORK/$name-out" "$@" > "$WORK/$name.synth.log" 2>&1
+  mkdir -p "$WORK/$name-out"
+  (cd "$WORK/$name-out" && env -i HOME="$prefix" PATH="$prefix/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+    kokoro synth "$WORK/$name.txt" --diagnostics "$@" > "$WORK/$name.synth.log" 2>&1)
   SYNTH_RC=$?
   echo "  [synth $name] exit=$SYNTH_RC"
 }
@@ -155,7 +157,7 @@ if [[ -n $MODEL_COPY ]]; then
   echo "  (model from the verified local copy $MODEL_COPY, not downloaded again)"
   S1_MODEL=(KOKORO_MODEL_URL="file://$MODEL_COPY")
 fi
-MOCKPATH='' run_install s1 "$P" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" "${S1_MODEL[@]}"
+MOCKPATH='' run_install s1 "$P" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" "${S1_MODEL[@]}"
 D=$P/.local/share/kokoro
 check "exit 0" test "$RC" = 0
 check "launcher in ~/.local/bin" test -x "$P/.local/bin/kokoro"
@@ -167,12 +169,13 @@ check "PATH hint printed (bin dir not on PATH)" has "is not on your PATH"
 synth "$P" s1
 check "installed command, no path options: synthesis exit 0" test "$SYNTH_RC" = 0
 check "manifest: 1 done, 0 resumed, 0 failed, complete" manifest_is s1 1 0 0
-check "WAV is 24 kHz mono 16-bit PCM" wav_is_audio "$WORK/s1-out/s1_00001.wav"
-wav1=$(sha256sum < "$WORK/s1-out/s1_00001.wav")
+check "WAV is 24 kHz mono 16-bit PCM" wav_is_audio "$WORK/s1-out/s1.wav"
+check "one WAV + the manifest in the current directory" test "$(ls "$WORK/s1-out")" = "$(printf 's1.manifest.json\ns1.wav')"
+wav1=$(sha256sum < "$WORK/s1-out/s1.wav")
 synth "$P" s1
 check "installed command rerun (resume): exit 0" test "$SYNTH_RC" = 0
 check "resume manifest: 0 done, 1 resumed, 0 failed, complete" manifest_is s1 0 1 0
-check "resumed WAV unchanged" test "$(sha256sum < "$WORK/s1-out/s1_00001.wav")" = "$wav1"
+check "resumed WAV unchanged" test "$(sha256sum < "$WORK/s1-out/s1.wav")" = "$wav1"
 mkdir -p "$MIRROR"
 cp -r "$D/models/$REV/." "$MIRROR/"
 MIRROR_URL="file://$MIRROR"
@@ -180,7 +183,7 @@ MIRROR_URL="file://$MIRROR"
 echo "S2 rerun, same version: everything reused"
 ino_rel=$(stat -c %i "$D/releases/$V1")
 ino_model=$(stat -c %i "$D/models/$REV/kokoro-v1_0.pth")
-MOCKPATH='' run_install s2 "$P" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1"
+MOCKPATH='' run_install s2 "$P" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1"
 check "exit 0" test "$RC" = 0
 check "release reused" has "already installed and intact"
 check "release directory untouched" test "$(stat -c %i "$D/releases/$V1")" = "$ino_rel"
@@ -188,7 +191,7 @@ check "no model download" bash -c "! grep -q 'Downloading model' '$WORK/s2.log'"
 check "model file untouched" test "$(stat -c %i "$D/models/$REV/kokoro-v1_0.pth")" = "$ino_model"
 
 echo "S3 upgrade to $V2"
-MOCKPATH='' run_install s3 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="$URL2"
+MOCKPATH='' run_install s3 "$P" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="$URL2"
 check "exit 0" test "$RC" = 0
 check "launcher points to $V2" launcher_points_to "$P" "$D/releases/$V2"
 check "previous version kept" test -d "$D/releases/$V1"
@@ -200,7 +203,7 @@ check "manifest: 1 done, 0 failed, complete" manifest_is s3 1 0 0
 
 echo "S4 damaged installed release is repaired on rerun"
 rm "$D/releases/$V2/frontend/misaki-0.9.4/us_gold.json"
-MOCKPATH='' run_install s4 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="$URL2"
+MOCKPATH='' run_install s4 "$P" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="$URL2"
 check "exit 0" test "$RC" = 0
 check "release downloaded again" has "Downloading kokoro $V2"
 check "file restored" test -f "$D/releases/$V2/frontend/misaki-0.9.4/us_gold.json"
@@ -241,7 +244,7 @@ P8=$WORK/home-interrupt
 mkdir -p "$P8"
 # slow the download down (curl reads ~/.curlrc of this test HOME) so the signal lands mid-download
 printf 'limit-rate = 2M\n' > "$P8/.curlrc"
-( cd "$WORK" && env -i HOME="$P8" PATH=/usr/bin:/bin KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" \
+( cd "$WORK" && env -i HOME="$P8" PATH=/usr/bin:/bin KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" \
   timeout -s TERM 12 bash "$REPO/install.sh" > "$WORK/s8.log" 2>&1 ); RC=$?; OUT=$(cat "$WORK/s8.log")
 echo "[s8] exit=$RC"
 D8=$P8/.local/share/kokoro
@@ -250,7 +253,7 @@ check "no launcher" no_file "$P8/.local/bin/kokoro"
 check "no partial weights file" no_file "$D8/models/$REV/kokoro-v1_0.pth"
 check "staging removed" no_staging "$D8"
 rm -f "$P8/.curlrc"
-MOCKPATH='' run_install s8b "$P8" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH='' run_install s8b "$P8" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
 check "rerun completes" test "$RC" = 0
 
 echo "S9 corrupt model download"
@@ -258,7 +261,7 @@ P9=$WORK/home-badmodel
 BADM=$WORK/model-bad
 cp -r "$MIRROR" "$BADM"
 printf 'X' | dd of="$BADM/voices/am_adam.pt" bs=1 seek=100 conv=notrunc status=none
-MOCKPATH='' run_install s9 "$P9" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="file://$BADM"
+MOCKPATH='' run_install s9 "$P9" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="file://$BADM"
 check "exit non-zero" test "$RC" != 0
 check "model checksum mismatch reported" has "checksum mismatch for model file voices/am_adam.pt"
 check "corrupt voice not installed" no_file "$P9/.local/share/kokoro/models/$REV/voices/am_adam.pt"
@@ -267,7 +270,7 @@ check "no launcher" no_file "$P9/.local/bin/kokoro"
 # --- eSpeak NG consent (MOCK ldconfig hides libespeak-ng.so.1; MOCK sudo/apt-get) ---------------
 echo "S10 eSpeak NG missing, no terminal (KOKORO_TTY unusable)"
 P10=$WORK/home-notty
-MOCKPATH=$MOCKS/std run_install s10 "$P10" MOCK_HIDE_ESPEAK=1 KOKORO_TTY=/nonexistent/tty KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH=$MOCKS/std run_install s10 "$P10" MOCK_HIDE_ESPEAK=1 KOKORO_TTY=/nonexistent/tty KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit non-zero" test "$RC" != 0
 check "manual command shown" has "sudo apt-get install libespeak-ng1"
 check "sudo never called" no_file "$WORK/state/s10/sudo.log"
@@ -277,7 +280,7 @@ echo "S11 eSpeak NG missing, no controlling terminal at all (real /dev/tty, sets
 P11=$WORK/home-setsid
 mkdir -p "$P11" "$WORK/state/s11"
 curl -fsSL "file://$REPO/install.sh" | setsid -w env -i HOME="$P11" PATH="$MOCKS/std:/usr/bin:/bin" MOCK_STATE="$WORK/state/s11" \
-  MOCK_HIDE_ESPEAK=1 KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" bash > "$WORK/s11.log" 2>&1
+  MOCK_HIDE_ESPEAK=1 KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" bash > "$WORK/s11.log" 2>&1
 RC=${PIPESTATUS[1]}; OUT=$(cat "$WORK/s11.log"); echo "[s11] exit=$RC"
 check "exit non-zero" test "$RC" != 0
 check "no-terminal message" has "no terminal to ask for permission"
@@ -287,7 +290,7 @@ echo "S12 eSpeak NG missing, user declines"
 for ans in n ""; do
   printf '%s\n' "$ans" > "$WORK/tty-$ans-answer"
   P12=$WORK/home-decline-$ans
-  MOCKPATH=$MOCKS/std run_install "s12$ans" "$P12" MOCK_HIDE_ESPEAK=1 KOKORO_TTY="$WORK/tty-$ans-answer" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
+  MOCKPATH=$MOCKS/std run_install "s12$ans" "$P12" MOCK_HIDE_ESPEAK=1 KOKORO_TTY="$WORK/tty-$ans-answer" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
   check "answer '$ans': exit non-zero" test "$RC" != 0
   check "answer '$ans': question asked" has "[y/N]"
   check "answer '$ans': sudo never called" no_file "$WORK/state/s12$ans/sudo.log"
@@ -298,7 +301,7 @@ echo "S13 eSpeak NG missing, user agrees; XDG_DATA_HOME and KOKORO_INSTALL_DIR r
 printf 'y\n' > "$WORK/tty-yes"
 P13=$WORK/home-consent
 MOCKPATH=$MOCKS/std run_install s13 "$P13" MOCK_HIDE_ESPEAK=1 KOKORO_TTY="$WORK/tty-yes" XDG_DATA_HOME="$P13/xdg" KOKORO_INSTALL_DIR="$P13/mybin" \
-  KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
+  KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit 0" test "$RC" = 0
 check "sudo apt-get install -y libespeak-ng1 called once" test "$(cat "$WORK/state/s13/sudo.log" 2>/dev/null)" = "sudo apt-get install -y libespeak-ng1"
 check "apt-get stdin is the terminal, not the piped script" grep -qF "stdin=$WORK/tty-yes" "$WORK/state/s13/apt.log"
@@ -308,7 +311,7 @@ check "nothing in ~/.local" no_file "$P13/.local"
 
 echo "S14 user agrees, apt-get fails"
 P14=$WORK/home-aptfail
-MOCKPATH=$MOCKS/std run_install s14 "$P14" MOCK_HIDE_ESPEAK=1 MOCK_APT_EXIT=100 KOKORO_TTY="$WORK/tty-yes" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1"
+MOCKPATH=$MOCKS/std run_install s14 "$P14" MOCK_HIDE_ESPEAK=1 MOCK_APT_EXIT=100 KOKORO_TTY="$WORK/tty-yes" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1"
 check "exit non-zero" test "$RC" != 0
 check "failure reported" has "sudo apt-get install -y libespeak-ng1' failed"
 check "nothing installed" no_file "$P14/.local/share/kokoro"
@@ -316,7 +319,7 @@ check "nothing installed" no_file "$P14/.local/share/kokoro"
 # --- other preconditions ----------------------------------------------------------------------
 echo "S15 cuBLAS missing (MOCK ldconfig hides libcublas.so.12)"
 P15=$WORK/home-nocublas
-MOCKPATH=$MOCKS/std run_install s15 "$P15" MOCK_HIDE_CUBLAS=1 KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1"
+MOCKPATH=$MOCKS/std run_install s15 "$P15" MOCK_HIDE_CUBLAS=1 KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1"
 check "exit non-zero" test "$RC" != 0
 check "names the missing library" has "libcublas.so.12 (cuBLAS, CUDA 12)"
 check "says it does not install CUDA" has "does not install them"
@@ -325,7 +328,7 @@ check "nothing installed" no_file "$P15/.local/share/kokoro"
 echo "S16 unsupported machine (MOCK uname: aarch64)"
 ln -sf "$MOCKS/uname" "$MOCKS/no-uname/uname"
 P16=$WORK/home-arm
-MOCKPATH=$MOCKS/no-uname run_install s16 "$P16" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1"
+MOCKPATH=$MOCKS/no-uname run_install s16 "$P16" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1"
 check "exit non-zero" test "$RC" != 0
 check "platform message" has "Linux x86_64 only"
 
@@ -334,7 +337,7 @@ P17=$WORK/home-foreign
 mkdir -p "$P17/.local/bin"
 printf '#!/bin/sh\necho mine\n' > "$P17/.local/bin/kokoro"
 cp "$P17/.local/bin/kokoro" "$WORK/foreign.before"
-MOCKPATH='' run_install s17 "$P17" KOKORO_VERSION=$V1 KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH='' run_install s17 "$P17" KOKORO_VERSION="$V1" KOKORO_RELEASE_URL="$URL1" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit non-zero" test "$RC" != 0
 check "refusal message" has "was not written by this installer"
 check "file unchanged" cmp -s "$WORK/foreign.before" "$P17/.local/bin/kokoro"
@@ -358,11 +361,11 @@ fi
 
 echo "S20 explicit paths still override the installed defaults"
 env -i HOME="$P" PATH="$P/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-  kokoro synth --model-dir "$WORK/no-such-model" --input "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20a.log" 2>&1
+  kokoro synth --model-dir "$WORK/no-such-model" "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20a.log" 2>&1
 RC=$?; OUT=$(cat "$WORK/s20a.log")
 check "--model-dir override used (exit 2 naming it)" bash -c "[[ $RC == 2 ]] && grep -qF '$WORK/no-such-model' '$WORK/s20a.log'"
 env -i HOME="$P" PATH="$P/.local/bin:/usr/bin:/bin" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" KOKORO_FRONTEND_DIR="$WORK/no-such-frontend" \
-  kokoro synth --input "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20b.log" 2>&1
+  kokoro synth "$WORK/s1.txt" --out-dir "$WORK/s20-out" > "$WORK/s20b.log" 2>&1
 RC=$?
 check "KOKORO_FRONTEND_DIR override used (exit 2 naming it)" bash -c "[[ $RC == 2 ]] && grep -qF '$WORK/no-such-frontend' '$WORK/s20b.log'"
 
@@ -384,20 +387,20 @@ same_as_before() {
 }
 
 echo "F1 FAULT: moving the new copy into place fails"
-MOCKPATH=$MOCKS/fault run_install f1 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH=$MOCKS/fault run_install f1 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit non-zero" test "$RC" != 0
 check "fault was injected at the move" grep -q "injected fail" "$WORK/state/f1/mv.log"
 check "previous copy restored (message)" has "previous installation of this version was restored"
 check "old release content, launcher unchanged; no leftovers" same_as_before
 
 echo "F2 FAULT: TERM arrives at the same move"
-MOCKPATH=$MOCKS/fault run_install f2 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" MOCK_MV_FAULT=term KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH=$MOCKS/fault run_install f2 "$P" MOCK_MV_FAULT_DEST="$D/releases/$V2" MOCK_MV_FAULT=term KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit non-zero" test "$RC" != 0
 check "TERM was injected" grep -q "injected term" "$WORK/state/f2/mv.log"
 check "old release content, launcher unchanged; no leftovers" same_as_before
 
 echo "F3 FAULT: writing the launcher fails after the new copy was moved in"
-MOCKPATH=$MOCKS/fault run_install f3 "$P" MOCK_MV_FAULT_DEST="$P/.local/bin/kokoro" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH=$MOCKS/fault run_install f3 "$P" MOCK_MV_FAULT_DEST="$P/.local/bin/kokoro" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit non-zero" test "$RC" != 0
 check "fault was injected at the launcher" grep -q "injected fail" "$WORK/state/f3/mv.log"
 check "old release content, launcher unchanged; no leftovers" same_as_before
@@ -405,7 +408,7 @@ check "no temporary launcher left" bash -c "! compgen -G '$P/.local/bin/.kokoro.
 
 echo "F4 later failure before anything is replaced (corrupt model file download)"
 mv "$D/models/$REV/voices/am_adam.pt" "$WORK/am_adam.pt.saved"
-MOCKPATH='' run_install f4 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="file://$BADM"
+MOCKPATH='' run_install f4 "$P" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="file://$BADM"
 check "exit non-zero" test "$RC" != 0
 check "model checksum mismatch reported" has "checksum mismatch for model file voices/am_adam.pt"
 check "old release content, launcher unchanged; no leftovers" same_as_before
@@ -415,14 +418,14 @@ check "installed command still works: exit 0" test "$SYNTH_RC" = 0
 
 echo "F5 leftover of a run killed outright (SIMULATED: the release moved to .previous-$V2, nothing else)"
 mv "$D/releases/$V2" "$D/releases/.previous-$V2"
-MOCKPATH='' run_install f5 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="$URL2" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH='' run_install f5 "$P" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="$URL2" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit 0" test "$RC" = 0
 check "restored message" has "Restored the previous installation of $V2"
 check "restored copy reused as intact" has "already installed and intact"
 check "old release content, launcher unchanged; no leftovers" same_as_before
 
 echo "F6 same-version replacement without faults succeeds"
-MOCKPATH='' run_install f6 "$P" KOKORO_VERSION=$V2 KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
+MOCKPATH='' run_install f6 "$P" KOKORO_VERSION="$V2" KOKORO_RELEASE_URL="file://$REPUB" KOKORO_MODEL_URL="$MIRROR_URL"
 check "exit 0" test "$RC" = 0
 check "new content in place" test -f "$D/releases/$V2/frontend/REPUBLISHED"
 check "no .previous left" no_file "$D/releases/.previous-$V2"
@@ -434,7 +437,7 @@ check "no staging left" no_staging "$D"
 pty_install() {
   local name=$1 prefix=$2 typed=$3
   mkdir -p "$prefix" "$WORK/state/$name"
-  local cmd="curl -fsSL 'file://$REPO/install.sh' | env -i HOME='$prefix' PATH='$MOCKS/pty:/usr/bin:/bin' MOCK_STATE='$WORK/state/$name' MOCK_HIDE_ESPEAK=1 KOKORO_VERSION=$V1 KOKORO_RELEASE_URL='$URL1' KOKORO_MODEL_URL='$MIRROR_URL' bash"
+  local cmd="curl -fsSL 'file://$REPO/install.sh' | env -i HOME='$prefix' PATH='$MOCKS/pty:/usr/bin:/bin' MOCK_STATE='$WORK/state/$name' MOCK_HIDE_ESPEAK=1 KOKORO_VERSION='$V1' KOKORO_RELEASE_URL='$URL1' KOKORO_MODEL_URL='$MIRROR_URL' bash"
   printf '%b' "$typed" | SHELL=/bin/bash script -qefc "$cmd" "$WORK/$name.typescript" > /dev/null 2>&1
   RC=$?
   OUT=$(cat "$WORK/$name.typescript")

@@ -1,4 +1,6 @@
-//! Audiobook line-file interface exercised through the ACTUAL `kokoro` binary.
+//! Per-line output mode (`--per-line --diagnostics`: one WAV and one JSON file per line, plus the
+//! manifest) exercised through the ACTUAL `kokoro` binary. The default one-WAV output is covered by
+//! tests/cli_single_wav.rs.
 //! Phoneme-mode input; the native text path is covered by tests/cli_text_native.rs.
 //! Runs the product (CUDA) with short lines; GPU selection comes from the caller's CUDA_VISIBLE_DEVICES.
 
@@ -18,7 +20,7 @@ fn synth(input: &Path, out: &Path, extra: &[&str]) -> (i32, String) {
     let mut cmd = Command::new(paths::bin());
     cmd.env_clear().env("PATH", "/nonexistent");
     let o = paths::pass_cuda_env(&mut cmd)
-        .args(["synth", "--input-format", "phonemes", "--model-dir"])
+        .args(["synth", "--per-line", "--diagnostics", "--input-format", "phonemes", "--model-dir"])
         .arg(model_dir())
         .arg("--input")
         .arg(input)

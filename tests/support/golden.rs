@@ -30,7 +30,7 @@ pub fn render_env(input: &Path, voice: &str, args: &[String], out: &Path, env: &
     paths::pass_reference_espeak(&mut cmd);
     cmd.envs(env.iter().copied()).env("PATH", "/nonexistent").env("KOKORO_FRONTEND_DIR", paths::frontend_dir());
     let o = paths::pass_cuda_env(&mut cmd)
-        .args(["synth", "--model-dir"])
+        .args(["synth", "--per-line", "--diagnostics", "--model-dir"])
         .arg(paths::model_dir())
         .arg("--input")
         .arg(input)

@@ -3,6 +3,9 @@ line, exactly as production uses kokoro 0.9.4 — KPipeline(lang_code='a') per l
 chunk audio, soundfile.write. Unchanged: torch default threads, default device selection (CUDA),
 no batching, no optimization.
 
+--single-wav writes the whole input as ONE WAV, <input stem>.wav (the audio of all lines in order,
+written once at the end of the pass, inside the timed pass), matching kokoro's default output.
+
 Modes (each invocation is ONE process; the driver runs cold replicates as separate processes):
   --passes 0   cold: import + pipeline/model load + one pass over the file (writes WAVs)
   --passes N   warm resident: import + load + 1 untimed warm-up pass + N timed passes, each into a
@@ -32,6 +35,7 @@ def main():
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--passes", type=int, default=0)
     ap.add_argument("--attribute", action="store_true")
+    ap.add_argument("--single-wav", action="store_true", help="write one WAV for the whole input instead of one per line")
     args = ap.parse_args()
 
     import numpy as np
@@ -78,16 +82,25 @@ def main():
         t = time.perf_counter()
         first = None
         samples = 0
+        whole = []
         for i, line in enumerate(lines):
             chunks = [r.audio.numpy() for r in pipe(line, voice=args.voice, speed=args.speed)]
             audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
             tw = time.perf_counter()
-            sf.write(outdir / f"{i + 1:05d}.wav", audio, 24000)
+            if args.single_wav:
+                whole.append(audio)
+            else:
+                sf.write(outdir / f"{i + 1:05d}.wav", audio, 24000)
             if args.attribute:
                 timers["write_s"] += time.perf_counter() - tw
             if first is None:
                 first = time.perf_counter() - t
             samples += audio.shape[0]
+        if args.single_wav:
+            tw = time.perf_counter()
+            sf.write(outdir / f"{pathlib.Path(args.input).stem}.wav", np.concatenate(whole) if whole else np.zeros(0, dtype=np.float32), 24000)
+            if args.attribute:
+                timers["write_s"] += time.perf_counter() - tw
         wall = time.perf_counter() - t
         return {"wall_s": wall, "first_line_s": first, "samples": samples, "audio_s": samples / 24000, **dict(timers)}
 
@@ -100,6 +113,7 @@ def main():
     t_end = time.perf_counter()
     print(json.dumps({
         "engine": "production python: kokoro 0.9.4 KPipeline(lang_code='a') per line + soundfile.write",
+        "output": "one WAV for the whole input" if args.single_wav else "one WAV per line",
         "torch": torch.__version__, "torch_threads": torch.get_num_threads(), "cuda": torch.cuda.is_available(),
         "device": str(pipe.model.device) if pipe.model is not None else None, "attribute": args.attribute,
         "voice": args.voice, "speed": args.speed, "input": args.input, "input_lines": len(lines),
