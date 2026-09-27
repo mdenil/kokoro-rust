@@ -10,11 +10,11 @@ into one WAV.
 On an RTX 4090, reading chapters I–III of *Alice's Adventures in Wonderland* (251 lines, 31 minutes
 of audio) into one WAV:
 
-| | Python Kokoro 0.9.4 | kokoro-rust | |
-|---|---|---|---|
-| Whole command, disk cache warm | 52.5 s | 5.1 s | 10.4× faster |
+| Upstream Kokoro (median) | kokoro-rust (median) | Speedup |
+|---|---|---|
+| 52.5 s | 5.1 s | 10.4× |
 
-Median of 5 runs, including startup and model loading. [How this was measured](docs/VALIDATION.md#performance)
+Median of 5 whole-command runs, disk cache warm, including startup and model loading. [How this was measured](docs/VALIDATION.md#performance)
 
 ## Install
 
