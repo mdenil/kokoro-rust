@@ -8,7 +8,7 @@
 #
 # binary:   OUT_DIR/kokoro-x86_64-linux.tar.gz, containing kokoro-x86_64-linux/
 #             bin/kokoro, VERSION, README.md, THIRD_PARTY.md,
-#             licenses/crates/<crate>-<version>/ (license files of the compiled-in Rust crates),
+#             licenses/crates/<crate>-<version>/ (license files of the Rust crates used to build it),
 #             licenses/CRATES.tsv (name, version, license expression, source)
 # frontend: OUT_DIR/kokoro-frontend.tar.gz, containing frontend/
 #             misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, VERSION,
@@ -47,7 +47,7 @@ package_binary() {
   install -m 755 "$ROOT/target/release/kokoro" "$pkg/bin/kokoro"
   echo "$version" > "$pkg/VERSION"
   cp "$ROOT/README.md" "$ROOT/docs/THIRD_PARTY.md" "$pkg/"
-  # license files of every crate compiled into the Linux x86_64 binary (normal and build deps)
+  # license files of every crate used to build the Linux x86_64 binary (normal and build deps)
   (cd "$ROOT" && cargo metadata --format-version 1 --locked --filter-platform x86_64-unknown-linux-gnu) \
     | python3 "$ROOT/scripts/collect_crate_licenses.py" "$pkg/licenses"
   archive "$stage" kokoro-x86_64-linux "$out/kokoro-x86_64-linux.tar.gz"

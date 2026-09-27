@@ -1,4 +1,4 @@
-"""Copy the license files of every Rust crate compiled into the binary into a release package.
+"""Copy the license files of every Rust crate used to build the binary into a release package.
 
 Reads `cargo metadata --format-version 1 --filter-platform <target>` JSON on stdin and writes, under
 the directory given as the only argument:

@@ -107,6 +107,7 @@ ensure_espeak() {
   printf "Install it now with '%s'? sudo may ask for your password. [y/N] " "$manual" >&2
   local answer=""
   read -r answer <&3 || true
+  [[ -t 3 ]] || printf '\n' >&2
   exec 3>&-
   case $answer in
     y | Y | yes | Yes | YES) ;;
@@ -128,7 +129,7 @@ resolve_version() {
   [[ -z ${KOKORO_RELEASE_URL:-} ]] || die "KOKORO_RELEASE_URL needs KOKORO_VERSION"
   local url
   url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") \
-    || die "could not reach https://github.com/$REPO/releases/latest"
+    || die "could not look up the latest release at https://github.com/$REPO/releases (no published release, or no network access); KOKORO_VERSION selects a version"
   case $url in
     */releases/tag/*) printf '%s\n' "${url##*/releases/tag/}" ;;
     *) die "no published release found at https://github.com/$REPO/releases" ;;

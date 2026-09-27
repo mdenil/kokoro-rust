@@ -3,7 +3,10 @@
 This lists what the program and its setup use from others, where it comes from, and the license
 stated by its source. It records facts as found; it is not legal advice.
 
-## Downloaded by the setup scripts (not in this repository)
+## Downloaded by the installer or the setup scripts (not in this repository)
+The release's `kokoro-frontend.tar.gz` contains the exported misaki and spaCy data below, with the
+license files of misaki, spaCy and en_core_web_sm. The model comes directly from Hugging Face.
+
 | component | used for | origin (pinned) | license (as stated by the source) |
 |---|---|---|---|
 | Kokoro-82M `config.json`, `kokoro-v1_0.pth`, voices `af_heart`, `am_adam` | the model | Hugging Face `hexgrad/Kokoro-82M`, revision `f3ff3571` (each file sha256-pinned) | Apache-2.0 (model card). The model card names yl4579/StyleTTS2-LJSpeech as the base model and cites the StyleTTS 2 and ISTFTNet papers; the StyleTTS2 code repository is MIT-licensed. |
@@ -20,9 +23,10 @@ stated by its source. It records facts as found; it is not legal advice.
 | ffmpeg (optional, `--encode` only) | encoding WAV to other formats | the executable found on PATH, run as a separate process | its own license (LGPL/GPL depending on the build) |
 
 ## Compiled into the program
-- Rust crates from crates.io, pinned in Cargo.lock: 66 crates (all platforms). Their licenses are
-  MIT, Apache-2.0, ISC, Zlib, Unlicense and Unicode-3.0, alone or as alternatives
-  (`cargo metadata` shows each crate's license expression). No GPL or MPL crate is included.
+- Rust crates from crates.io, pinned in Cargo.lock: 51 crates used to build the Linux x86_64
+  program, including build-time helpers (66 across all platforms). Their licenses are MIT, Apache-2.0, ISC, Zlib, Unlicense and Unicode-3.0, alone
+  or as alternatives. No GPL or MPL crate is included. The release package carries each crate's
+  license files under `licenses/crates/` and a list in `licenses/CRATES.tsv`.
 - Number words: `src/frontend/num2words.rs` re-implements, for the cases misaki uses, the behaviour
   of the Python package num2words 0.5.14 (LGPL, per its package metadata). It was checked against num2words' output; the
   file states that no num2words code was copied.
