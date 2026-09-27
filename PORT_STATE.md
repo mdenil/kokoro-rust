@@ -2,15 +2,18 @@
 
 ## CURRENT PRIORITY (owner #21-#23, 2026-09-26): SPEED — PHASE 1 (approximately lossless, main) then PHASE 2 (lossy, separate branch)
 - Step 1 DONE: whole-system baseline (tree 6e306b7). Chapter Python / Rust: cold 2.74×, warm 2.63×.
-- Step 2 IN PROGRESS (phase 1, approximately lossless):
-  - levers PL-006..PL-015 kept; NE-004..NE-008 rejected or neutral (docs/PERF_LEDGER.md,
-    docs/NEGATIVE_EVIDENCE.md);
-  - checkpoint 1 (tree 69dcf43): chapter cold 6.90×, warm 6.64×; Alice 6.99× / 4.92×
-    (docs/PERFORMANCE_REPORT.md).
-- Step 2: perf ritual on the measured bottleneck (one lever at a time, regression + negative controls,
-  A/B, keep/revert). Continue across ALL meaningful bottlenecks until severely diminishing returns
-  (owner #22 stopping criterion); then report the best config, gains vs incumbent, tried/rejected
-  levers and residual opportunities. Never disturb other users' jobs; record contention.
+- Step 2 DONE — PHASE 1 FROZEN at tree 3dc5a35 (owner #22 stopping criterion; evidence in
+  docs/PERFORMANCE_REPORT.md "Phase-1 stopping decision" and NE-004..NE-010).
+  - Levers PL-006..PL-016 kept.
+  - Final whole-system result (private chapter, clean cv on both arms): Python / Rust = cold 7.90×
+    (69.48 → 8.79 s), warm 7.13× (52.28 → 7.33 s).
+  - Alice warm 4.76× is provisional (Python cv 10.1%).
+  - Phase-1 binaries preserved: $KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35.
+- PHASE 2 IN PROGRESS on branch experiment/reduced-precision (worktree target/worktrees/phase2, from
+  3dc5a35): precision ladder f32 | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8 (docs there:
+  docs/PHASE2_PRECISION.md). All non-f32 are UNREVIEWED; no merge; main defaults unchanged.
+  - The morning pack must include the PL-014 changed-case pairs s03_moon/am_adam and
+    s06_long/af_heart (raw rows in the PL-014 evidence dir).
 - Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
   RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
   must be escalated.

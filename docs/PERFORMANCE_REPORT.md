@@ -66,6 +66,50 @@ Attribution, private chapter.
 - FMA vs strict is within noise at the whole-system level; the GPU kernels are not the only
   bottleneck.
 
+## PHASE-1 FINAL — whole system after PL-006..PL-016 (2026-09-27 ~04:20; tree 3dc5a35) — CURRENT HEADLINE
+Current incumbent: ORIGINAL production Python, unchanged (kokoro 0.9.4 KPipeline per line + soundfile,
+default torch threads, CUDA). Rust: phase-1 final binaries, preserved as
+`$KOKORO_DATA/bin/phase1-final-strict-3dc5a35` (sha256 0d923125…) and `…-fma-3dc5a35` (043c4e10…).
+Protocol:
+- cold = 3 interleaved fresh processes; warm = 2 resident processes × 3 timed passes;
+- no resume skips; every run waited for GPU 0 to be idle;
+- host load recorded (other users' jobs active, not disturbed);
+- both engines' outputs hashed OUTSIDE the timed processes.
+Raw evidence: `/data/mdenil/code/kokoro-rust/evidence/system-baseline/20260927-032837-phase1final-alice`; private chapter `/data/mdenil/code/kokoro-rust/evidence/private/system-baseline/20260927-032837-phase1final-chapter` (aggregates only).
+
+| workload | metric | production Python | Rust strict (default) | Rust FMA (opt-in) | Python / Rust strict |
+|---|---|---|---|---|---|
+| private chapter (316 lines, 2915 s audio) | cold process wall | 69.48 s (cv 4.0%) | **8.79 s** (cv 0.6%) | 8.51 s (cv 2.5%) | **7.90×** (FMA 8.16×) |
+| private chapter | warm resident pass | 52.28 s (cv 3.6%) | **7.33 s** (cv 0.6%) | 7.20 s (cv 0.5%) | **7.13×** (FMA 7.26×) |
+| Alice ch.1 (65 lines, 656 s audio) | cold process wall | 23.35 s (cv 0.9%) | **3.23 s** (cv 2.2%) | 3.40 s (cv 51.0%: first-run 7.45 s kept — likely the driver JIT-compiling the new PTX on first launch) | **7.22×**; FMA ratio PROVISIONAL |
+| Alice ch.1 | warm resident pass | 8.03 s (cv 10.1%) | **1.69 s** (cv 0.9%) | 1.67 s (cv 2.1%) | 4.76×, PROVISIONAL (Python cv 10.1%) |
+
+Clean and headline-grade (cv ≤ 5% on both arms): the private chapter, cold 7.90× and warm 7.13×.
+Progress vs the whole-system baseline (tree 6e306b7): the chapter went from 2.74× / 2.63× to
+7.90× / 7.13×. Rust wall times moved from cold 24.47 → 8.79 s and warm 19.44 → 7.33 s.
+Scope reminders:
+- Rust writes sidecars, a manifest and hashes in addition to the WAVs; Python writes WAVs only.
+- The FMA build equals strict within noise (it is the owner-accepted opt-in).
+- Single-item quality is unchanged vs the strict baseline for the bitwise-identical levers. The
+  approximately lossless ones are disclosed per lever (PL-008/012 RB-1-clean; PL-014 batched
+  metric-level disclosure).
+
+## Phase-1 stopping decision (owner #22 criterion) — PHASE 1 FROZEN at tree 3dc5a35
+Evidence that returns are severely diminishing (not an assumed roofline, not one failed experiment):
+- Recent keeps: PL-014 1.027×, PL-015 cold 1.037–1.065×, PL-016 1.082×.
+- Rejected or neutral in the same session: NE-004 (tile 128, −13%), NE-005 (bigger batches, OOM),
+  NE-006 (prologue fusion, slower), NE-007 (double buffering, neutral), NE-008 (host threads,
+  neutral), NE-009 (256-ch fused conv: faster but exceeds RB-1, so not approximately lossless).
+- Remaining f32 opportunities, each small and costly:
+  - stage-0 cuBLAS SGEMM (23% of kernel time): only replaceable with RB-1-violating reorderings
+    (NE-009) or reduced precision, i.e. phase 2;
+  - AdaIN apply 8% + stats 8%: a fusion into conv epilogues needs deterministic item-segmented
+    partial reductions; estimated ≤ 6%;
+  - LSTM 5.6%; GPU gaps/copies ~8%; GPU-side ALBERT embeddings: small;
+  - first-run PTX JIT on a fresh binary (cold only, once per build): could ship SASS (cubin/fatbin).
+- Everything larger requires lower precision: tensor cores, i.e. PHASE 2 (lossy) on branch
+  experiment/reduced-precision.
+
 ## PHASE-1 CHECKPOINT 1 — whole system after PL-006..PL-013 (2026-09-27 ~03:00; tree 69dcf43)
 Same harness and protocol as the baseline: production Python unchanged vs Rust strict (default) and
 FMA builds; cold = 3 interleaved processes; warm = 2 resident processes × 3 timed passes. Raw
@@ -112,6 +156,7 @@ before for these host-side levers.
 | PL-013 skip exit teardown + CUDA init concurrent with parsing (bitwise identical) | neutral | 4.031 → 3.399 s, 1.19× (cv 3.4% / 1.0%) | KEEP |
 | PL-014 single-pass per-item channel stats (batched AdaIN; approx. lossless) | 1.872 → 1.822 s, 1.027× (cv 0.6% / 0.4%) | — | KEEP (see disclosure below) |
 | PL-015 frontend prefetch during model load (bitwise identical) | neutral | Alice 3.638 → 3.508 s, 1.037× (cv 7.6% / 4.1% → provisional); chapter 9.892 → 9.289 s, 1.065× (cv 2.4% / 2.4%) | KEEP |
+| PL-016 sliding-window fused conv, templated (K, dil) (bitwise identical) | 1.836 → 1.696 s, 1.082× (cv 0.8% / 0.8%) | — | KEEP |
 
 PL-014 disclosure (exact failure sets). Batch-1 path: failure set unchanged. Batched path: two
 metric-level gate crossings were added, both on cases that already failed:
