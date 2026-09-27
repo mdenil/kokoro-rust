@@ -206,3 +206,14 @@ the frozen baseline is not.
   - sealed whole-system A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-010949-L9-resfuse-alice`): Alice warm 2.149 → 2.101 s (1.023×; the "on" arm has one
     2.331 s outlier, cv 5.6%). Marginal.
 - Also tried and reverted: the AdaIN+Snake prologue fusion (NE-006, slower).
+
+### PL-010 — conv1d_igemm input-channel chunk 8 → 4 (occupancy)   [2026-09-27 | KEEP; bitwise identical]
+- Hypothesis: the fused conv is occupancy-bound; ~27 KB smem/block at K = 11 allows ~3 blocks/SM.
+- Sweep (forward, Alice 69 chunks, 3 reps):
+  - IG_BK = 2 → 1.845 s; 4 → 1.766 s; 8 → 1.828 s.
+  - Cin policy 256 vs 128 at BK = 4: 1.775 vs 1.766 s, so 128 is kept.
+- The chunk only regroups the input-channel loop; the accumulation order (ci-major, tap-minor) is
+  unchanged, so WAVs are bitwise identical to BK = 8 (Alice 65/65).
+- The chunk size is now a build knob (KOKORO_IG_BK, default 4), passed by build.rs to both nvcc
+  (-DIG_BK) and the Rust launcher, so they cannot disagree.
+- Sealed A/B (`/data/mdenil/code/kokoro-rust/evidence/ab/20260927-011907-L10-igbk4-alice`; PL-009 binary bd4e0cbd… vs 5dc9783e…): Alice warm 2.077 → 2.022 s (1.027×).

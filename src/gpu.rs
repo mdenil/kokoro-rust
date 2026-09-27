@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 type Buf = CudaSlice<f32>;
 
+pub const IG_BK_CU: usize = match usize::from_str_radix(env!("KOKORO_IG_BK"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_IG_BK") };
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
 /// Kernel rounding mode baked in at build time ("fma" default, or "strict(-fmad=false)").
 pub const KERNEL_ROUNDING: &str = env!("KOKORO_KERNEL_ROUNDING");
@@ -245,6 +246,8 @@ impl GLinear {
 /// layers stay on cuBLAS (measured, PL-008). KOKORO_CONV_IGEMM_MAX_CIN overrides for A/B.
 static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_MAX_CIN").ok().and_then(|v| v.parse().ok()).unwrap_or(128));
+/// Input-channel chunk of conv1d_igemm; MUST equal IG_BK in kernels/kokoro.cu (build.rs passes it).
+const IG_BK: usize = crate::gpu::IG_BK_CU;
 static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
 
 pub struct GConv {
@@ -295,14 +298,14 @@ impl GConv {
 
     /// Whether the fused implicit-GEMM path applies to a same-length conv over length `t`.
     pub(crate) fn igemm_applicable(&self) -> bool {
-        self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (8 * (128 + (self.k - 1) * self.dil) + 8 * self.k * 64) * 4 <= 48 * 1024
+        self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4 <= 48 * 1024
     }
 
     /// res += conv(x) in place via the fused kernel's residual epilogue (x must already be masked).
     pub(crate) fn fwd_igemm_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
         ensure!(self.igemm_applicable() && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
         let w_ig = self.w_ig.as_ref().unwrap();
-        let smem = (8 * (128 + (self.k - 1) * self.dil) + 8 * self.k * 64) * 4;
+        let smem = (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4;
         let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
         let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
         let null = 0u64;
@@ -347,7 +350,7 @@ impl GConv {
             if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN {
                 // LEVER PL-008 (kill switch KOKORO_CONV_IGEMM=0): fused implicit-GEMM conv
                 let xw = 128 + (self.k - 1) * self.dil;
-                let smem = (8 * xw + 8 * self.k * 64) * 4;
+                let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
                 if smem <= 48 * 1024 {
                     let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
                     let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };

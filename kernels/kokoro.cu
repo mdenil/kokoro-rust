@@ -803,7 +803,9 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
 // 8 channels x 8 time steps (time interleaved by 16 -> conflict-free smem reads, coalesced stores).
 #define IG_BM 64
 #define IG_BN 128
-#define IG_BK 8
+#ifndef IG_BK
+#define IG_BK 4
+#endif
 template <bool RES>
 __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, const float* __restrict__ w,
                                                   const float* __restrict__ b, float* __restrict__ y,
