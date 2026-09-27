@@ -6,7 +6,6 @@ CUDA: give it a text file with one sentence or paragraph per line, and it writes
 line.
 
 - Runs locally, with no Python and no cloud service.
-- Synthesizes many lines together in each GPU batch.
 - Picks up where it left off: running it again skips lines that are already done.
 - Never drops a word silently. A line it can't pronounce is reported, so you can fix the text.
 - American English, with two voices included.
@@ -17,10 +16,8 @@ line.
 curl -fsSL https://raw.githubusercontent.com/mdenil/kokoro-rust/main/install.sh | bash
 ```
 
-This puts the `kokoro` command in `~/.local/bin` and downloads the model. You need Linux on x86_64,
-an NVIDIA GPU with compute capability 8.9 (the RTX 40 series, for example) with a driver for CUDA
-12.9 and cuBLAS, and eSpeak NG. The installer checks for all of these and offers to install eSpeak
-NG on Debian and Ubuntu.
+This puts the `kokoro` command in `~/.local/bin` and downloads the model. It requires Linux and a
+compatible NVIDIA GPU with CUDA installed ([hardware requirements](docs/USAGE.md#requirements)).
 
 ## Use
 
