@@ -66,13 +66,16 @@ struct Common {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// One WAV + JSON sidecar per input line (<stem>_<1-based line>.wav) plus <stem>.manifest.json.
+    /// Read a text file (one utterance per line) and write it as one WAV file, <stem>.wav.
     Synth {
         #[command(flatten)]
         common: Common,
-        /// UTF-8 input file, one utterance per line ("-" for stdin).
-        #[arg(long)]
-        input: PathBuf,
+        /// UTF-8 text file, one utterance per line ("-" reads standard input).
+        #[arg(value_name = "INPUT", required_unless_present = "input_flag", conflicts_with = "input_flag")]
+        input: Option<PathBuf>,
+        /// Same as INPUT.
+        #[arg(long = "input", hide = true)]
+        input_flag: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "text")]
         input_format: InputFormat,
         #[arg(long, value_enum, default_value = "native")]
@@ -88,18 +91,26 @@ enum Cmd {
         /// $ESPEAK_DATA_PATH)
         #[arg(long, env = "KOKORO_ESPEAK_DATA")]
         espeak_data: Option<PathBuf>,
-        #[arg(long)]
+        /// Directory for the output files.
+        #[arg(long, default_value = ".")]
         out_dir: PathBuf,
+        /// Write one WAV per input line (<stem>_<line>.wav) instead of one WAV for the whole file.
+        #[arg(long)]
+        per_line: bool,
+        /// Also write JSON details: <stem>.manifest.json, and with --per-line a JSON file next to each
+        /// WAV.
+        #[arg(long)]
+        diagnostics: bool,
         #[arg(long, value_enum, default_value = "pcm16")]
         format: Format,
         /// Base seed for the excitation noise (per item: splitmix(seed, index)).
         #[arg(long, default_value_t = 0)]
         seed: u64,
-        /// OPTIONAL, off by default: also encode each WAV by running the EXTERNAL `ffmpeg` executable
-        /// (a helper subprocess) to this extension (e.g. flac, mp3, opus).
+        /// Also convert the output with the external `ffmpeg` program to this format (e.g. flac, mp3,
+        /// opus): the whole-file WAV, or each WAV with --per-line. Off by default.
         #[arg(long)]
         encode: Option<String>,
-        /// Re-synthesize even if a matching completed output exists.
+        /// Re-synthesize every line, even those already done by an earlier run.
         #[arg(long)]
         force: bool,
         /// Blank-line policy (canonical audiobook files contain none).
@@ -277,6 +288,8 @@ fn synth(
     espeak_lib: Option<PathBuf>,
     espeak_data: Option<PathBuf>,
     out_dir: PathBuf,
+    per_line: bool,
+    diagnostics: bool,
     format: Format,
     seed: u64,
     encode: Option<String>,
@@ -395,6 +408,12 @@ fn synth(
         base_out.clone()
     };
     let force = force || bench_passes > 0;
+    // Resume bookkeeping (per-line JSON records, and without --per-line the per-line audio) lives in
+    // <out-dir>/.kokoro/<stem>/, apart from the deliverables.
+    let state_dir = out_dir.join(".kokoro").join(&inp.stem);
+    std::fs::create_dir_all(&state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
+    let wav_dir = if per_line { out_dir.clone() } else { state_dir.clone() };
+    let line_encode = if per_line { encode.clone() } else { None };
     let t_pass = now();
     let width = inp.lines.len().max(1).to_string().len().max(5);
     let name = |line: usize, ext: &str| format!("{}_{line:0width$}.{ext}", inp.stem);
@@ -434,7 +453,7 @@ fn synth(
         Write(Box<Sidecar>, Option<Vec<f32>>, Instant),
     }
     let depth = 8;
-    let (inp_r, out_r, enc_r, cfg_r) = (&inp, &out_dir, &encode, &cfg);
+    let (inp_r, wav_r, state_r, enc_r, cfg_r) = (&inp, &wav_dir, &state_dir, &line_encode, &cfg);
     let t_all = Instant::now();
     let tl_r = &tl;
     let (manifest_lines, n_ok, n_skip, n_bad, audio_total) = std::thread::scope(|sc_scope| -> Result<_> {
@@ -446,11 +465,11 @@ fn synth(
         let make_job = move |i: usize, text: &String| -> Result<Job> {
                 let line = i + 1;
                 let ts = now();
-                let (wav_path, json_path) = (out_r.join(name(line, "wav")), out_r.join(name(line, "json")));
+                let (wav_path, json_path) = (wav_r.join(name(line, "wav")), state_r.join(name(line, "json")));
                 let text_sha = sha256_bytes(text.as_bytes());
                 if !force && resume_ok(&json_path, &wav_path, line, &text_sha, cfg_r) {
                     let sc: Sidecar = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
-                    let entry = serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav, "sidecar": name(line, "json"),
+                    let entry = serde_json::json!({"line": line, "status": sc.status, "resumed": true, "wav": sc.wav,
                         "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s});
                     tl_r.push(pass, "prepare", "resume_check", ts, 1);
                     return Ok(Job::Resumed(line, entry, sc.duration_s));
@@ -541,7 +560,7 @@ fn synth(
                     }
                     Out::Write(mut sc, audio, t0) => {
                         let line = sc.line;
-                        let (wav_path, json_path) = (out_r.join(name(line, "wav")), out_r.join(name(line, "json")));
+                        let (wav_path, json_path) = (wav_r.join(name(line, "wav")), state_r.join(name(line, "json")));
                         match audio {
                             Some(audio) => {
                                 let enc = wav::encode(&audio, SAMPLE_RATE as u32, format);
@@ -553,7 +572,7 @@ fn synth(
                                 sc.clipped_samples = enc.clipped;
                                 audio_total += sc.duration_s;
                                 if let Some(ext) = enc_r {
-                                    let dst = out_r.join(name(line, ext));
+                                    let dst = wav_r.join(name(line, ext));
                                     let st = Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-i"]).arg(&wav_path).arg(&dst).status();
                                     match st {
                                         Ok(s) if s.success() => {
@@ -580,7 +599,7 @@ fn synth(
                             eprintln!("line {line}: {} — {}", sc.status, sc.error.as_deref().unwrap_or(""));
                         }
                         wav::write_atomic_opt(&json_path, serde_json::to_string_pretty(&*sc)?.as_bytes(), fsync)?;
-                        entries.push((line, serde_json::json!({"line": line, "status": sc.status, "resumed": false, "wav": sc.wav, "sidecar": name(line, "json"),
+                        entries.push((line, serde_json::json!({"line": line, "status": sc.status, "resumed": false, "wav": sc.wav,
                             "text_sha256": sc.text_sha256, "audio_sha256": sc.audio_sha256, "duration_s": sc.duration_s, "error": sc.error})));
                     }
                 }
@@ -691,26 +710,51 @@ fn synth(
         Ok((entries.into_iter().map(|e| e.1).collect::<Vec<_>>(), n_ok, n_skip, n_bad, audio_total))
     })?;
     let wall = t_all.elapsed().as_secs_f64();
-    let complete = n_bad == 0;
-    let manifest = serde_json::json!({
-        "input_file": inp.display, "input_sha256": inp.sha256, "input_lines": inp.lines.len(),
-        "bom_stripped": inp.bom_stripped, "crlf_lines": inp.crlf_lines, "blank_lines_policy": format!("{blank_lines:?}"),
-        "naming": format!("{}_<1-based line, width {width}>.wav / .json", inp.stem),
-        "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
-        "espeak": fe.as_ref().map(|f| { let e = f.espeak(); serde_json::json!({"version": e.version, "library": e.library, "library_sha256": e.library_sha256, "data_dir": e.data_dir, "en_us_data_sha256": e.data_sha256}) }),
-        "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
-    });
-    let ts = now();
-    wav::write_atomic_opt(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes(), fsync)?;
-    tl.push(pass, "main", "manifest", ts, 1);
+    let mut complete = n_bad == 0;
+    let mut notes: Vec<String> = vec![];
+    let mut output = serde_json::Value::Null;
+    if !per_line {
+        let (o, ok) = whole_file_output(&inp, &out_dir, &state_dir, &manifest_lines, complete, format, encode.as_deref(), force, fsync, &mut notes)?;
+        output = o;
+        complete = complete && ok;
+    } else if diagnostics {
+        // public copies of the per-line records, for resumed lines too
+        for line in 1..=inp.lines.len() {
+            let src = state_dir.join(name(line, "json"));
+            if let Ok(b) = std::fs::read(&src) {
+                wav::write_atomic_opt(&out_dir.join(name(line, "json")), &b, fsync)?;
+            }
+        }
+    }
+    if diagnostics {
+        let manifest = serde_json::json!({
+            "input_file": inp.display, "input_sha256": inp.sha256, "input_lines": inp.lines.len(),
+            "bom_stripped": inp.bom_stripped, "crlf_lines": inp.crlf_lines, "blank_lines_policy": format!("{blank_lines:?}"),
+            "mode": if per_line { "per-line" } else { "single WAV" }, "output": output,
+            "line_audio_dir": if per_line { ".".to_string() } else { format!(".kokoro/{}", inp.stem) },
+            "naming": format!("{}_<1-based line, width {width}>.wav / .json", inp.stem),
+            "config": cfg, "complete": complete, "counts": {"done": n_ok, "resumed": n_skip, "failed": n_bad},
+            "espeak": fe.as_ref().map(|f| { let e = f.espeak(); serde_json::json!({"version": e.version, "library": e.library, "library_sha256": e.library_sha256, "data_dir": e.data_dir, "en_us_data_sha256": e.data_sha256}) }),
+            "audio_s": audio_total, "load_s": load_s, "frontend_load_s": frontend_load_s, "synth_wall_s": wall, "lines": manifest_lines,
+        });
+        let ts = now();
+        wav::write_atomic_opt(&out_dir.join(format!("{}.manifest.json", inp.stem)), serde_json::to_string_pretty(&manifest)?.as_bytes(), fsync)?;
+        tl.push(pass, "main", "manifest", ts, 1);
+    }
     tl.push(pass, "main", "pass", t_pass, inp.lines.len());
     eprintln!(
         "{} lines: {n_ok} done, {n_skip} resumed/skipped, {n_bad} failed; {audio_total:.1}s audio in {wall:.2}s (RTF {:.4})",
         inp.lines.len(),
         if audio_total > 0.0 { wall / audio_total } else { 0.0 }
     );
+    for n in &notes {
+        eprintln!("{n}");
+    }
     if !complete {
-        eprintln!("INCOMPLETE: {n_bad} line(s) failed; see {}.manifest.json and sidecars", inp.stem);
+        if n_bad > 0 {
+            let details = if diagnostics { format!("; details in {}.manifest.json", inp.stem) } else { "; --diagnostics also writes the details to JSON".to_string() };
+            eprintln!("INCOMPLETE: {n_bad} line(s) failed (listed above){details}");
+        }
         code = 1;
     }
     pass_records.push(serde_json::json!({"pass": pass, "warmup": bench_passes > 0 && pass == 0, "out_dir": out_dir,
@@ -733,6 +777,99 @@ fn synth(
     std::mem::forget(engine);
     std::mem::forget(fe);
     Ok(code)
+}
+
+/// The single WAV of the whole input (default mode): assembles the per-line audio of all lines in
+/// order into <out-dir>/<stem>.wav, or reuses it when the same line audio produced the file that is
+/// there; then the optional whole-file encode. Only when every line is done. Returns the output
+/// description (for --diagnostics) and whether it is complete.
+#[allow(clippy::too_many_arguments)]
+fn whole_file_output(
+    inp: &InputFile,
+    out_dir: &Path,
+    state_dir: &Path,
+    lines: &[serde_json::Value],
+    lines_ok: bool,
+    format: Format,
+    encode: Option<&str>,
+    force: bool,
+    fsync: bool,
+    notes: &mut Vec<String>,
+) -> Result<(serde_json::Value, bool)> {
+    let final_wav = out_dir.join(format!("{}.wav", inp.stem));
+    let record_path = state_dir.join("output.json");
+    let previous: serde_json::Value = std::fs::read_to_string(&record_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if !lines_ok {
+        if final_wav.exists() {
+            notes.push(format!("{} was NOT updated: the file there is from an earlier run and does not reflect this input", final_wav.display()));
+            let stale = serde_json::json!({"path": final_wav.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha256_file(&final_wav).ok(),
+                "note": "from an earlier run; not updated because lines failed"});
+            return Ok((serde_json::json!({"wav": null, "stale_wav": stale}), false));
+        }
+        notes.push(format!("{} was not written", final_wav.display()));
+        return Ok((serde_json::json!({"wav": null}), false));
+    }
+    let done: Vec<&serde_json::Value> = lines.iter().filter(|e| e["status"] == "ok").collect();
+    if done.is_empty() {
+        notes.push(format!("nothing to synthesize: {} has no lines with text; no WAV written", inp.display));
+        return Ok((serde_json::json!({"wav": null, "reason": "the input has no lines with text"}), false));
+    }
+    let parts: Vec<(PathBuf, String)> = done
+        .iter()
+        .map(|e| (state_dir.join(e["wav"].as_str().unwrap_or_default()), e["audio_sha256"].as_str().unwrap_or_default().to_string()))
+        .collect();
+    let key = sha256_bytes(done.iter().map(|e| format!("{}:{}\n", e["line"], e["audio_sha256"].as_str().unwrap_or_default())).collect::<String>().as_bytes());
+    let key = format!("{format:?}:{key}");
+    let current = if final_wav.exists() { sha256_file(&final_wav).ok() } else { None };
+    let reuse = !force && current.is_some() && previous["assembly_key"] == key.as_str() && previous["sha256"].as_str() == current.as_deref();
+    let (sha, samples) = if reuse {
+        eprintln!("{} is up to date", final_wav.display());
+        (current.unwrap(), previous["samples"].as_u64().unwrap_or(0))
+    } else {
+        let a = wav::assemble(&parts, format, SAMPLE_RATE as u32, &final_wav, fsync).with_context(|| format!("writing {}", final_wav.display()))?;
+        eprintln!("wrote {} ({} lines)", final_wav.display(), parts.len());
+        (a.sha256, a.samples)
+    };
+    let duration_s = samples as f64 / SAMPLE_RATE as f64;
+    let mut ok = true;
+    let mut encoded = serde_json::Value::Null;
+    if let Some(ext) = encode {
+        let dst = out_dir.join(format!("{}.{ext}", inp.stem));
+        let prev = &previous["encoded"];
+        let enc_current = if dst.exists() { sha256_file(&dst).ok() } else { None };
+        if !force && prev["ext"] == ext && prev["source_sha256"] == sha.as_str() && enc_current.is_some() && prev["sha256"].as_str() == enc_current.as_deref() {
+            eprintln!("{} is up to date", dst.display());
+            encoded = prev.clone();
+        } else {
+            let tmp = out_dir.join(format!(".{}.partial.{ext}", inp.stem));
+            let st = Command::new("ffmpeg").args(["-nostdin", "-y", "-loglevel", "error", "-i"]).arg(&final_wav).arg(&tmp).status();
+            match st {
+                Ok(s) if s.success() => {
+                    std::fs::rename(&tmp, &dst).with_context(|| format!("moving the encoded file to {}", dst.display()))?;
+                    encoded = serde_json::json!({"ext": ext, "path": dst.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha256_file(&dst)?, "source_sha256": sha});
+                    eprintln!("wrote {}", dst.display());
+                }
+                other => {
+                    let _ = std::fs::remove_file(&tmp);
+                    let why = match other {
+                        Ok(s) => format!("ffmpeg exited with {s}"),
+                        Err(e) => format!("could not run ffmpeg: {e}"),
+                    };
+                    notes.push(format!("{} was written, but converting it to {ext} failed ({why})", final_wav.display()));
+                    ok = false;
+                }
+            }
+        }
+    }
+    let record = serde_json::json!({"wav": final_wav.file_name().map(|n| n.to_string_lossy().into_owned()), "sha256": sha, "assembly_key": key,
+        "samples": samples, "duration_s": duration_s, "format": format!("{format:?}"), "encoded": encoded});
+    wav::write_atomic_opt(&record_path, serde_json::to_string_pretty(&record)?.as_bytes(), fsync)?;
+    let mut out = record;
+    out["lines"] = serde_json::json!(parts.len());
+    out["sample_rate"] = serde_json::json!(SAMPLE_RATE);
+    out["resumed"] = serde_json::json!(reuse);
+    out.as_object_mut().unwrap().remove("assembly_key");
+    Ok((out, ok))
 }
 
 fn peak_rss_mb() -> f64 {
@@ -804,8 +941,9 @@ pub fn cli_main() -> Result<i32> {
         }
     }
     match Cli::parse().cmd {
-        Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
-            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)
+        Cmd::Synth { common, input, input_flag, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, per_line, diagnostics, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
+            let input = input.or(input_flag).expect("clap requires an input");
+            synth(common, input, input_format, frontend, frontend_dir, espeak_lib, espeak_data, out_dir, per_line, diagnostics, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)
         }
         Cmd::Bench { common, chunks, reps, out } => bench(common, chunks, reps, out).map(|_| 0),
     }
