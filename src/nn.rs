@@ -1,6 +1,6 @@
-//! Layer structs hydrated once from `Weights`. Channel tensors are [C, T].
+//! Layer weight structs hydrated once from `Weights` (the GPU engine uploads from these).
+//! Channel tensors are [C, T].
 
-use crate::ops;
 use crate::weights::Weights;
 use anyhow::Result;
 
@@ -19,11 +19,6 @@ impl Linear {
             din,
             dout,
         })
-    }
-
-    /// x [t, din] -> [t, dout]
-    pub fn forward(&self, x: &[f32], t: usize) -> Vec<f32> {
-        ops::linear(x, t, &self.w, self.b.as_deref(), self.din, self.dout)
     }
 }
 
@@ -62,10 +57,6 @@ impl Conv1d {
             dil,
         })
     }
-
-    pub fn forward(&self, x: &[f32], t: usize) -> (Vec<f32>, usize) {
-        ops::conv1d(x, self.cin, t, &self.w, self.b.as_deref(), self.cout, self.k, self.stride, self.pad, self.dil)
-    }
 }
 
 pub struct ConvTranspose1d {
@@ -90,10 +81,6 @@ impl ConvTranspose1d {
             pad,
         })
     }
-
-    pub fn forward(&self, x: &[f32], t: usize) -> (Vec<f32>, usize) {
-        ops::conv_transpose1d(x, self.cin, t, &self.w, &self.b, self.cout, self.k, self.stride, self.pad, 0)
-    }
 }
 
 /// AdaIN1d: (1 + gamma(s)) * InstanceNorm1d_affine(x) + beta(s)
@@ -112,21 +99,6 @@ impl AdaIn1d {
             fc: Linear::load(w, &format!("{prefix}.fc"), style_dim, 2 * c, true)?,
             c,
         })
-    }
-
-    pub fn forward(&self, x: &[f32], t: usize, s: &[f32]) -> Vec<f32> {
-        let h = self.fc.forward(s, 1);
-        let (gamma, beta) = h.split_at(self.c);
-        let mut y = x.to_vec();
-        ops::instance_norm(&mut y, t, 1e-5);
-        for ch in 0..self.c {
-            let (nw, nb) = (self.norm_w[ch], self.norm_b[ch]);
-            let (g1, b) = (1.0 + gamma[ch], beta[ch]);
-            for v in &mut y[ch * t..(ch + 1) * t] {
-                *v = g1 * (*v * nw + nb) + b;
-            }
-        }
-        y
     }
 }
 
@@ -166,32 +138,6 @@ impl AdainResBlk1d {
             upsample,
         })
     }
-
-    /// x [dim_in, t] -> ([dim_out, t or 2t], t_out)
-    pub fn forward(&self, x: &[f32], t: usize, s: &[f32]) -> (Vec<f32>, usize) {
-        // residual branch
-        let mut r = self.norm1.forward(x, t, s);
-        ops::leaky_relu(&mut r, 0.2);
-        let (r, tr) = match &self.pool {
-            Some((pw, pb)) => ops::conv_transpose1d_depthwise(&r, self.dim_in, t, pw, pb, 3, 2, 1, 1),
-            None => (r, t),
-        };
-        let (r, _) = self.conv1.forward(&r, tr);
-        let mut r = self.norm2.forward(&r, tr, s);
-        ops::leaky_relu(&mut r, 0.2);
-        let (mut r, _) = self.conv2.forward(&r, tr);
-        // shortcut branch
-        let sc = if self.upsample { ops::upsample_nearest2(x, self.dim_in, t) } else { x.to_vec() };
-        let sc = match &self.conv1x1 {
-            Some(c) => c.forward(&sc, tr).0,
-            None => sc,
-        };
-        let inv_sqrt2 = 1.0f32 / 2.0f32.sqrt();
-        for (a, b) in r.iter_mut().zip(&sc) {
-            *a = (*a + *b) * inv_sqrt2;
-        }
-        (r, tr)
-    }
 }
 
 /// iSTFTNet AdaINResBlock1 with Snake activations.
@@ -202,23 +148,11 @@ pub struct AdaInResBlock1 {
     pub(crate) adain2: Vec<AdaIn1d>,
     pub(crate) alpha1: Vec<Vec<f32>>,
     pub(crate) alpha2: Vec<Vec<f32>>,
-    pub(crate) c: usize,
-}
-
-fn snake(x: &mut [f32], t: usize, alpha: &[f32]) {
-    for (ch, row) in x.chunks_exact_mut(t).enumerate() {
-        let a = alpha[ch];
-        let inv = 1.0 / a;
-        for v in row.iter_mut() {
-            let sn = (a * *v).sin();
-            *v += inv * (sn * sn);
-        }
-    }
 }
 
 impl AdaInResBlock1 {
     pub fn load(w: &Weights, prefix: &str, c: usize, k: usize, dil: [usize; 3], style_dim: usize) -> Result<Self> {
-        let mut s = Self { convs1: vec![], convs2: vec![], adain1: vec![], adain2: vec![], alpha1: vec![], alpha2: vec![], c };
+        let mut s = Self { convs1: vec![], convs2: vec![], adain1: vec![], adain2: vec![], alpha1: vec![], alpha2: vec![] };
         for (i, &d) in dil.iter().enumerate() {
             s.convs1.push(Conv1d::load(w, &format!("{prefix}.convs1.{i}"), c, c, k, 1, (k * d - d) / 2, d, true)?);
             s.convs2.push(Conv1d::load(w, &format!("{prefix}.convs2.{i}"), c, c, k, 1, (k - 1) / 2, 1, true)?);
@@ -228,23 +162,6 @@ impl AdaInResBlock1 {
             s.alpha2.push(w.get(&format!("{prefix}.alpha2.{i}"), &[1, c, 1])?);
         }
         Ok(s)
-    }
-
-    pub fn forward(&self, x: &[f32], t: usize, s: &[f32]) -> Vec<f32> {
-        let mut x = x.to_vec();
-        for i in 0..3 {
-            let mut xt = self.adain1[i].forward(&x, t, s);
-            snake(&mut xt, t, &self.alpha1[i]);
-            let (xt, _) = self.convs1[i].forward(&xt, t);
-            let mut xt = self.adain2[i].forward(&xt, t, s);
-            snake(&mut xt, t, &self.alpha2[i]);
-            let (xt, _) = self.convs2[i].forward(&xt, t);
-            for (a, b) in x.iter_mut().zip(&xt) {
-                *a += *b;
-            }
-        }
-        debug_assert_eq!(x.len(), self.c * t);
-        x
     }
 }
 
@@ -269,42 +186,5 @@ impl BiLstm {
             din,
             h,
         })
-    }
-
-    fn direction(&self, x: &[f32], t: usize, dir: usize, out: &mut [f32]) {
-        let h = self.h;
-        let gx = ops::linear(x, t, &self.wih[dir], Some(&self.bih[dir]), self.din, 4 * h);
-        let whh = &self.whh[dir];
-        let bhh = &self.bhh[dir];
-        let mut hs = vec![0.0f32; h];
-        let mut cs = vec![0.0f32; h];
-        let mut gates = vec![0.0f32; 4 * h];
-        for step in 0..t {
-            let ti = if dir == 0 { step } else { t - 1 - step };
-            let gxr = &gx[ti * 4 * h..(ti + 1) * 4 * h];
-            for (r, g) in gates.iter_mut().enumerate() {
-                let wr = &whh[r * h..(r + 1) * h];
-                let dot: f32 = wr.iter().zip(&hs).map(|(a, b)| a * b).sum();
-                *g = gxr[r] + (dot + bhh[r]);
-            }
-            for j in 0..h {
-                let i = ops::sigmoid(gates[j]);
-                let f = ops::sigmoid(gates[h + j]);
-                let gg = gates[2 * h + j].tanh();
-                let o = ops::sigmoid(gates[3 * h + j]);
-                cs[j] = f * cs[j] + i * gg;
-                hs[j] = o * cs[j].tanh();
-            }
-            let orow = &mut out[ti * 2 * h + dir * h..ti * 2 * h + (dir + 1) * h];
-            orow.copy_from_slice(&hs);
-        }
-    }
-
-    pub fn forward(&self, x: &[f32], t: usize) -> Vec<f32> {
-        assert_eq!(x.len(), t * self.din);
-        let mut out = vec![0.0f32; t * 2 * self.h];
-        self.direction(x, t, 0, &mut out);
-        self.direction(x, t, 1, &mut out);
-        out
     }
 }

@@ -5,7 +5,8 @@
 //! mix items, and every item has its own noise stream.
 
 use super::*;
-use crate::vocoder::RngNoise;
+use crate::vocoder::{self, RngNoise};
+use crate::{albert, model};
 use cudarc::driver::CudaSlice;
 
 /// Per-item excitation noise: a counter-based stream keyed by seed (product path) or replayed
@@ -57,9 +58,6 @@ impl Dom {
     }
 }
 
-static STATS_1PASS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_STATS_1PASS").map(|v| v != "0").unwrap_or(true));
-static FUSE_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_FUSE_RES_CONV").map(|v| v != "0").unwrap_or(true));
-
 impl GpuKokoro {
     fn mask(&self, x: &mut Buf, c: usize, d: &Dom) -> Result<()> {
         // negative-control hook for tests (proves the batch tests detect padding contamination)
@@ -88,33 +86,24 @@ impl GpuKokoro {
         let mut rstd = g.alloc(d.b() * a.c)?;
         let (li, eps, ci) = (d.l as i32, 1e-5f32, a.c as i32);
         let cfg = LaunchConfig { grid_dim: (a.c as u32, d.b() as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        if *STATS_1PASS {
-            // LEVER PL-014 (kill switch KOKORO_STATS_1PASS=0): single-pass statistics
-            launch!(g, chan_stats_seg1, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
-        } else {
-            launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
-        }
+        launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
         Ok((gb, mean, rstd))
     }
 
-    /// AdaIN with per-item statistics and per-item style (gb [B, 2C]); gaps -> 0.
-    fn adain_b(&self, a: &GAdaIn, x: &Buf, d: &Dom, styles: &Buf, act: Act) -> Result<Buf> {
+    /// AdaIN with per-item statistics and per-item style (gb [B, 2C]) followed by leaky ReLU; gaps -> 0.
+    fn adain_leaky_b(&self, a: &GAdaIn, x: &Buf, d: &Dom, styles: &Buf, slope: f32) -> Result<Buf> {
         let g = &self.gpu;
         let (gb, mean, rstd) = self.adain_stats(a, x, d, styles)?;
         let (li, ci) = (d.l as i32, a.c as i32);
         let mut y = g.alloc(a.c * d.l)?;
-        let null = 0u64;
-        match act {
-            Act::Leaky(sl) => launch!(g, adain_apply_seg, cfg1(a.c * d.l), x, &mut y, &d.col_item, &mean, &rstd, &a.nw, &a.nb, &gb, &null, &ci, &li, &1i32, &sl)?,
-            Act::Snake(al) => launch!(g, adain_apply_seg, cfg1(a.c * d.l), x, &mut y, &d.col_item, &mean, &rstd, &a.nw, &a.nb, &gb, al, &ci, &li, &2i32, &0.0f32)?,
-        }
+        launch!(g, adain_apply_seg, cfg1(a.c * d.l), x, &mut y, &d.col_item, &mean, &rstd, &a.nw, &a.nb, &gb, &ci, &li, &slope)?;
         Ok(y)
     }
 
     /// AdainResBlk1d on domain `d` (output domain `d2` = d, or the ×2 domain when upsampling).
     fn resblk_b(&self, blk: &GResBlk, x: &Buf, d: &Dom, d2: &Dom, styles: &Buf) -> Result<Buf> {
         let g = &self.gpu;
-        let r = self.adain_b(&blk.norm1, x, d, styles, Act::Leaky(0.2))?;
+        let r = self.adain_leaky_b(&blk.norm1, x, d, styles, 0.2)?;
         let mut r = match &blk.pool {
             Some((w, b)) => {
                 let mut y = g.alloc(blk.dim_in * d2.l)?;
@@ -126,7 +115,7 @@ impl GpuKokoro {
             None => r,
         };
         let r = self.conv_b(&blk.conv1, &mut r, d2)?;
-        let mut r = self.adain_b(&blk.norm2, &r, d2, styles, Act::Leaky(0.2))?;
+        let mut r = self.adain_leaky_b(&blk.norm2, &r, d2, styles, 0.2)?;
         let mut r = self.conv_b(&blk.conv2, &mut r, d2)?;
         let mut sc = if blk.upsample {
             let mut y = g.alloc(blk.dim_in * d2.l)?;
@@ -145,26 +134,21 @@ impl GpuKokoro {
         Ok(r)
     }
 
+    /// AdaINResBlock1 (Snake) on domain `d`: every conv runs on the fused BF16 kernel with AdaIN +
+    /// Snake applied while staging its input (only the statistics are computed separately); conv2
+    /// accumulates into x in its epilogue (checked at load: all Snake-block convs are fused).
     fn snake_b(&self, blk: &GSnakeBlk, x: &Buf, d: &Dom, styles: &Buf) -> Result<Buf> {
         let g = &self.gpu;
         let mut x = g.stream.clone_dtod(x)?;
-        let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable() && blk.convs2[i].igemm_applicable());
         for i in 0..3 {
-            if fuse {
-                // LEVER PL-009 (kill switch KOKORO_FUSE_RES_CONV=0): AdaIN+Snake applied separately (its
-                // output already has zero gaps, so no mask is needed); conv2 accumulates into x in its
-                // epilogue (x + conv, the add_inplace order) -> bitwise identical to the unfused path
-                let h = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
-                let (h, _) = blk.convs1[i].fwd(g, &h, d.l)?;
-                let h = self.adain_b(&blk.adain2[i], &h, d, styles, Act::Snake(&blk.alpha2[i]))?;
-                blk.convs2[i].fwd_igemm_res(g, &h, d.l, &mut x)?;
-                continue;
-            }
-            let mut xt = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
-            let xt = self.conv_b(&blk.convs1[i], &mut xt, d)?;
-            let mut xt = self.adain_b(&blk.adain2[i], &xt, d, styles, Act::Snake(&blk.alpha2[i]))?;
-            let xt = self.conv_b(&blk.convs2[i], &mut xt, d)?;
-            g.add(&mut x, &xt)?;
+            let (a1, a2) = (&blk.adain1[i], &blk.adain2[i]);
+            let (gb, mean, rstd) = self.adain_stats(a1, &x, d, styles)?;
+            let mut h = g.alloc(blk.convs1[i].cout * d.l)?;
+            let p1 = SnakePro { col_item: &d.col_item, mean: &mean, rstd: &rstd, nw: &a1.nw, nb: &a1.nb, gb: &gb, alpha: &blk.alpha1[i] };
+            blk.convs1[i].fwd_snake(g, &x, d.l, &mut h, false, p1)?;
+            let (gb, mean, rstd) = self.adain_stats(a2, &h, d, styles)?;
+            let p2 = SnakePro { col_item: &d.col_item, mean: &mean, rstd: &rstd, nw: &a2.nw, nb: &a2.nb, gb: &gb, alpha: &blk.alpha2[i] };
+            blk.convs2[i].fwd_snake(g, &h, d.l, &mut x, true, p2)?;
         }
         Ok(x)
     }
@@ -191,7 +175,7 @@ impl GpuKokoro {
     }
 
     /// Batched forward. Items keep their own ids, style, speed and noise; results are returned in
-    /// input order. Semantics per item are those of `forward_ids`.
+    /// input order.
     pub fn forward_batch(&self, m: &Kokoro, items: &[BatchItem]) -> Result<Vec<Output>> {
         let g = &self.gpu;
         let nb = items.len();
@@ -235,7 +219,6 @@ impl GpuKokoro {
             emb[tstart[b] * albert::EMB..(tstart[b] + tlen[b]) * albert::EMB].copy_from_slice(&e);
         }
         let emb = g.up(&emb)?;
-        let p_front = crate::prof::scope("gpub.albert+duration");
         let bert = self.albert_b(&emb, &dt)?;
         let d_en = self.bert_encoder.fwd(g, &bert, rows)?;
         // duration encoder
@@ -264,7 +247,6 @@ impl GpuKokoro {
             pred.push(model::durations_from_logits(lg, tlen[b], it.speed));
         }
 
-        drop(p_front);
         // ---- frame layout (N domain) and derived domains
         let nfs: Vec<usize> = pred.iter().map(|p| p.iter().sum::<i64>() as usize).collect();
         let mut a = vec![];
@@ -296,7 +278,6 @@ impl GpuKokoro {
         let (li, ddi) = (ln as i32, dd as i32);
         launch!(g, gather_rows, cfg1(ln * dd), &d, &src_row_d, &mut en, &li, &ddi)?;
         // F0 / N
-        let p_f0 = crate::prof::scope("gpub.f0n+textenc");
         let sh = self.lstm_b(&self.shared, &en, &dn)?;
         let sh = g.transpose(&sh, ln, HIDDEN)?;
         let run = |blocks: &[GResBlk], proj: &GConv| -> Result<Buf> {
@@ -309,24 +290,13 @@ impl GpuKokoro {
         let mut ncur = run(&self.n, &self.n_proj)?;
         self.mask(&mut f0, 1, &d2)?;
         self.mask(&mut ncur, 1, &d2)?;
-        if let Ok(dir) = std::env::var("KOKORO_DEBUG_F0_DIR") {
-            let all = g.down(&f0)?;
-            for (b, it) in items.iter().enumerate() {
-                let key = crate::engine::sha256_bytes(&it.ids.iter().flat_map(|v| v.to_le_bytes()).chain(it.ref_s.iter().flat_map(|v| v.to_le_bytes())).chain(it.speed.to_le_bytes()).collect::<Vec<u8>>());
-                let v: Vec<u8> = all[2 * a[b]..2 * a[b] + 2 * nfs[b]].iter().flat_map(|x| x.to_le_bytes()).collect();
-                std::fs::write(std::path::Path::new(&dir).join(format!("batch-{}.f32", &key[..16])), v)?;
-            }
-        }
         // text encoder on the token layout
         let t_en = self.text_encoder_b(m, items, &dt)?;
         let mut asr = g.alloc(HIDDEN * ln)?;
         let (ci, lti) = (HIDDEN as i32, rows as i32);
         launch!(g, gather_cols, cfg1(HIDDEN * ln), &t_en, &lti, &src_row_d, &mut asr, &ci, &li)?;
 
-        g.prof_sync_pub();
-        drop(p_f0);
         // ---- decoder (pre-generator)
-        let p_dec = crate::prof::scope("gpub.decoder");
         let (f0n, _) = self.f0_conv.fwd(g, &f0, 2 * ln)?;
         let (nn_, _) = self.n_conv.fwd(g, &ncur, 2 * ln)?;
         let mut xcat = g.cat_channels(&[&asr, &f0n, &nn_])?;
@@ -346,10 +316,7 @@ impl GpuKokoro {
         }
         ensure!(t_is_2n, "decoder did not upsample");
 
-        g.prof_sync_pub();
-        drop(p_dec);
         // ---- harmonic source + STFT per item (own noise stream per item)
-        let p_src = crate::prof::scope("gpub.source+stft");
         let ls = 600 * ln;
         let mut har_src = g.stream.alloc_zeros::<f32>(ls)?;
         let mut spec = g.stream.alloc_zeros::<f32>(22 * l120)?;
@@ -388,12 +355,9 @@ impl GpuKokoro {
             launch!(g, stft20_ld, cfg1(frames), &hv, &si, &mut sv, &fi, &ldi, &g.tw, &g.win)?;
         }
 
-        g.prof_sync_pub();
-        drop(p_src);
         // ---- generator on the scaled layouts
         let mut xg = xd;
         for i in 0..2 {
-            let _pg = crate::prof::scope(if i == 0 { "gpub.gen.stage0 (256ch)" } else { "gpub.gen.stage1 (128ch)" });
             let (din, dout) = if i == 0 { (&d2, &d20) } else { (&d20, &d120) };
             g.leaky(&mut xg, 0.1)?;
             let mut har_in = g.stream.clone_dtod(&spec)?;
@@ -436,10 +400,8 @@ impl GpuKokoro {
             let (n, three) = (acc.len() as i64, 3.0f32);
             launch!(g, div_inplace, cfg1(acc.len()), &mut acc, &three, &n)?;
             xg = acc;
-            g.prof_sync_pub();
         }
         g.leaky(&mut xg, 0.01)?;
-        let _pp = crate::prof::scope("gpub.post+istft");
         let post = self.conv_b(&self.conv_post, &mut xg, &d120)?;
         let mut outs = Vec::with_capacity(nb);
         for b in 0..nb {

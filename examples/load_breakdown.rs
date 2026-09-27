@@ -18,10 +18,9 @@ fn main() -> anyhow::Result<()> {
     lap(&mut t, "load_pth (read+parse)");
     let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
     let m = kokoro::model::Kokoro::from_weights(&w, &cfg)?;
-    lap(&mut t, "Kokoro::from_weights (cpu)");
+    lap(&mut t, "Kokoro::from_weights (host)");
     let _h = kokoro::engine::sha256_file(&dir.join("kokoro-v1_0.pth"))?;
     lap(&mut t, "sha256 weights (serial)");
-    #[cfg(feature = "cuda")]
     {
         let ctx = cudarc::driver::CudaContext::new(0)?;
         lap(&mut t, "CUDA context");
@@ -33,8 +32,8 @@ fn main() -> anyhow::Result<()> {
         let _b = cudarc::cublas::CudaBlas::new(s.clone())?;
         lap(&mut t, "cuBLAS handle");
         drop(ctx);
-        let g = kokoro::gpu::GpuKokoro::new(&m, 0)?;
-        lap(&mut t, "GpuKokoro::new (ctx+PTX+upload)");
+        let g = kokoro::gpu::GpuKokoro::with_gpu(kokoro::gpu::Gpu::new(0)?, &m)?;
+        lap(&mut t, "GpuKokoro (ctx+PTX+upload)");
         drop(g);
         lap(&mut t, "drop GpuKokoro");
     }

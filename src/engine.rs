@@ -1,8 +1,8 @@
-//! Resident synthesis engine: model loaded once, voices cached, one call per phoneme chunk.
+//! Resident synthesis engine: model loaded once onto the GPU, voices cached, phoneme chunks
+//! synthesized in length-bucketed batches (the accepted BF16x path).
 
 use crate::model::{Kokoro, CONTEXT_LEN, STYLE_DIM};
 use crate::torchpt;
-use crate::vocoder::RngNoise;
 use crate::weights::Weights;
 use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
@@ -59,17 +59,9 @@ impl Voice {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
-pub enum Device {
-    Cpu,
-    Cuda,
-}
-
 pub struct Engine {
     pub model: Kokoro,
-    #[cfg(feature = "cuda")]
-    pub gpu: Option<crate::gpu::GpuKokoro>,
-    pub device: Device,
+    pub gpu: crate::gpu::GpuKokoro,
     pub model_dir: PathBuf,
     pub model_sha256: String,
     pub config_sha256: String,
@@ -83,13 +75,9 @@ pub struct Synth {
 }
 
 impl Engine {
-    /// `model_dir` is an HF snapshot dir containing config.json, kokoro-v1_0.pth, voices/.
-    pub fn load(model_dir: &Path) -> Result<Self> {
-        Self::load_on(model_dir, Device::Cpu, 0)
-    }
-
-    /// Load for a device. `cuda_ordinal` is the CUDA device index (after CUDA_VISIBLE_DEVICES).
-    pub fn load_on(model_dir: &Path, device: Device, cuda_ordinal: usize) -> Result<Self> {
+    /// Load onto a CUDA device. `model_dir` is an HF snapshot dir containing config.json,
+    /// kokoro-v1_0.pth and voices/; `cuda_ordinal` is the device index (after CUDA_VISIBLE_DEVICES).
+    pub fn load(model_dir: &Path, cuda_ordinal: usize) -> Result<Self> {
         let weights = model_dir.join("kokoro-v1_0.pth");
         let config = model_dir.join("config.json");
         // hash the checkpoint on a helper thread while it is parsed/uploaded (identical result)
@@ -98,31 +86,15 @@ impl Engine {
             move || sha256_file(&weights)
         });
         // create the CUDA context / module / cuBLAS handle while the checkpoint is parsed
-        #[cfg(feature = "cuda")]
-        let gpu_init = (device == Device::Cuda).then(|| std::thread::spawn(move || crate::gpu::Gpu::new(cuda_ordinal)));
+        let gpu_init = std::thread::spawn(move || crate::gpu::Gpu::new(cuda_ordinal));
         let w = Weights::load_pth(&weights)?;
         let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?)?;
         let model = Kokoro::from_weights(&w, &cfg)?;
-        #[cfg(feature = "cuda")]
-        let gpu = match device {
-            Device::Cuda => {
-                let g = gpu_init.expect("spawned for cuda").join().map_err(|_| anyhow::anyhow!("CUDA init thread panicked"))??;
-                Some(crate::gpu::GpuKokoro::with_gpu(g, &model)?)
-            }
-            Device::Cpu => None,
-        };
-        #[cfg(not(feature = "cuda"))]
-        {
-            let _ = cuda_ordinal;
-            if device == Device::Cuda {
-                bail!("this binary was built without CUDA support (cargo build --features cuda)");
-            }
-        }
+        let g = gpu_init.join().map_err(|_| anyhow::anyhow!("CUDA init thread panicked"))??;
+        let gpu = crate::gpu::GpuKokoro::with_gpu(g, &model)?;
         Ok(Self {
             model,
-            #[cfg(feature = "cuda")]
             gpu,
-            device,
             model_dir: model_dir.to_path_buf(),
             model_sha256: hash.join().map_err(|_| anyhow::anyhow!("weight hashing thread panicked"))??,
             config_sha256: sha256_file(&config)?,
@@ -132,13 +104,7 @@ impl Engine {
 
     /// Numerical identity of this engine instance (part of output provenance / resume keys).
     pub fn identity(&self) -> String {
-        match self.device {
-            Device::Cpu => "cpu f32".into(),
-            #[cfg(feature = "cuda")]
-            Device::Cuda => format!("cuda f32 kernels={}", crate::gpu::KERNEL_ROUNDING),
-            #[cfg(not(feature = "cuda"))]
-            Device::Cuda => "cuda (unavailable)".into(),
-        }
+        format!("cuda bf16x kernels={}", crate::gpu::KERNEL_ROUNDING)
     }
 
     /// Voice by name (voices/<name>.pt), explicit .pt path, or comma-separated mean of several
@@ -165,28 +131,6 @@ impl Engine {
             self.voices.insert(spec.to_string(), Voice { pack, rows, sha256: hashes.join(",") });
         }
         Ok(&self.voices[spec])
-    }
-
-    /// Synthesize one phoneme chunk. Oversize and empty inputs are errors, never truncated.
-    pub fn synth_phonemes(&mut self, phonemes: &str, voice: &str, speed: f32, seed: u64) -> Result<Synth> {
-        let n = phonemes.chars().count();
-        if n == 0 {
-            bail!("empty phoneme string");
-        }
-        if n > MAX_PHONEMES {
-            bail!("oversize: {n} phoneme chars > {MAX_PHONEMES}");
-        }
-        let (ids, dropped) = self.model.phonemes_to_ids(phonemes);
-        let ref_s = self.voice(voice)?.ref_s(n)?.to_vec();
-        let mut noise = RngNoise::new(seed);
-        #[cfg(feature = "cuda")]
-        let out = match &self.gpu {
-            Some(g) => g.forward_ids(&self.model, &ids, &ref_s, speed, &mut noise)?,
-            None => self.model.forward_ids(&ids, &ref_s, speed, &mut noise)?,
-        };
-        #[cfg(not(feature = "cuda"))]
-        let out = self.model.forward_ids(&ids, &ref_s, speed, &mut noise)?;
-        Ok(Synth { audio: out.audio, pred_dur: out.pred_dur, dropped })
     }
 }
 
@@ -236,22 +180,13 @@ pub fn plan_batches(lens: &[usize], p: BatchPolicy) -> Vec<Vec<usize>> {
 }
 
 impl Engine {
-    /// Synthesize many phoneme chunks; results are returned in input order. On the CUDA device the
-    /// chunks run as length-bucketed batches (per-item semantics unchanged; each item keeps its own
-    /// seed-keyed noise stream); a failing batch is split in half down to single items (OOM safety).
+    /// Synthesize phoneme chunks; results are returned in input order. Oversize and empty inputs
+    /// are per-chunk errors, never truncated. Chunks run as length-bucketed batches (per-item
+    /// semantics unchanged; each item keeps its own seed-keyed noise stream); a failing batch is
+    /// split in half down to single items (OOM safety).
     pub fn synth_batch(&mut self, reqs: &[(String, u64)], voice: &str, speed: f32, policy: BatchPolicy) -> Vec<Result<Synth>> {
-        #[cfg(feature = "cuda")]
-        if self.gpu.is_some() {
-            return self.synth_batch_gpu(reqs, voice, speed, policy);
-        }
-        let _ = policy;
-        reqs.iter().map(|(p, seed)| self.synth_phonemes(p, voice, speed, *seed)).collect()
-    }
-
-    #[cfg(feature = "cuda")]
-    fn synth_batch_gpu(&mut self, reqs: &[(String, u64)], voice: &str, speed: f32, policy: BatchPolicy) -> Vec<Result<Synth>> {
         let mut results: Vec<Option<Result<Synth>>> = (0..reqs.len()).map(|_| None).collect();
-        // validate + prepare per item (identical rules to synth_phonemes)
+        // validate + prepare per item
         let mut prepared: Vec<(usize, Vec<i64>, Vec<char>, Vec<f32>)> = vec![];
         for (i, (p, _)) in reqs.iter().enumerate() {
             let n = p.chars().count();
@@ -281,7 +216,7 @@ impl Engine {
                     crate::gpu::BatchItem { ids, ref_s, speed, noise: crate::gpu::ItemNoise::Counter(reqs[*i].1) }
                 })
                 .collect();
-            match self.gpu.as_ref().unwrap().forward_batch(&self.model, &items) {
+            match self.gpu.forward_batch(&self.model, &items) {
                 Ok(outs) => {
                     for (&k, o) in batch.iter().zip(outs) {
                         let (i, _, dropped, _) = &prepared[k];

@@ -2,8 +2,9 @@
 
 Engines:
   py      ORIGINAL production Python as used (bench/system_reference.py; unchanged KPipeline per line)
-  rust    current native binary, default build (strict), default synth settings (batched)
-  rustfma current native binary, FMA build (owner-accepted #14), default synth settings
+  rust     the native binary under test (target/release/kokoro or $KOKORO_BIN_RUST), default settings
+  accepted the immutable owner-accepted BF16x artifact (owner #25; $KOKORO_BIN_ACCEPTED), run exactly
+           as accepted (KOKORO_PRECISION=bf16x, default settings): the pre/post reference
 Phases (separate, never mixed):
   cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines
   warm    one resident process per replicate: load, 1 untimed warm-up pass, P timed passes
@@ -29,7 +30,8 @@ ROOT = HERE.parent
 DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust"))
 PY = os.environ.get("KOKORO_PY", str(DATA / "reference/venv-prod/bin/python"))
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
-BINS = {"rust": ROOT / "target/release/kokoro", "rustfma": ROOT / "target/release/kokoro-fma"}
+BINS = {"rust": pathlib.Path(os.environ.get("KOKORO_BIN_RUST", ROOT / "target/release/kokoro")),
+        "accepted": pathlib.Path(os.environ.get("KOKORO_BIN_ACCEPTED", DATA / "bin/phase2-9b39d48-6fde9d88990a"))}
 
 
 def sha256_file(p):
@@ -97,7 +99,7 @@ def run(rec_file, logs, name, cmd, env, out, engine, passes):
         rc = subprocess.run(cmd, env=env, stdout=so, stderr=se).returncode
     wall = time.perf_counter() - t
     host_after = host_state()
-    rec = {"run": name, "engine": engine, "passes": passes, "cmd": cmd, "env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "KOKORO_FRONTEND_DIR") if k in env},
+    rec = {"run": name, "engine": engine, "passes": passes, "cmd": cmd, "env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "KOKORO_FRONTEND_DIR", "KOKORO_PRECISION") if k in env},
            "rc": rc, "wall_s": wall, "waited_for_quiet_s": waited, "host_before": host_before, "host_after": host_after}
     stdout = (logs / f"{name}.stdout").read_text(errors="replace").strip()
     if engine == "py":
@@ -134,7 +136,7 @@ def main():
     ap.add_argument("--cold-reps", type=int, default=3)
     ap.add_argument("--warm-reps", type=int, default=2)
     ap.add_argument("--warm-passes", type=int, default=3)
-    ap.add_argument("--engines", default="py,rust,rustfma")
+    ap.add_argument("--engines", default="py,rust")
     ap.add_argument("--phases", default="cold,warm,attr")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
@@ -155,11 +157,15 @@ def main():
              "nproc": os.cpu_count(), "host_start": host_state()}
     (out / "identity.json").write_text(json.dumps(ident, indent=1))
 
-    def env():
+    def env(engine=""):
         e = dict(os.environ)
+        # the accepted artifact selects its (accepted) numerical mode by environment
+        if engine == "accepted":
+            e["KOKORO_PRECISION"] = "bf16x"
+        else:
+            e.pop("KOKORO_PRECISION", None)
         e["CUDA_VISIBLE_DEVICES"] = "0"
         e["KOKORO_FRONTEND_DIR"] = str(DATA / "frontend")
-        e.pop("KOKORO_PROFILE", None)
         return e
 
     def cmd(engine, name, o, passes, attribute=False):
@@ -176,17 +182,17 @@ def main():
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"cold-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(), work / name, e, 0)
+                run(rec_file, logs, name, cmd(e, name, work / name, 0), env(e), work / name, e, 0)
     if "warm" in phases:
         for k in range(args.warm_reps):
             order = engines if k % 2 == 0 else list(reversed(engines))
             for e in order:
                 name = f"warm-{e}-r{k}"
-                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(), work / name, e, args.warm_passes)
+                run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes), env(e), work / name, e, args.warm_passes)
     if "attr" in phases:
         for e in engines:
             name = f"attr-{e}"
-            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(), work / name, e, args.warm_passes)
+            run(rec_file, logs, name, cmd(e, name, work / name, args.warm_passes, attribute=True), env(e), work / name, e, args.warm_passes)
     (out / "SHA256SUMS").write_text("".join(f"{sha256_file(p)}  {p.relative_to(out)}\n" for p in sorted(out.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"))
     print("done:", out)
 

@@ -1,4 +1,5 @@
-// Shared binding gates (included by the parity ladders via `#[path]`).
+// Shared spectral metric (G-SPEC definition, included via `#[path]`; used by the BF16x reference
+// diagnostic, tests/bf16x_reference.rs).
 //
 // G-SPEC (NONDET_FLOOR.md original text): "log-magnitude STFT (n_fft 1024, hop 256) mean |Δ dB|
 // ≤ 2 × floor-pair value (computed by the same comparator on the t1/t8 pair)". The original text
@@ -10,7 +11,6 @@
 
 pub const SPEC_NFFT: usize = 1024;
 pub const SPEC_HOP: usize = 256;
-pub const FLOOR_CASE: &str = "s02_fox__af_heart__s1.0";
 
 fn log_mag_frames(x: &[f32]) -> Vec<f64> {
     let n = SPEC_NFFT;

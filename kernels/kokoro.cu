@@ -38,60 +38,7 @@ extern "C" __global__ void residual_scale(float* r, const float* sc, long n, flo
     if (i < n) r[i] = (r[i] + sc[i]) * s;
 }
 
-// Per-channel mean / 1/sqrt(var+eps) over time of x [C, T] (biased var, f64 accumulation;
-// mirrors ops::instance_norm). One block (256 threads) per channel.
-extern "C" __global__ void chan_stats(const float* x, int T, float eps, float* mean_out, float* rstd_out) {
-    __shared__ double sh[256];
-    const float* row = x + (long)blockIdx.x * T;
-    double s = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) s += (double)row[t];
-    sh[threadIdx.x] = s;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    float mean = (float)(sh[0] / (double)T);
-    __syncthreads();
-    double v = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double c = (double)(row[t] - mean);
-        v += c * c;
-    }
-    sh[threadIdx.x] = v;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        float var = (float)(sh[0] / (double)T);
-        mean_out[blockIdx.x] = mean;
-        rstd_out[blockIdx.x] = 1.0f / sqrtf(var + eps);
-    }
-}
 
-// AdaIN1d apply: y = (1+gamma)*((x-mean)*rstd*nw + nb) + beta, then optional activation:
-// act 0 = none, 1 = leaky relu(slope), 2 = snake(alpha). gb = fc(s) = [gamma(C), beta(C)].
-extern "C" __global__ void adain_apply(const float* x, float* y, const float* mean, const float* rstd,
-                                       const float* nw, const float* nb, const float* gb, const float* alpha,
-                                       int C, int T, int act, float slope) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * T) return;
-    int c = (int)(i / T);
-    float v = (x[i] - mean[c]) * rstd[c];
-    float g1 = 1.0f + gb[c];
-    v = g1 * (v * nw[c] + nb[c]) + gb[C + c];
-    if (act == 1) {
-        if (v < 0.0f) v = v * slope;
-    } else if (act == 2) {
-        float a = alpha[c];
-        float inv = 1.0f / a;
-        float sn = sinf(a * v);
-        v = v + inv * (sn * sn);
-    }
-    y[i] = v;
-}
 
 // LayerNorm over the last dim of [rows, d]; optional affine (g, b may be null). Block per row.
 // mode 1: AdaLayerNorm: out = (1 + gb[j]) * ln + gb[d + j]   (no affine)
@@ -187,64 +134,9 @@ extern "C" __global__ void transpose(const float* x, float* y, int R, int C) {
     }
 }
 
-// out [T, d + sd] = concat(x[T, d], s[sd]) per row
-extern "C" __global__ void cat_style_rows(const float* x, const float* s, float* out, int T, int d, int sd) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    int w = d + sd;
-    if (i >= (long)T * w) return;
-    int t = (int)(i / w), j = (int)(i % w);
-    out[i] = j < d ? x[(long)t * d + j] : s[j - d];
-}
 
-// out[f, :] = d[aln[f], :]  (frame expansion of token rows, width dd)
-extern "C" __global__ void expand_rows(const float* d, const int* aln, float* out, int nf, int dd) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)nf * dd) return;
-    int f = (int)(i / dd), j = (int)(i % dd);
-    out[i] = d[(long)aln[f] * dd + j];
-}
 
-// out[c, f] = x[c, aln[f]]  (frame expansion of channel-major [C, T] -> [C, nf])
-extern "C" __global__ void expand_cols(const float* x, const int* aln, float* out, int C, int T, int nf) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * nf) return;
-    int c = (int)(i / nf), f = (int)(i % nf);
-    out[i] = x[(long)c * T + aln[f]];
-}
 
-// One LSTM time step for both directions (grid.x = H units, grid.y = 2 directions, 128 thr).
-// gx: [T, 4H] per direction (x W_ih^T + b_ih); whh [4H, H]; bhh [4H].
-// Gate order i, f, g, o. Mirrors nn::BiLstm::direction: g = gx + (dot + bhh).
-extern "C" __global__ void lstm_step(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
-                                     const float* bhh_f, const float* bhh_b, const float* h_cur, float* h_nxt,
-                                     float* c_state, float* out, int T, int H, int step) {
-    int j = blockIdx.x, dir = blockIdx.y;
-    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    int t = dir == 0 ? step : T - 1 - step;
-    const float* gx = dir == 0 ? gx_f : gx_b;
-    const float* whh = dir == 0 ? whh_f : whh_b;
-    const float* bhh = dir == 0 ? bhh_f : bhh_b;
-    const float* h = h_cur + dir * H;
-    __shared__ float gates[4];
-    int r = warp * H + j;
-    const float* w = whh + (long)r * H;
-    float acc = 0.0f;
-    for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
-    for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
-    if (lane == 0) gates[warp] = gx[(long)t * 4 * H + r] + (acc + bhh[r]);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float ig = 1.0f / (1.0f + expf(-gates[0]));
-        float fg = 1.0f / (1.0f + expf(-gates[1]));
-        float gg = tanhf(gates[2]);
-        float og = 1.0f / (1.0f + expf(-gates[3]));
-        float c = fg * c_state[dir * H + j] + ig * gg;
-        c_state[dir * H + j] = c;
-        float hn = og * tanhf(c);
-        h_nxt[dir * H + j] = hn;
-        out[(long)t * 2 * H + dir * H + j] = hn;
-    }
-}
 
 // Nearest x2 along time: y [C, 2T]
 extern "C" __global__ void upsample_nearest2(const float* x, float* y, int C, int T) {
@@ -272,23 +164,6 @@ extern "C" __global__ void dw_convT_k3s2(const float* x, const float* w, const f
     y[idx] = acc;
 }
 
-// Direct Conv1d for small Cin*K (strided convs): y[co, o] = b + sum_{k, ci} w * x.
-// Summation order mirrors ops::conv1d at element level only approximately (GEMM order differs).
-extern "C" __global__ void conv_direct(const float* x, const float* w, const float* b, float* y,
-                                       int Cin, int T, int Cout, int K, int stride, int pad, int Tout) {
-    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (idx >= (long)Cout * Tout) return;
-    int co = (int)(idx / Tout), o = (int)(idx % Tout);
-    float acc = b ? b[co] : 0.0f;
-    for (int k = 0; k < K; k++) {
-        int t = o * stride + k - pad;
-        if (t < 0 || t >= T) continue;
-        float s = 0.0f;
-        for (int ci = 0; ci < Cin; ci++) s = s + w[((long)co * Cin + ci) * K + k] * x[(long)ci * T + t];
-        acc = acc + s;
-    }
-    y[idx] = acc;
-}
 
 // ConvTranspose1d gather from Z [(co*K + k), Tin] (Z = per-tap products from one GEMM):
 // y[co, o] = b[co] + sum_{k asc, (o+pad-k) % s == 0} Z[co*K+k, (o+pad-k)/s]
@@ -308,13 +183,6 @@ extern "C" __global__ void convT_gather(const float* Z, const float* b, float* y
     y[idx] = acc;
 }
 
-// y [C, T+1]: y[:, 0] = x[:, 1], y[:, 1:] = x   (ReflectionPad1d((1, 0)))
-extern "C" __global__ void reflect_pad_left1(const float* x, float* y, int C, int T) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)C * (T + 1)) return;
-    int c = (int)(i / (T + 1)), o = (int)(i % (T + 1));
-    y[i] = o == 0 ? x[(long)c * T + 1] : x[(long)c * T + o - 1];
-}
 
 // ---------------------------------------------------------------- harmonic source (SineGen)
 
@@ -390,47 +258,7 @@ extern "C" __global__ void sine_har_source(const float* f0c, int L, int S, int D
 #define C_COS(k, n) tw[(k) * 20 + (n)]
 #define C_SIN(k, n) tw[220 + (k) * 20 + (n)]
 
-// out [22, F]: rows 0..10 magnitude, 11..21 phase (atan2); center=True reflect padding.
-extern "C" __global__ void stft20(const float* x, int L, float* out, int F, const double* tw, const float* c_win) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= F) return;
-    double buf[20];
-    for (int n = 0; n < 20; n++) {
-        int p = f * 5 + n - 10;  // index into unpadded signal
-        int src = p < 0 ? -p : (p >= L ? 2 * L - 2 - p : p);
-        buf[n] = (double)(x[src] * c_win[n]);
-    }
-    for (int k = 0; k < 11; k++) {
-        double re = 0.0, im = 0.0;
-        for (int n = 0; n < 20; n++) {
-            re += buf[n] * C_COS(k, n);
-            im -= buf[n] * C_SIN(k, n);
-        }
-        if (k == 0 || k == 10) im = 0.0;
-        float rf = (float)re, imf = (float)im;
-        out[(long)k * F + f] = hypotf(rf, imf);
-        out[(long)(11 + k) * F + f] = atan2f(imf, rf);
-    }
-}
 
-// frame time signals: fr[f, n] = irfft(exp(post[0..11]) * e^{i sin(post[11..22])})[n] * w[n] (f64)
-extern "C" __global__ void istft_frames(const float* post, int F, double* fr, const double* tw, const float* c_win) {
-    int f = blockIdx.x * blockDim.x + threadIdx.x;
-    if (f >= F) return;
-    double re[11], im[11];
-    for (int k = 0; k < 11; k++) {
-        float m = expf(post[(long)k * F + f]);
-        float p = sinf(post[(long)(11 + k) * F + f]);
-        re[k] = (double)(m * cosf(p));
-        im[k] = (double)(m * sinf(p));
-    }
-    for (int n = 0; n < 20; n++) {
-        double v = re[0] + re[10] * ((n % 2 == 0) ? 1.0 : -1.0);
-        for (int k = 1; k < 10; k++) v += 2.0 * (re[k] * C_COS(k, n) - im[k] * C_SIN(k, n));
-        v = v / 20.0;
-        fr[(long)f * 20 + n] = v * (double)c_win[n];
-    }
-}
 
 // overlap-add gather (frames ascending, like the CPU scatter) / window envelope, trim 10.
 extern "C" __global__ void istft_ola(const double* fr, int F, float* out, int len, const float* c_win) {
@@ -472,43 +300,6 @@ extern "C" __global__ void gen_noise(unsigned long long seed, float* out, long n
     if (2 * i + 1 < n) out[2 * i + 1] = r * sinf(th);
 }
 
-// Whole-sequence BiLSTM in ONE cooperative launch: identical per-step arithmetic to lstm_step
-// (same warp dot order, same gate math); grid-wide sync between steps. grid (H, 2), 128 threads.
-extern "C" __global__ void lstm_seq(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
-                                    const float* bhh_f, const float* bhh_b, float* hbuf, float* c_state,
-                                    float* out, int T, int H) {
-    cooperative_groups::grid_group grid = cooperative_groups::this_grid();
-    int j = blockIdx.x, dir = blockIdx.y;
-    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const float* gx = dir == 0 ? gx_f : gx_b;
-    const float* whh = dir == 0 ? whh_f : whh_b;
-    const float* bhh = dir == 0 ? bhh_f : bhh_b;
-    __shared__ float gates[4];
-    int r = warp * H + j;
-    const float* w = whh + (long)r * H;
-    for (int step = 0; step < T; step++) {
-        int t = dir == 0 ? step : T - 1 - step;
-        const float* h = hbuf + (step & 1) * 2 * H + dir * H;
-        float* h_nxt = hbuf + ((step + 1) & 1) * 2 * H;
-        float acc = 0.0f;
-        for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
-        for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
-        if (lane == 0) gates[warp] = gx[(long)t * 4 * H + r] + (acc + bhh[r]);
-        __syncthreads();
-        if (threadIdx.x == 0) {
-            float ig = 1.0f / (1.0f + expf(-gates[0]));
-            float fg = 1.0f / (1.0f + expf(-gates[1]));
-            float gg = tanhf(gates[2]);
-            float og = 1.0f / (1.0f + expf(-gates[3]));
-            float c = fg * c_state[dir * H + j] + ig * gg;
-            c_state[dir * H + j] = c;
-            float hn = og * tanhf(c);
-            h_nxt[dir * H + j] = hn;
-            out[(long)t * 2 * H + dir * H + j] = hn;
-        }
-        grid.sync();
-    }
-}
 
 // ================================================================ B1: ragged batched layout
 // A domain buffer is [C, L]; item b owns columns [seg_start[b], seg_start[b] + seg_len[b]);
@@ -521,46 +312,11 @@ extern "C" __global__ void mask_gaps(float* x, const int* col_item, int C, int L
     if (col_item[i % L] < 0) x[i] = 0.0f;
 }
 
-// per (item, channel) mean / rstd over the item's span (f64 accumulation, as chan_stats).
-// grid (C, B), 256 threads. Output [B, C].
-extern "C" __global__ void chan_stats_seg(const float* x, int L, const int* seg_start, const int* seg_len,
-                                          float eps, float* mean_out, float* rstd_out, int C) {
-    __shared__ double sh[256];
-    int c = blockIdx.x, b = blockIdx.y;
-    const float* row = x + (long)c * L + seg_start[b];
-    int T = seg_len[b];
-    double s = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) s += (double)row[t];
-    sh[threadIdx.x] = s;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    float mean = (float)(sh[0] / (double)T);
-    __syncthreads();
-    double v = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double d = (double)(row[t] - mean);
-        v += d * d;
-    }
-    sh[threadIdx.x] = v;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        float var = (float)(sh[0] / (double)T);
-        mean_out[b * C + c] = mean;
-        rstd_out[b * C + c] = 1.0f / sqrtf(var + eps);
-    }
-}
 
 // AdaIN apply with per-item statistics and per-item gamma/beta (gb [B, 2C]); gap columns -> 0.
 extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* col_item, const float* mean,
                                            const float* rstd, const float* nw, const float* nb, const float* gb,
-                                           const float* alpha, int C, int L, int act, float slope) {
+                                           int C, int L, float slope) {
     long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
     if (i >= (long)C * L) return;
     int c = (int)(i / L);
@@ -572,14 +328,7 @@ extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* 
     float v = (x[i] - mean[b * C + c]) * rstd[b * C + c];
     float g1 = 1.0f + gb[(long)b * 2 * C + c];
     v = g1 * (v * nw[c] + nb[c]) + gb[(long)b * 2 * C + C + c];
-    if (act == 1) {
-        if (v < 0.0f) v = v * slope;
-    } else if (act == 2) {
-        float a = alpha[c];
-        float inv = 1.0f / a;
-        float sn = sinf(a * v);
-        v = v + inv * (sn * sn);
-    }
+    if (v < 0.0f) v = v * slope;  // leaky ReLU
     y[i] = v;
 }
 
@@ -796,27 +545,19 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
     for (int c = 0; c < ncout; c++) y[(long)(co0 + c) * Tout + o] = acc[c];
 }
 
-// ---- LEVER PL-008: fused implicit-GEMM dilated conv1d (stride 1), all taps accumulated in
-// registers (output written once). Y[co,t] = b[co] + sum_k sum_ci W[ci][k][co] * X[ci, t + k*dil - pad]
-// (zero outside [0,T)). f32 throughout; summation order differs from the per-tap GEMM path
-// (approximately lossless, not bitwise). Tile: 64 out-channels x 128 time steps, 128 threads, each
-// 8 channels x 8 time steps (time interleaved by 16 -> conflict-free smem reads, coalesced stores).
+// ---- Strided f32 conv1d (the generator's noise convs, stride 6, and the F0/N downsampling conv,
+// stride 2): implicit GEMM, all taps accumulated in registers (output written once).
+// Y[co,o] = b[co] + sum_k sum_ci W[ci][k][co] * X[ci, o*stride + k*dil - pad] (zero outside [0,T)).
+// Tile: 64 out-channels x 128 outputs, 128 threads, each 8 channels x 8 outputs (interleaved by 16).
 #define IG_BM 64
 #define IG_BN 128
-#ifndef IG_BK
 #define IG_BK 4
-#endif
-// STRIDED: input length T, output length Tout, output o reads x[o*stride + k*dil - pad]
-// (non-strided instantiations compile to exactly the previous code: stride 1, Tout == T).
-template <bool RES, bool STRIDED>
-__device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, const float* __restrict__ w,
-                                                  const float* __restrict__ b, float* __restrict__ y,
-                                                  int Cin, int T, int Cout, int K, int dil, int pad,
-                                                  int stride_, int Tout_) {
+extern "C" __global__ void __launch_bounds__(128) conv1d_strided(const float* __restrict__ x, const float* __restrict__ w,
+                                                                 const float* __restrict__ b, float* __restrict__ y,
+                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                 int stride, int Tout) {
     extern __shared__ float smem[];
-    const int stride = STRIDED ? stride_ : 1;
-    const int Tout = STRIDED ? Tout_ : T;
-    const int xw = STRIDED ? (IG_BN - 1) * stride + (K - 1) * dil + 1 : IG_BN + (K - 1) * dil;
+    const int xw = (IG_BN - 1) * stride + (K - 1) * dil + 1;
     float* xs = smem;                   // [IG_BK][xw]
     float* ws = smem + IG_BK * xw;      // [IG_BK][K][IG_BM]
     const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
@@ -853,7 +594,7 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
 #pragma unroll
                 for (int i = 0; i < 8; i++)
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], bv[j], acc[i][j]);  // explicit FMA, like the cuBLAS path it replaces
+                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], bv[j], acc[i][j]);  // explicit FMA
             }
         }
     }
@@ -868,49 +609,188 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
             if (t < Tout) {
                 long o = (long)co * Tout + t;
                 float v = acc[i][j] + bias;
-                if (RES) y[o] = y[o] + v;  // residual in place: same order as add_inplace(res, conv)
-                else y[o] = v;
+                y[o] = v;
             }
         }
     }
 }
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
-                                                               const float* __restrict__ b, float* __restrict__ y,
-                                                               int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<false, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
+
+// ======================= BF16 tensor-core convolution (the accepted BF16x path) =======================
+// BF16 operands, f32 accumulation and output. f32 [C][T] activations are converted with
+// round-to-nearest-even (__float2bfloat16_rn).
+#include <cuda_bf16.h>
+#include <mma.h>
+// f32 [C][T] -> transposed BF16 [T][C] (per-tap GEMM offsets become multiples of C).
+extern "C" __global__ void bf16_transpose(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, int C, int T) {
+    __shared__ float tile[32][33];
+    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
+    for (int k = 0; k < 32; k += 8) {
+        int cc = c + k;
+        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
+    }
+    __syncthreads();
+    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
+    for (int k = 0; k < 32; k += 8) {
+        int t3 = tt + k;
+        if (t3 < T && c2 < C) y[(long)t3 * C + c2] = __float2bfloat16_rn(tile[threadIdx.x][threadIdx.y + k]);
+    }
 }
-// LEVER PL-012: strided variant (e.g. the generator's noise conv, stride 6).
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_s(const float* __restrict__ x, const float* __restrict__ w,
-                                                                 const float* __restrict__ b, float* __restrict__ y,
-                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                 int stride, int Tout) {
-    conv1d_igemm_body<false, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, stride, Tout);
+// Element-wise f32 -> BF16 (weights at load; row-major operands of the linear layers).
+extern "C" __global__ void bf16_convert(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, long n) {
+    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
+    if (i < n) y[i] = __float2bfloat16_rn(x[i]);
 }
-// LEVER PL-009: residual epilogue variant (y += conv), same order as add_inplace(res, conv).
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_res(const float* __restrict__ x, const float* __restrict__ w,
-                                                                   const float* __restrict__ b, float* __restrict__ y,
+// BF16 weights [K][Cout][Cin] -> the fused kernel's A-fragment layout wa[cot][slice][k][64][16]
+// (64-channel output tiles, 16-channel input slices; zero-padded partial tiles).
+extern "C" __global__ void bf16_layout_a(const unsigned short* __restrict__ w, unsigned short* __restrict__ wa,
+                                         int Cin, int Cout, int K, long n) {
+    const int ns = (Cin + 15) / 16;
+    for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < n; i += (long)gridDim.x * blockDim.x) {
+        int col = i & 15, row = (i >> 4) & 63;
+        long r = i >> 10;
+        int k = r % K;
+        r /= K;
+        int s = r % ns;
+        int cot = r / ns;
+        int co = cot * 64 + row, ci = s * 16 + col;
+        wa[i] = (co < Cout && ci < Cin) ? w[((long)k * Cout + co) * Cin + ci] : (unsigned short)0;
+    }
+}
+// Fused tensor-core conv1d, stride 1, same-length output, any K / dil (Cout % 64 == 0, Cin % 16 == 0).
+// - Block = 128 output channels x 128 time steps, 8 warps as 4 (co) x 2 (t); each warp computes
+//   32 co x 64 t (2 x 4 accumulator fragments).
+// - A (weight) fragments load straight from the pre-laid-out global buffer wa.
+// - The input window [TW][XLD] is staged 32 channels (2 slices) per __syncthreads pair, converted
+//   to BF16 and transposed (time rows, channel columns; each tap's B operand is a row offset).
+// - Epilogue through a per-warp 16x16 f32 tile.
+// - Optional AdaIN + Snake prologue (`pro` non-null): the input is the RAW AdaIN input and staging
+//   applies the AdaIN expression of adain_apply_seg followed by Snake, x + sin(a x)^2 / a;
+//   gap columns (col_item < 0) -> 0.
+struct AdainPro {
+    const int* col_item;
+    const float *mean, *rstd, *nw, *nb, *gb, *alpha;
+};
+template <bool RES>
+__device__ __forceinline__ void conv1d_wmma_bf16_body(const float* __restrict__ x, const __nv_bfloat16* __restrict__ wa,
+                                                      const float* __restrict__ b, float* __restrict__ y,
+                                                      int Cin, int T, int Cout, int K, int dil, int pad,
+                                                      const AdainPro* pro = nullptr) {
+    using namespace nvcuda;
+    constexpr int TN = 128, XLD = 48;  // XLD * 2 bytes = 96: every row start stays 32-byte aligned
+    extern __shared__ __align__(128) unsigned char smem_raw[];
+    const int TW = TN + (K - 1) * dil;
+    __nv_bfloat16* xs = (__nv_bfloat16*)smem_raw;  // [TW][XLD], channels 0..31 of the current stage
+    float* stg = (float*)(smem_raw + (((size_t)TW * XLD * sizeof(__nv_bfloat16) + 127) / 128) * 128);  // [8 warps][256]
+    constexpr int NT = 256;  // threads
+    const int t0 = blockIdx.x * TN, warp = threadIdx.x >> 5;
+    const int cot = blockIdx.y * 2 + ((warp >> 1) >> 1), co0 = cot * 64;  // this warp's 64-co tile
+    const int lane = threadIdx.x & 31, wm = (warp >> 1) & 1, wn = warp & 1;
+    const bool live = co0 < Cout;  // the upper 64-co tile may not exist
+    const int ns = (Cin + 15) / 16;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
+#pragma unroll
+    for (int m = 0; m < 2; m++)
+#pragma unroll
+        for (int n = 0; n < 4; n++) wmma::fill_fragment(acc[m][n], 0.0f);
+    for (int s0 = 0; s0 < ns; s0 += 2) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < 32 * TW; i += NT) {
+            int ci = i / TW, tt = i - ci * TW;
+            int c = s0 * 16 + ci, t = t0 - pad + tt;
+            float v = (c < Cin && t >= 0 && t < T) ? x[(long)c * T + t] : 0.0f;
+            if (pro && c < Cin && t >= 0 && t < T) {
+                int bi = pro->col_item[t];
+                if (bi < 0) {
+                    v = 0.0f;
+                } else {
+                    v = (v - pro->mean[bi * Cin + c]) * pro->rstd[bi * Cin + c];
+                    float g1 = 1.0f + pro->gb[(long)bi * 2 * Cin + c];
+                    v = g1 * (v * pro->nw[c] + pro->nb[c]) + pro->gb[(long)bi * 2 * Cin + Cin + c];
+                    float a = pro->alpha[c];
+                    float inv = 1.0f / a;
+                    float sn = sinf(a * v);
+                    v = v + inv * (sn * sn);
+                }
+            }
+            xs[tt * XLD + ci] = __float2bfloat16_rn(v);
+        }
+        __syncthreads();
+        const int nj = live ? min(2, ns - s0) : 0;
+        for (int j = 0; j < nj; j++) {
+            const __nv_bfloat16* wbase = wa + ((long)(cot * ns + s0 + j) * K) * 1024 + (wm * 32) * 16;
+            for (int k = 0; k < K; k++) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a0, a1;
+                wmma::load_matrix_sync(a0, wbase + k * 1024, 16);
+                wmma::load_matrix_sync(a1, wbase + k * 1024 + 256, 16);
+#pragma unroll
+                for (int n = 0; n < 4; n++) {
+                    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
+                    wmma::load_matrix_sync(bf, xs + (wn * 64 + n * 16 + k * dil) * XLD + j * 16, XLD);
+                    wmma::mma_sync(acc[0][n], a0, bf, acc[0][n]);
+                    wmma::mma_sync(acc[1][n], a1, bf, acc[1][n]);
+                }
+            }
+        }
+    }
+    if (!live) return;  // after the last __syncthreads
+    float* st = stg + warp * 256;
+#pragma unroll
+    for (int m = 0; m < 2; m++)
+#pragma unroll
+        for (int n = 0; n < 4; n++) {
+            wmma::store_matrix_sync(st, acc[m][n], 16, wmma::mem_row_major);
+            __syncwarp();
+            for (int e = lane; e < 256; e += 32) {
+                int co = co0 + wm * 32 + m * 16 + (e >> 4), t = t0 + wn * 64 + n * 16 + (e & 15);
+                if (co < Cout && t < T) {
+                    long o = (long)co * T + t;
+                    float r = (b ? b[co] : 0.0f) + st[e];
+                    if (RES) y[o] = y[o] + r;
+                    else y[o] = r;
+                }
+            }
+            __syncwarp();
+        }
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<true, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
+    conv1d_wmma_bf16_body<false>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+}
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16_snake(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                         int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                         const int* col_item, const float* mean, const float* rstd,
+                                                                         const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma_bf16_body<false>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+}
+// residual variant: y += conv(...), in the order add_inplace(y, conv) would use
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16_snake_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                             int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                             const int* col_item, const float* mean, const float* rstd,
+                                                                             const float* nw, const float* nb, const float* gb, const float* alpha) {
+    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
+    conv1d_wmma_bf16_body<true>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
 }
 
-// LEVER PL-014 candidate: single-pass per-item channel statistics (sum and sum of squares in
-// double, one read of the segment instead of two). Approximately lossless: the variance is
-// E[x^2] - mean^2 in double instead of the mean of squared float deviations from the float mean.
-extern "C" __global__ void chan_stats_seg1(const float* x, int L, const int* seg_start, const int* seg_len,
-                                           float eps, float* mean_out, float* rstd_out, int C) {
+// Per-item channel statistics over segments (AdaIN): per-thread partial sums accumulated in float
+// over values shifted by the segment's first element (limits cancellation in E[x^2] - m^2), combined
+// across threads in double. One block per (channel, item).
+extern "C" __global__ void chan_stats_seg(const float* x, int L, const int* seg_start, const int* seg_len,
+                                          float eps, float* mean_out, float* rstd_out, int C) {
     __shared__ double sh[256];
     __shared__ double sq[256];
     int c = blockIdx.x, b = blockIdx.y;
     const float* row = x + (long)c * L + seg_start[b];
     int T = seg_len[b];
-    double s = 0.0, s2 = 0.0;
+    const float shift = T > 0 ? row[0] : 0.0f;
+    float s = 0.0f, s2 = 0.0f;
     for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double v = (double)row[t];
+        float v = row[t] - shift;
         s += v;
         s2 += v * v;
     }
-    sh[threadIdx.x] = s;
-    sq[threadIdx.x] = s2;
+    sh[threadIdx.x] = (double)s;
+    sq[threadIdx.x] = (double)s2;
     __syncthreads();
     for (int k = blockDim.x / 2; k > 0; k >>= 1) {
         if (threadIdx.x < k) {
@@ -920,92 +800,10 @@ extern "C" __global__ void chan_stats_seg1(const float* x, int L, const int* seg
         __syncthreads();
     }
     if (threadIdx.x == 0) {
-        double m = sh[0] / (double)T;
-        double var = sq[0] / (double)T - m * m;
+        double d = sh[0] / (double)T;
+        double var = sq[0] / (double)T - d * d;
         if (var < 0.0) var = 0.0;
-        mean_out[b * C + c] = (float)m;
+        mean_out[b * C + c] = (float)((double)shift + d);
         rstd_out[b * C + c] = 1.0f / sqrtf((float)var + eps);
     }
 }
-
-// ---- LEVER PL-016 candidate: sliding-window fused conv, templated on (K, DIL) for the generator's
-// Snake-block convs. Thread = 8 out-channels x 8 CONTIGUOUS time steps; per input channel the thread
-// loads its window x[8tx .. 8tx + 8 + (K-1)DIL) once into registers and reuses it for all K taps.
-// Accumulation order per output is unchanged (input-channel-major, tap-minor) -> bitwise identical
-// to conv1d_igemm. smem row stride padded to a multiple of 4 floats.
-template <int K, int DIL, bool RES>
-__device__ __forceinline__ void conv1d_sw_body(const float* __restrict__ x, const float* __restrict__ w,
-                                               const float* __restrict__ b, float* __restrict__ y,
-                                               int Cin, int T, int Cout, int pad) {
-    constexpr int SPAN = 8 + (K - 1) * DIL;
-    constexpr int XW = ((IG_BN + (K - 1) * DIL) + 3) & ~3;
-    extern __shared__ float smem[];
-    float* xs = smem;                  // [IG_BK][XW]
-    float* ws = smem + IG_BK * XW;     // [IG_BK][K][IG_BM]
-    const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
-    const int tx = threadIdx.x & 15, ty = threadIdx.x >> 4;
-    float acc[8][8];
-#pragma unroll
-    for (int i = 0; i < 8; i++)
-#pragma unroll
-        for (int j = 0; j < 8; j++) acc[i][j] = 0.0f;
-    for (int c0 = 0; c0 < Cin; c0 += IG_BK) {
-        __syncthreads();
-        for (int i = threadIdx.x; i < IG_BK * XW; i += 128) {
-            int c = i / XW, j = i - c * XW;
-            int ci = c0 + c, t = t0 - pad + j;
-            xs[i] = (ci < Cin && t >= 0 && t < T && j < IG_BN + (K - 1) * DIL) ? x[(long)ci * T + t] : 0.0f;
-        }
-        for (int i = threadIdx.x; i < IG_BK * K * IG_BM; i += 128) {
-            int co = i & (IG_BM - 1), ck = i >> 6;
-            int k = ck % K, c = ck / K;
-            int ci = c0 + c;
-            ws[i] = (ci < Cin && co0 + co < Cout) ? w[((long)ci * K + k) * Cout + co0 + co] : 0.0f;
-        }
-        __syncthreads();
-#pragma unroll 1
-        for (int c = 0; c < IG_BK; c++) {
-            float win[SPAN];
-            const float* xp = xs + c * XW + 8 * tx;
-#pragma unroll
-            for (int j = 0; j < SPAN; j++) win[j] = xp[j];
-#pragma unroll
-            for (int k = 0; k < K; k++) {
-                const float* wp = ws + (c * K + k) * IG_BM + ty * 8;
-                float a[8];
-#pragma unroll
-                for (int i = 0; i < 8; i++) a[i] = wp[i];
-#pragma unroll
-                for (int i = 0; i < 8; i++)
-#pragma unroll
-                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], win[k * DIL + j], acc[i][j]);
-            }
-        }
-    }
-#pragma unroll
-    for (int i = 0; i < 8; i++) {
-        int co = co0 + ty * 8 + i;
-        if (co >= Cout) continue;
-        float bias = b ? b[co] : 0.0f;
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            int t = t0 + 8 * tx + j;
-            if (t < T) {
-                long o = (long)co * T + t;
-                float v = acc[i][j] + bias;
-                if (RES) y[o] = y[o] + v;
-                else y[o] = v;
-            }
-        }
-    }
-}
-#define SW_KERNEL(K, D)                                                                                        \
-    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_k##K##d##D(const float* __restrict__ x,     \
-        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
-        int Cout, int pad) { conv1d_sw_body<K, D, false>(x, w, b, y, Cin, T, Cout, pad); }                  \
-    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_res_k##K##d##D(const float* __restrict__ x, \
-        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
-        int Cout, int pad) { conv1d_sw_body<K, D, true>(x, w, b, y, Cin, T, Cout, pad); }
-SW_KERNEL(3, 1) SW_KERNEL(3, 3) SW_KERNEL(3, 5)
-SW_KERNEL(7, 1) SW_KERNEL(7, 3) SW_KERNEL(7, 5)
-SW_KERNEL(11, 1) SW_KERNEL(11, 3) SW_KERNEL(11, 5)

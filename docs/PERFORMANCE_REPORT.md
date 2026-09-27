@@ -1,5 +1,11 @@
 # Kokoro-82M: Rust CUDA vs production PyTorch — performance report
 
+> **Current product (2026-09-27):** main is the owner-accepted BF16x build (owner #25; merged from the
+> verified cleanup milestone, see PORT_STATE.md and docs/RELEASE_CLEANUP.md). Its whole-system
+> numbers are in the PHASE 2 section below (accepted artifact phase2-9b39d48; the cleaned main build
+> matches it within 1.5% warm and byte for byte in output). The phase-1 sections describe the
+> earlier f32 engine and are historical.
+
 > Status: **in-progress snapshot** (not a final acceptance gate, not optimization completion).
 > Correctness status is tracked separately (PORT_STATE.md, docs/conformance/TOLERANCE_HISTORY.md):
 > all stage seams pass on 15/15 fixture cases; 8 enforced end-to-end original-gate rows fail on the
@@ -110,14 +116,18 @@ Evidence that returns are severely diminishing (not an assumed roofline, not one
 - Everything larger requires lower precision: tensor cores, i.e. PHASE 2 (lossy) on branch
   experiment/reduced-precision.
 
-## PHASE 2 (lossy, branch experiment/reduced-precision) — pointer only; nothing on main changes
+## PHASE 2 (lossy precision ladder) — BF16x selected; now the product on main
 - Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS", "OWNER DECISION"; head aed6a5e). Receipts:
   `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`.
 - Status (owner #25, 2026-09-27): BF16X SELECTED and its presented quality ACCEPTED; INT8 REJECTED
-  (#24). Other levels were heard but not selected. Merge, default change and deployment remain
-  separate owner decisions; main is unchanged (f32).
+  (#24). Other levels were heard but not selected.
+- The BF16x-only cleanup (owner #26) was verified and merged into main (owner 1553703276434821171),
+  so main now builds only BF16x.
+- Deployment and publication remain separate decisions.
 - bf16x on the private chapter (final matrix; all arms cv ≤ 5%): warm 4.15 s = 1.80× vs Rust f32
-  and 13.08× vs production Python; cold 5.81 s = 1.50× and 11.82×. The numbers below do not change the phase-1 headline above.
+  and 13.08× vs production Python; cold 5.81 s = 1.50× and 11.82×.
+- Cleaned main build vs the accepted artifact (matched smoke, docs/RELEASE_CLEANUP.md): warm within
+  1.5%; identical WAVs.
 - Headline (fresh whole-system matrix, final binary phase2-9b39d48; private chapter; medians):
   - Clean: WARM fp16 7.45 → 4.27 s = 1.74× vs the Rust f32 control, 12.73× vs production Python
     (cv fp16 0.8%, f32 1.9%, Python 4.0%).

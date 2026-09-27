@@ -1,7 +1,7 @@
 # Runtime dependency inventory — `kokoro synth` (single-binary milestone, owner #15)
 
 Audited 2026-09-26 on the RTX 4090 host with `strace -f -e trace=openat,execve` of
-`kokoro synth` (text input, native frontend, `--device cuda`) under an empty environment
+`kokoro synth` (text input, native frontend, CUDA) under an empty environment
 (`env -i`, `PATH=/nonexistent`). "One executable" here means that one Rust program does all
 inference work, from text to WAV, in one process. It does NOT mean that the model and language
 data are embedded, or that the build is static and dependency-free. Everything below is loaded
@@ -17,8 +17,8 @@ from explicit paths at runtime.
 ## Executable
 | item | detail |
 |---|---|
-| `target/release/kokoro` | Rust, built `cargo build --release --features cuda`. `ldd` shows only libc, libm and libgcc_s. The CUDA kernels are compiled to PTX at build time (nvcc 12.9, compute_89) and embedded in the binary (`include_str!`). They are JIT-loaded by the driver. |
-| build variants | Default = strict rounding (`-fmad=false`). `KOKORO_FMA=1` = FMA contraction (owner-accepted, #14). The rounding mode is recorded in every sidecar (`cuda f32 kernels=strict|fma`). |
+| `target/release/kokoro` | Rust, built `cargo build --release` (CUDA is always required; there is no CPU build). `ldd` shows only libc, libm and libgcc_s. The CUDA kernels are compiled to PTX at build time (nvcc 12.9, compute_89) and embedded in the binary (`include_str!`). They are JIT-loaded by the driver. |
+| build configuration | One configuration: the owner-accepted BF16x build (owner #25), kernels compiled with strict rounding (`-fmad=false`). Recorded in every sidecar as `cuda bf16x kernels=strict(-fmad=false)`. (Before the owner #26 cleanup there were f32/FMA and experimental precision variants; see docs/RELEASE_CLEANUP.md.) |
 
 ## Native libraries loaded at runtime
 | library | how | version on this host | license / note |

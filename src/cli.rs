@@ -14,7 +14,7 @@ use std::time::Instant;
 pub const ENGINE_VERSION: &str = concat!("kokoro-rust ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Parser)]
-#[command(name = "kokoro", version, about = "Native Rust inference for hexgrad/Kokoro-82M")]
+#[command(name = "kokoro", version, about = "Native Rust + CUDA speech synthesis for hexgrad/Kokoro-82M (BF16 mixed precision, the owner-accepted configuration)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -46,17 +46,11 @@ struct Common {
     voice: String,
     #[arg(long, default_value_t = 1.0)]
     speed: f32,
-    /// Worker threads for the math kernels (0 = library default).
-    #[arg(long, default_value_t = 0)]
-    threads: usize,
-    #[cfg_attr(feature = "cuda", arg(long, value_enum, default_value = "cuda"))]
-    #[cfg_attr(not(feature = "cuda"), arg(long, value_enum, default_value = "cpu"))]
-    device: crate::engine::Device,
     /// CUDA device index (after CUDA_VISIBLE_DEVICES).
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
-    /// Batched synthesis budget: max phoneme chars per microbatch (0 = one chunk at a time).
-    #[arg(long, default_value_t = 8000)]
+    /// Batched synthesis budget: max phoneme chars per microbatch (>= 1).
+    #[arg(long, default_value_t = 8000, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     batch_phonemes: usize,
     /// Max chunks per microbatch.
     #[arg(long, default_value_t = 64)]
@@ -137,14 +131,6 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-}
-
-fn set_threads(n: usize) {
-    if n > 0 {
-        // matrixmultiply reads this on first use; rayon is configured explicitly.
-        std::env::set_var("MATMUL_NUM_THREADS", n.to_string());
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
-    }
 }
 
 #[derive(Serialize, serde::Deserialize, Clone, PartialEq)]
@@ -308,7 +294,6 @@ fn synth(
     if input_format == InputFormat::Text && frontend == Frontend::None {
         bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
-    set_threads(common.threads);
     let ts = now();
     let inp = read_input(&input)?;
     tl.push(0, "main", "input_read", ts, inp.lines.len());
@@ -316,8 +301,7 @@ fn synth(
     // Model and frontend load concurrently (independent; the frontend is CPU/disk, the model is
     // parse + GPU upload).
     let tl_ref = &tl;
-    // LEVER PL-015 (kill switch KOKORO_PREFETCH_FRONTEND=0): while the model loads, the loader thread
-    // also runs the (deterministic) frontend for the first lines; pass 0 uses those chunks.
+    // While the model loads, the loader thread also runs the (deterministic) frontend for the first lines; pass 0 uses those chunks.
     type Prefetch = Vec<Option<std::result::Result<Vec<crate::frontend::pipeline::Chunk>, String>>>;
     let lines_ref = &inp.lines;
     let load_frontend = move || -> Result<(Option<EnglishFrontend>, f64, Prefetch)> {
@@ -336,7 +320,7 @@ fn synth(
         tl_ref.push(0, "loader", "frontend_load", ts, 1);
         let fe_s = now() - ts;
         let mut pre: Prefetch = vec![];
-        if let Some(f) = fe.as_ref().filter(|_| *PREFETCH_ON) {
+        if let Some(f) = fe.as_ref() {
             let ts = now();
             let n = lines_ref.len().min(512);
             pre = (0..n).map(|_| None).collect();
@@ -366,7 +350,7 @@ fn synth(
         let fe_h = s.spawn(load_frontend);
         let ts = now();
         let r = (|| -> Result<(Engine, String, f64)> {
-            let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
+            let mut engine = Engine::load(&common.model_dir, common.cuda_device)?;
             let voice_sha = engine.voice(&common.voice)?.sha256.clone();
             Ok((engine, voice_sha, now() - ts))
         })();
@@ -605,11 +589,10 @@ fn synth(
             .collect();
         drop(out_rx);
 
-        // GPU stage on this thread (the engine is not shared). With --batch-phonemes > 0, chunks
-        // are collected in a window and synthesized as length-bucketed batches; each line is sent
-        // to the writer only after all of its chunks are joined in order.
+        // GPU stage on this thread (the engine is not shared). Chunks are collected in a window and
+        // synthesized as length-bucketed batches; each line is sent to the writer only after all of
+        // its chunks are joined in order.
         let policy = BatchPolicy { max_phonemes: common.batch_phonemes, max_items: common.batch_items.max(1) };
-        let batching = common.batch_phonemes > 0;
         let mut pending: Vec<(Box<Sidecar>, Vec<String>, Instant)> = vec![];
         let mut pending_chunks = 0usize;
         let mut flushed_once = false;
@@ -663,7 +646,7 @@ fn synth(
             let msg = match job {
                 Job::Resumed(line, e, d) => Out::Resumed(line, e, d),
                 Job::Final(sc) => Out::Write(sc, None, Instant::now()),
-                Job::Synth(sc, chunks, t0) if batching => {
+                Job::Synth(sc, chunks, t0) => {
                     pending_chunks += chunks.len();
                     pending.push((sc, chunks, t0));
                     let window = if flushed_once || common.batch_first_window == 0 { common.batch_window } else { common.batch_first_window.min(common.batch_window) };
@@ -675,32 +658,6 @@ fn synth(
                         }
                     }
                     continue;
-                }
-                Job::Synth(mut sc, chunks, t0) => {
-                    let mut audio = vec![];
-                    let mut err = None;
-                    let ts = now();
-                    for (k, c) in chunks.iter().enumerate() {
-                        match engine.synth_phonemes(c, &common.voice, common.speed, mix_seed(seed, (sc.line as u64) << 16 | k as u64)) {
-                            Ok(s) => {
-                                sc.dropped_phoneme_chars.extend(s.dropped.iter().map(|ch| ch.to_string()));
-                                audio.extend_from_slice(&s.audio);
-                            }
-                            Err(e) => {
-                                err = Some(format!("{e:#}"));
-                                break;
-                            }
-                        }
-                    }
-                    tl_r.push(pass, "gpu", "synth", ts, chunks.len());
-                    match err {
-                        None => Out::Write(sc, Some(audio), t0),
-                        Some(e) => {
-                            sc.status = "error".into();
-                            sc.error = Some(e);
-                            Out::Write(sc, None, t0)
-                        }
-                    }
                 }
             };
             let ws = now();
@@ -765,15 +722,10 @@ fn synth(
     }
     // The process exits right after this: skip tearing down the CUDA context / device buffers and
     // the frontend tables (the OS and driver reclaim them at exit; measured ~0.3 s of teardown).
-    if *SKIP_TEARDOWN {
-        std::mem::forget(engine);
-        std::mem::forget(fe);
-    }
+    std::mem::forget(engine);
+    std::mem::forget(fe);
     Ok(code)
 }
-
-static PREFETCH_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_PREFETCH_FRONTEND").map(|v| v != "0").unwrap_or(true));
-static SKIP_TEARDOWN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_SKIP_TEARDOWN").map(|v| v != "0").unwrap_or(true));
 
 fn peak_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
@@ -784,9 +736,8 @@ fn peak_rss_mb() -> f64 {
 }
 
 fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> Result<()> {
-    set_threads(common.threads);
     let t0 = Instant::now();
-    let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
+    let mut engine = Engine::load(&common.model_dir, common.cuda_device)?;
     engine.voice(&common.voice)?;
     let load_s = t0.elapsed().as_secs_f64();
     let items: Vec<String> = std::fs::read_to_string(&chunks)?
@@ -798,35 +749,16 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
     let reqs: Vec<(String, u64)> = items.iter().enumerate().map(|(i, p)| (p.clone(), i as u64)).collect();
     // warmup: one full uncounted pass
     let mut audio_s = vec![0.0f64; items.len()];
-    if common.batch_phonemes > 0 {
-        for (i, r) in engine.synth_batch(&reqs, &common.voice, common.speed, policy).into_iter().enumerate() {
-            audio_s[i] = r?.audio.len() as f64 / SAMPLE_RATE as f64;
-        }
-    } else {
-        for (i, p) in items.iter().enumerate() {
-            audio_s[i] = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?.audio.len() as f64 / SAMPLE_RATE as f64;
-        }
+    for (i, r) in engine.synth_batch(&reqs, &common.voice, common.speed, policy).into_iter().enumerate() {
+        audio_s[i] = r?.audio.len() as f64 / SAMPLE_RATE as f64;
     }
-    let mut per = vec![vec![]; items.len()];
     let mut totals = vec![];
     for _ in 0..reps {
         let tr = Instant::now();
-        if common.batch_phonemes > 0 {
-            for r in engine.synth_batch(&reqs, &common.voice, common.speed, policy) {
-                std::hint::black_box(&r?.audio);
-            }
-        } else {
-            for (i, p) in items.iter().enumerate() {
-                let t = Instant::now();
-                let s = engine.synth_phonemes(p, &common.voice, common.speed, i as u64)?;
-                per[i].push(t.elapsed().as_secs_f64());
-                std::hint::black_box(&s.audio);
-            }
+        for r in engine.synth_batch(&reqs, &common.voice, common.speed, policy) {
+            std::hint::black_box(&r?.audio);
         }
         totals.push(tr.elapsed().as_secs_f64());
-    }
-    if common.batch_phonemes > 0 {
-        per = vec![vec![0.0]; items.len()]; // per-chunk latency is not defined for batched passes
     }
     let stats = |xs: &[f64]| {
         let mut v = xs.to_vec();
@@ -837,16 +769,12 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
     };
     let audio_total: f64 = audio_s.iter().sum();
     let tot = stats(&totals);
-    let prof = crate::prof::report();
-    if !prof.is_empty() {
-        println!("stage profile (warmup + {reps} reps):\n{prof}");
-    }
     let rec = serde_json::json!({
-        "engine": format!("{ENGINE_VERSION} [{}]", engine.identity()), "device": format!("{:?}", common.device), "threads": common.threads, "batch_policy": if common.batch_phonemes > 0 { serde_json::json!(policy) } else { serde_json::json!("batch-1") }, "voice": common.voice, "speed": common.speed,
+        "engine": format!("{ENGINE_VERSION} [{}]", engine.identity()), "batch_policy": policy, "voice": common.voice, "speed": common.speed,
         "reps": reps, "chunks_file": chunks, "chunks_sha256": sha256_file(&chunks)?, "n_chunks": items.len(),
         "model_sha256": engine.model_sha256, "load_s": load_s, "total_s": tot, "audio_s": audio_total,
         "rtf_median": tot["median"].as_f64().unwrap() / audio_total, "peak_rss_mb": peak_rss_mb(),
-        "per_chunk": items.iter().enumerate().map(|(i, p)| { let mut s = stats(&per[i]); s["phonemes"] = p.chars().count().into(); s["audio_s"] = audio_s[i].into(); s }).collect::<Vec<_>>(),
+        "per_chunk": items.iter().enumerate().map(|(i, p)| serde_json::json!({"phonemes": p.chars().count(), "audio_s": audio_s[i]})).collect::<Vec<_>>(),
         "loadavg": std::fs::read_to_string("/proc/loadavg").unwrap_or_default().trim(),
     });
     println!("total median {:.3}s cv {:.1}% audio {:.1}s RTF {:.4} peak RSS {:.0} MB",
@@ -860,6 +788,13 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
 
 /// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
 pub fn cli_main() -> Result<i32> {
+    // The experimental precision selector is gone: this build has exactly one numerical mode, the
+    // owner-accepted BF16x path. Refuse any other requested mode instead of silently ignoring it.
+    if let Some(v) = std::env::var_os("KOKORO_PRECISION") {
+        if v != "bf16x" {
+            anyhow::bail!("KOKORO_PRECISION={} is not supported: this engine has a single numerical mode (BF16x); unset it", v.to_string_lossy());
+        }
+    }
     match Cli::parse().cmd {
         Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
             synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)

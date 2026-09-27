@@ -275,3 +275,60 @@ Load the named skill. Inspect available toolchains/storage and public reference.
      memory, drift) plus a RAW listening pack (public passages, both voices, f32 control + Python
      reference, worst cases + held-out) with a manifest. No acceptance claims from metrics, no fake
      low-bit speed claims, private chapter never published.
+24. OWNER LISTENING — INT8 REJECTED (Misha, 1553673730025197655): after the phase-2 ladder listening
+   (G3/G4), INT8 is explicitly REJECTED for hiss/degradation. The G5/G6 PL-014 before/after pairs
+   (s03_moon/am_adam, s06_long/af_heart): no audible differences reported.
+25. OWNER FINAL LISTENING DECISION — BF16X SELECTED AND ACCEPTED (Misha, 1553678159168151575):
+   "Okay BF16x confirmed. These are all indistinguishable to me."
+   - BF16x is SELECTED and its presented quality ACCEPTED (not merely a leading/unreviewed candidate).
+   - Basis: G1-G4 ladder listening, then focused B1-B5 comparisons against production Python on
+     public130: lines 52/af_heart, 1/af_heart, 11/am_adam (top 3 vs_reference spectral scores over
+     266 cases); 42/am_adam and 64/af_heart (worst equal-total-duration per voice).
+   - Exact final binary sha256 6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea,
+     tree 9b39d48 ($KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a).
+   - The owner verified the original raw paired WAVs (no normalization or other transformation) by
+     hash and seal.
+   - Provenance: $KOKORO_DATA/evidence/listening/phase2-owner-decision/OWNER_DECISION.json (per-case
+     WAV hashes).
+   - Preserve the f32 baseline and all numerical diagnostics. Do not re-escalate the accepted bf16x
+     differences.
+   - This records the decision only: NOT a new optimization campaign, public release, deployment or
+     automatic merge. Source and corpus protections unchanged.
+26. OWNER AUTHORIZES BF16X-ONLY RELEASE CLEANUP (Misha, 1553679677162389505, confirmed
+   1553679934516371629; full scope in HERMES_RELEASE_CLEANUP_BRIEF.md):
+   - Branch release/bf16x-cleanup from the accepted lineage (aed6a5e = accepted code tree 9b39d48 plus
+     docs).
+   - Simplify to ONLY the approved BF16x production path. Remove the other precision variants,
+     experimental kernel alternatives and kill switches, and dead plumbing; do not merely hide them
+     behind a bf16x default.
+   - Keep the FP32 operations and shape fallbacks intrinsic to bf16x, operational options, and
+     safety/resume behavior.
+   - Freeze the exact accepted build/kernel/rounding configuration (strict -fmad=false, IG_BK=4,
+     WMMA_TN=128, P2-L2..L5). No new precision or speed experiments.
+   - Tests: repoint/add them for the actual bf16x product; keep the useful unit, differential,
+     negative-control and end-to-end checks.
+   - Verification: prove outputs are preserved vs the accepted binary; bounded pre/post speed smoke.
+   - No Python runtime. Private material stays outside Git.
+   - Deliverable: incremental commits, a switch-removal inventory, current test evidence and a
+     simplified command.
+   - NOT authorized: public release, deployment, license choice, automatic main merge.
+   - Preserve the accepted binary, evidence and main.
+27. OWNER AUTHORIZES THE NEXT RELEASE-PREPARATION STAGE (1553681850818502707; scope under the data root in
+   supervision/portability-milestone.md): after supervisor verification of stage 1 (0d1f149 /
+   d83540a), a bounded portability/configuration milestone.
+   - Remove host/user/GPU-index/inherited-environment assumptions from product, build, test and
+     tools.
+   - State the tested scope (Linux x86_64 / RTX 4090 CC 8.9 / CUDA 12.9 / American English).
+   - Verify with an isolated data view and a stripped environment.
+   - No license choice (the prompt suggestion to remove the license field is NOT owner approval), no
+     publication.
+28. OWNER: MERGE VERIFIED CLEANUP INTO MAIN (1553703276434821171): a completed, verified cleanup is
+    merged, not kept as a separate product line.
+    - Integrate 0d1f149 (implementation d83540a) into main with a normal merge; resolve the docs to
+      the current BF16x state.
+    - Keep the unfinished, unverified portability work out of the merge, and preserve it.
+    - Verify, then push main to the existing PRIVATE origin.
+    - No force push, no history rewrite, no visibility/publication/deployment change, no branch
+      deletion.
+    - Main becomes canonical; later verified milestones integrate there. Then continue the
+      portability task.

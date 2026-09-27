@@ -1,4 +1,5 @@
-//! PL-BERT (transformers AlbertModel, one shared layer applied 12 times, post-LN, gelu_new).
+//! PL-BERT weights (transformers AlbertModel, one shared layer applied 12 times, post-LN,
+//! gelu_new; the layers run on the GPU) and the host-side embedding lookup + LayerNorm.
 
 use crate::nn::Linear;
 use crate::ops;
@@ -77,61 +78,5 @@ impl Albert {
         }
         ops::layer_norm_rows(&mut x, EMB, Some(&self.emb_ln.0), Some(&self.emb_ln.1), LN_EPS);
         Ok(x)
-    }
-
-    /// One application of the shared layer: h [t, 768] -> [t, 768]
-    pub fn layer(&self, h: &[f32], t: usize) -> Vec<f32> {
-        let q = self.q.forward(h, t);
-        let k = self.k.forward(h, t);
-        let v = self.v.forward(h, t);
-        let scale = (HEAD_DIM as f32).powf(-0.5);
-        let mut ctx = vec![0.0f32; t * HID];
-        let mut scores = vec![0.0f32; t * t];
-        for hd in 0..HEADS {
-            let off = hd * HEAD_DIM;
-            // scores[i, j] = q[i, off..] . k[j, off..]
-            ops::gemm(t, HEAD_DIM, t, &q, off, HID, 1, &k, off, 1, HID, 0.0, &mut scores, 0, t, 1);
-            for row in scores.chunks_exact_mut(t) {
-                let mut mx = f32::NEG_INFINITY;
-                for s in row.iter_mut() {
-                    *s *= scale;
-                    mx = mx.max(*s);
-                }
-                let mut sum = 0.0f32;
-                for s in row.iter_mut() {
-                    *s = (*s - mx).exp();
-                    sum += *s;
-                }
-                let inv = 1.0 / sum;
-                for s in row.iter_mut() {
-                    *s *= inv;
-                }
-            }
-            ops::gemm(t, t, HEAD_DIM, &scores, 0, t, 1, &v, off, HID, 1, 0.0, &mut ctx, off, HID, 1);
-        }
-        let mut a = self.dense.forward(&ctx, t);
-        for (x, y) in a.iter_mut().zip(h) {
-            *x += *y;
-        }
-        ops::layer_norm_rows(&mut a, HID, Some(&self.attn_ln.0), Some(&self.attn_ln.1), LN_EPS);
-        let mut f = self.ffn.forward(&a, t);
-        ops::gelu_new(&mut f);
-        let mut o = self.ffn_out.forward(&f, t);
-        for (x, y) in o.iter_mut().zip(&a) {
-            *x += *y;
-        }
-        ops::layer_norm_rows(&mut o, HID, Some(&self.full_ln.0), Some(&self.full_ln.1), LN_EPS);
-        o
-    }
-
-    /// last_hidden_state [t, 768]
-    pub fn forward(&self, ids: &[i64]) -> Result<Vec<f32>> {
-        let t = ids.len();
-        let e = self.embeddings(ids)?;
-        let mut h = self.map_in.forward(&e, t);
-        for _ in 0..LAYERS {
-            h = self.layer(&h, t);
-        }
-        Ok(h)
     }
 }
