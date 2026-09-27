@@ -55,11 +55,6 @@ struct Common {
     /// CUDA device index (after CUDA_VISIBLE_DEVICES).
     #[arg(long, default_value_t = 0)]
     cuda_device: usize,
-    /// PHASE 2 EXPERIMENTAL numerical mode of the CUDA engine (branch experiment/reduced-precision):
-    /// f32 (control) | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8. Recorded in the engine
-    /// identity (sidecars, manifest, resume keys). Everything but f32 is UNREVIEWED.
-    #[arg(long, env = "KOKORO_PRECISION", default_value = "f32")]
-    precision: String,
     /// Batched synthesis budget: max phoneme chars per microbatch (0 = one chunk at a time).
     #[arg(long, default_value_t = 8000)]
     batch_phonemes: usize,
@@ -142,11 +137,6 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-}
-
-/// PHASE 2: the engine reads its precision from KOKORO_PRECISION at load.
-fn set_precision(p: &str) {
-    std::env::set_var("KOKORO_PRECISION", p);
 }
 
 fn set_threads(n: usize) {
@@ -319,7 +309,6 @@ fn synth(
         bail!("--input-format text needs --frontend native (or use --input-format phonemes)");
     }
     set_threads(common.threads);
-    set_precision(&common.precision);
     let ts = now();
     let inp = read_input(&input)?;
     tl.push(0, "main", "input_read", ts, inp.lines.len());
@@ -327,8 +316,7 @@ fn synth(
     // Model and frontend load concurrently (independent; the frontend is CPU/disk, the model is
     // parse + GPU upload).
     let tl_ref = &tl;
-    // LEVER PL-015 (kill switch KOKORO_PREFETCH_FRONTEND=0): while the model loads, the loader thread
-    // also runs the (deterministic) frontend for the first lines; pass 0 uses those chunks.
+    // While the model loads, the loader thread also runs the (deterministic) frontend for the first lines; pass 0 uses those chunks.
     type Prefetch = Vec<Option<std::result::Result<Vec<crate::frontend::pipeline::Chunk>, String>>>;
     let lines_ref = &inp.lines;
     let load_frontend = move || -> Result<(Option<EnglishFrontend>, f64, Prefetch)> {
@@ -347,7 +335,7 @@ fn synth(
         tl_ref.push(0, "loader", "frontend_load", ts, 1);
         let fe_s = now() - ts;
         let mut pre: Prefetch = vec![];
-        if let Some(f) = fe.as_ref().filter(|_| *PREFETCH_ON) {
+        if let Some(f) = fe.as_ref() {
             let ts = now();
             let n = lines_ref.len().min(512);
             pre = (0..n).map(|_| None).collect();
@@ -776,15 +764,10 @@ fn synth(
     }
     // The process exits right after this: skip tearing down the CUDA context / device buffers and
     // the frontend tables (the OS and driver reclaim them at exit; measured ~0.3 s of teardown).
-    if *SKIP_TEARDOWN {
-        std::mem::forget(engine);
-        std::mem::forget(fe);
-    }
+    std::mem::forget(engine);
+    std::mem::forget(fe);
     Ok(code)
 }
-
-static PREFETCH_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_PREFETCH_FRONTEND").map(|v| v != "0").unwrap_or(true));
-static SKIP_TEARDOWN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_SKIP_TEARDOWN").map(|v| v != "0").unwrap_or(true));
 
 fn peak_rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/status")
@@ -796,7 +779,6 @@ fn peak_rss_mb() -> f64 {
 
 fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> Result<()> {
     set_threads(common.threads);
-    set_precision(&common.precision);
     let t0 = Instant::now();
     let mut engine = Engine::load_on(&common.model_dir, common.device, common.cuda_device)?;
     engine.voice(&common.voice)?;
@@ -872,6 +854,13 @@ fn bench(common: Common, chunks: PathBuf, reps: usize, out: Option<PathBuf>) -> 
 
 /// Returns the process exit status (0 complete, 1 incomplete); Err = job-level failure (exit 2).
 pub fn cli_main() -> Result<i32> {
+    // The experimental precision selector is gone: this build has exactly one numerical mode, the
+    // owner-accepted BF16x path. Refuse any other requested mode instead of silently ignoring it.
+    if let Some(v) = std::env::var_os("KOKORO_PRECISION") {
+        if v != "bf16x" {
+            anyhow::bail!("KOKORO_PRECISION={} is not supported: this engine has a single numerical mode (BF16x); unset it", v.to_string_lossy());
+        }
+    }
     match Cli::parse().cmd {
         Cmd::Synth { common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync } => {
             synth(common, input, input_format, frontend, frontend_dir, espeak_lib, out_dir, format, seed, encode, force, blank_lines, bench_passes, timeline, prep_threads, write_threads, fsync)

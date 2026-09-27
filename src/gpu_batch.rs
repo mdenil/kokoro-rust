@@ -57,12 +57,6 @@ impl Dom {
     }
 }
 
-static STATS_1PASS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_STATS_1PASS").map(|v| v != "0").unwrap_or(true));
-/// PHASE 2 lever P2-L5 (non-f32 levels only; kill switch KOKORO_LP_STATS_F32=0): float per-thread
-/// partials in the channel statistics (FP64 throughput bound on GeForce).
-static LP_STATS_F32: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_STATS_F32").map(|v| v != "0").unwrap_or(true));
-static FUSE_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_FUSE_RES_CONV").map(|v| v != "0").unwrap_or(true));
-
 impl GpuKokoro {
     fn mask(&self, x: &mut Buf, c: usize, d: &Dom) -> Result<()> {
         // negative-control hook for tests (proves the batch tests detect padding contamination)
@@ -91,14 +85,7 @@ impl GpuKokoro {
         let mut rstd = g.alloc(d.b() * a.c)?;
         let (li, eps, ci) = (d.l as i32, 1e-5f32, a.c as i32);
         let cfg = LaunchConfig { grid_dim: (a.c as u32, d.b() as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        if *LP_STATS_F32 && g.prec != crate::gpu::Precision::F32 {
-            launch!(g, chan_stats_seg1f, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
-        } else if *STATS_1PASS {
-            // LEVER PL-014 (kill switch KOKORO_STATS_1PASS=0): single-pass statistics
-            launch!(g, chan_stats_seg1, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
-        } else {
-            launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
-        }
+        launch!(g, chan_stats_seg, cfg, x, &li, &d.start_d, &d.len_d, &eps, &mut mean, &mut rstd, &ci)?;
         Ok((gb, mean, rstd))
     }
 
@@ -150,47 +137,21 @@ impl GpuKokoro {
         Ok(r)
     }
 
+    /// AdaINResBlock1 (Snake) on domain `d`: every conv runs on the fused BF16 kernel with AdaIN +
+    /// Snake applied while staging its input (only the statistics are computed separately); conv2
+    /// accumulates into x in its epilogue (checked at load: all Snake-block convs are fused).
     fn snake_b(&self, blk: &GSnakeBlk, x: &Buf, d: &Dom, styles: &Buf) -> Result<Buf> {
         let g = &self.gpu;
         let mut x = g.stream.clone_dtod(x)?;
-        let fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].igemm_applicable(g) && blk.convs2[i].igemm_applicable(g));
-        let lp_fuse = *FUSE_ON && (0..3).all(|i| blk.convs1[i].wmma_ok(d.l, d.l) && blk.convs2[i].wmma_ok(d.l, d.l));
         for i in 0..3 {
-            if lp_fuse && blk.convs1[i].wmma_pro_ok(d.l) && blk.convs2[i].wmma_pro_ok(d.l) {
-                // PHASE 2 (P2-L4, kill switch KOKORO_LP_PROLOGUE=0): AdaIN + Snake applied inside the
-                // conv's input staging; only the statistics are computed separately.
-                let (a1, a2) = (&blk.adain1[i], &blk.adain2[i]);
-                let (gb, mean, rstd) = self.adain_stats(a1, &x, d, styles)?;
-                let mut h = g.alloc(blk.convs1[i].cout * d.l)?;
-                blk.convs1[i].fwd_wmma_pro(g, &x, d.l, &mut h, false, &d.col_item, &mean, &rstd, &a1.nw, &a1.nb, &gb, &blk.alpha1[i])?;
-                let (gb, mean, rstd) = self.adain_stats(a2, &h, d, styles)?;
-                blk.convs2[i].fwd_wmma_pro(g, &h, d.l, &mut x, true, &d.col_item, &mean, &rstd, &a2.nw, &a2.nb, &gb, &blk.alpha2[i])?;
-                continue;
-            }
-            if lp_fuse {
-                // PHASE 2: tensor-core convs; AdaIN output has zero gaps (no mask); conv2 accumulates
-                // into x in its epilogue.
-                let h = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
-                let (h, _) = blk.convs1[i].fwd(g, &h, d.l)?;
-                let h = self.adain_b(&blk.adain2[i], &h, d, styles, Act::Snake(&blk.alpha2[i]))?;
-                blk.convs2[i].fwd_wmma_res(g, &h, d.l, &mut x)?;
-                continue;
-            }
-            if fuse {
-                // LEVER PL-009 (kill switch KOKORO_FUSE_RES_CONV=0): AdaIN+Snake applied separately (its
-                // output already has zero gaps, so no mask is needed); conv2 accumulates into x in its
-                // epilogue (x + conv, the add_inplace order) -> bitwise identical to the unfused path
-                let h = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
-                let (h, _) = blk.convs1[i].fwd(g, &h, d.l)?;
-                let h = self.adain_b(&blk.adain2[i], &h, d, styles, Act::Snake(&blk.alpha2[i]))?;
-                blk.convs2[i].fwd_igemm_res(g, &h, d.l, &mut x)?;
-                continue;
-            }
-            let mut xt = self.adain_b(&blk.adain1[i], &x, d, styles, Act::Snake(&blk.alpha1[i]))?;
-            let xt = self.conv_b(&blk.convs1[i], &mut xt, d)?;
-            let mut xt = self.adain_b(&blk.adain2[i], &xt, d, styles, Act::Snake(&blk.alpha2[i]))?;
-            let xt = self.conv_b(&blk.convs2[i], &mut xt, d)?;
-            g.add(&mut x, &xt)?;
+            let (a1, a2) = (&blk.adain1[i], &blk.adain2[i]);
+            let (gb, mean, rstd) = self.adain_stats(a1, &x, d, styles)?;
+            let mut h = g.alloc(blk.convs1[i].cout * d.l)?;
+            let p1 = SnakePro { col_item: &d.col_item, mean: &mean, rstd: &rstd, nw: &a1.nw, nb: &a1.nb, gb: &gb, alpha: &blk.alpha1[i] };
+            blk.convs1[i].fwd_snake(g, &x, d.l, &mut h, false, p1)?;
+            let (gb, mean, rstd) = self.adain_stats(a2, &h, d, styles)?;
+            let p2 = SnakePro { col_item: &d.col_item, mean: &mean, rstd: &rstd, nw: &a2.nw, nb: &a2.nb, gb: &gb, alpha: &blk.alpha2[i] };
+            blk.convs2[i].fwd_snake(g, &h, d.l, &mut x, true, p2)?;
         }
         Ok(x)
     }

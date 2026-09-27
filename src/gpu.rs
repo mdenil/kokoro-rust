@@ -1,9 +1,13 @@
-//! CUDA backend (feature `cuda`): the same forward as the CPU path, hydrated from the proven CPU
-//! structs (weight norm, AdaIN affine defaults, ... resolved once), run on one stream.
-//! Matrix products: cuBLAS SGEMM (default math mode = full f32, no TF32). Everything else:
-//! kernels/kokoro.cu. The only `unsafe` in this module: kernel launches, uninitialized device
-//! allocations that are fully overwritten, and cuBLAS calls whose operand extents are
-//! bounds-checked in `gemm`/`gemm_batched` first.
+//! CUDA engine: the owner-accepted BF16x mixed-precision forward (owner #25), hydrated from the host
+//! weight structs (weight norm, AdaIN affine defaults, ... resolved once), run on one stream.
+//! - BF16 operands, f32 accumulation: every stride-1 convolution of the text encoder, predictor,
+//!   decoder and generator (fused tensor-core kernel where the shape allows, per-tap cuBLAS
+//!   otherwise) and every linear layer.
+//! - f32: the small/strided convolutions, LSTM recurrences, attention products, normalization and
+//!   statistics, source/STFT/iSTFT.
+//! Kernels: kernels/kokoro.cu, built with -fmad=false. The only `unsafe` in this module: kernel
+//! launches, uninitialized device allocations that are fully overwritten, and cuBLAS calls whose
+//! operand extents are bounds-checked first.
 
 use crate::albert::{self, Albert};
 use crate::model::{self, Kokoro, Output, HIDDEN, STYLE_DIM};
@@ -17,13 +21,11 @@ use std::sync::Arc;
 
 type Buf = CudaSlice<f32>;
 
-pub const IG_BK_CU: usize = match usize::from_str_radix(env!("KOKORO_IG_BK"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_IG_BK") };
 /// The embedded PTX (exposed for load-time probes).
 pub const PTX_SRC: &str = PTX;
-pub const WMMA_TN_CU: usize = match usize::from_str_radix(env!("KOKORO_WMMA_TN"), 10) { Ok(v) => v, Err(_) => panic!("KOKORO_WMMA_TN") };
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
-/// Kernel rounding mode baked in at build time ("fma" default, or "strict(-fmad=false)").
-pub const KERNEL_ROUNDING: &str = env!("KOKORO_KERNEL_ROUNDING");
+/// Kernel rounding mode of the accepted build (build.rs compiles with -fmad=false).
+pub const KERNEL_ROUNDING: &str = "strict(-fmad=false)";
 
 macro_rules! kernels {
     ($($name:ident),* $(,)?) => {
@@ -39,15 +41,12 @@ macro_rules! kernels {
 
 kernels!(
     fill_channels, fill_rows, leaky_relu, add_inplace, div_inplace, residual_scale, chan_stats, adain_apply,
-    layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols, lstm_step,
-    upsample_nearest2, dw_convT_k3s2, conv_direct, convT_gather, reflect_pad_left1, sine_phase_pre,
-    sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, chan_stats_seg, adain_apply_seg, adaln_rows_seg,
-    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld, conv_direct_tiled, conv1d_igemm, conv1d_igemm_res, conv1d_igemm_s, chan_stats_seg1,
-    lp_transpose_f16, lp_transpose_bf16, lp_cvt_f16, lp_cvt_bf16, lp_absmax, lp_transpose_q8, lp_dequant, conv1d_wmma_f16, conv1d_wmma_bf16, conv1d_wmma_s8, lp_absmax_mb, conv1d_wmma_f16_res, conv1d_wmma_bf16_res, conv1d_wmma_s8_res,
-    lp_layout_a, conv1d_wmma2_f16, conv1d_wmma2_f16_res, conv1d_wmma2_bf16, conv1d_wmma2_bf16_res,
-    conv1d_wmma2w_f16, conv1d_wmma2w_f16_res, conv1d_wmma2w_bf16, conv1d_wmma2w_bf16_res,
-    conv1d_wmma2w_f16_pro, conv1d_wmma2w_f16_pro_res, conv1d_wmma2w_bf16_pro, conv1d_wmma2w_bf16_pro_res, chan_stats_seg1f,
-    conv1d_sw_k3d1, conv1d_sw_k3d3, conv1d_sw_k3d5, conv1d_sw_k7d1, conv1d_sw_k7d3, conv1d_sw_k7d5, conv1d_sw_k11d1, conv1d_sw_k11d3, conv1d_sw_k11d5, conv1d_sw_res_k3d1, conv1d_sw_res_k3d3, conv1d_sw_res_k3d5, conv1d_sw_res_k7d1, conv1d_sw_res_k7d3, conv1d_sw_res_k7d5, conv1d_sw_res_k11d1, conv1d_sw_res_k11d3, conv1d_sw_res_k11d5,
+    layer_norm_rows, gelu_new, softmax_rows, transpose, cat_style_rows, expand_rows, expand_cols,
+    upsample_nearest2, dw_convT_k3s2, convT_gather, reflect_pad_left1, sine_phase_pre,
+    sine_har_source, stft20, istft_frames, istft_ola, gen_noise, lstm_seq, mask_gaps, adain_apply_seg, adaln_rows_seg,
+    cat_style_rows_seg, gather_rows, gather_cols, lstm_seq_batched, reflect_pad_left1_seg, stft20_ld, istft_frames_ld,
+    conv_direct_tiled, conv1d_strided, chan_stats_seg,
+    bf16_transpose, bf16_convert, bf16_layout_a, conv1d_wmma_bf16, conv1d_wmma_bf16_snake, conv1d_wmma_bf16_snake_res,
 );
 
 macro_rules! launch {
@@ -65,88 +64,6 @@ fn cfg1(n: usize) -> LaunchConfig {
     LaunchConfig { grid_dim: (n.div_ceil(256).max(1) as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }
 }
 
-/// PHASE 2 (branch experiment/reduced-precision): numerical mode of the CUDA engine, chosen by
-/// KOKORO_PRECISION at load and recorded in the engine identity (resume never mixes modes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Precision {
-    /// phase-1 f32 control
-    F32,
-    /// cuBLAS GEMMs on TF32 tensor cores; f32 SIMT fused convs kept
-    Tf32,
-    /// TF32 everywhere a GEMM can run: all non-direct convs as per-tap TF32 GEMMs
-    Tf32All,
-    /// decoder + generator convs: FP16 operands, f32 accumulate/output; rest f32
-    Fp16,
-    /// as Fp16 with BF16 operands
-    Bf16,
-    /// Fp16 + predictor/text-encoder convs + all linear layers with FP16 operands
-    Fp16X,
-    /// as Fp16X with BF16 operands
-    Bf16X,
-    /// decoder + generator convs: INT8 weights (per-out-channel scale) x INT8 activations (dynamic
-    /// per-tensor scale), INT32 accumulate, f32 dequant; rest f32
-    Int8,
-}
-
-impl Precision {
-    pub fn from_env() -> Result<Self> {
-        Ok(match std::env::var("KOKORO_PRECISION").unwrap_or_else(|_| "f32".into()).as_str() {
-            "f32" => Self::F32,
-            "tf32" => Self::Tf32,
-            "tf32all" => Self::Tf32All,
-            "fp16" => Self::Fp16,
-            "bf16" => Self::Bf16,
-            "fp16x" => Self::Fp16X,
-            "bf16x" => Self::Bf16X,
-            "int8" => Self::Int8,
-            other => bail!("unknown KOKORO_PRECISION {other:?} (f32|tf32|tf32all|fp16|bf16|fp16x|bf16x|int8)"),
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::F32 => "f32",
-            Self::Tf32 => "tf32",
-            Self::Tf32All => "tf32all",
-            Self::Fp16 => "fp16",
-            Self::Bf16 => "bf16",
-            Self::Fp16X => "fp16x",
-            Self::Bf16X => "bf16x",
-            Self::Int8 => "int8",
-        }
-    }
-
-    /// Highest conv tier run in low precision (0 none; 1 decoder+generator; 2 + predictor/text enc).
-    fn conv_tier(self) -> u8 {
-        match self {
-            Self::Fp16 | Self::Bf16 | Self::Int8 => 1,
-            Self::Fp16X | Self::Bf16X => 2,
-            _ => 0,
-        }
-    }
-
-    fn half(self) -> Option<cudarc::cublas::sys::cudaDataType> {
-        match self {
-            Self::Fp16 | Self::Fp16X => Some(cudarc::cublas::sys::cudaDataType::CUDA_R_16F),
-            Self::Bf16 | Self::Bf16X => Some(cudarc::cublas::sys::cudaDataType::CUDA_R_16BF),
-            _ => None,
-        }
-    }
-
-    fn tf32(self) -> bool {
-        matches!(self, Self::Tf32 | Self::Tf32All)
-    }
-
-    fn linear_half(self) -> bool {
-        matches!(self, Self::Fp16X | Self::Bf16X)
-    }
-
-    /// f32 SIMT fused conv kernels allowed for convs that stay in f32
-    fn f32_fused_ok(self) -> bool {
-        self != Self::Tf32All
-    }
-}
-
 pub struct Gpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -154,7 +71,6 @@ pub struct Gpu {
     k: Kernels,
     tw: CudaSlice<f64>,
     win: Buf,
-    pub prec: Precision,
 }
 
 impl Gpu {
@@ -174,7 +90,7 @@ impl Gpu {
         let win: Vec<f32> = (0..20).map(|n| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / 20.0).cos()) as f32).collect();
         let tw = stream.clone_htod(&tw)?;
         let win = stream.clone_htod(&win)?;
-        Ok(Self { k: Kernels::load(&module)?, ctx, stream, blas, tw, win, prec: Precision::from_env()? })
+        Ok(Self { k: Kernels::load(&module)?, ctx, stream, blas, tw, win })
     }
 
     /// With KOKORO_PROFILE=1, block until queued GPU work finishes so stage scopes measure
@@ -200,6 +116,15 @@ impl Gpu {
 
     pub fn down(&self, x: &Buf) -> Result<Vec<f32>> {
         Ok(self.stream.clone_dtoh(x)?)
+    }
+
+    /// f32 -> BF16 (round to nearest even), element-wise.
+    fn bf16(&self, x: &Buf) -> Result<CudaSlice<u16>> {
+        // SAFETY: fully written by the conversion kernel.
+        let mut h = unsafe { self.stream.alloc::<u16>(x.len()) }?;
+        let n = x.len() as i64;
+        launch!(self, bf16_convert, cfg1(x.len()), x, &mut h, &n)?;
+        Ok(h)
     }
 
     fn alloc(&self, n: usize) -> Result<Buf> {
@@ -232,16 +157,6 @@ impl Gpu {
             beta,
             ldc: ldc as i32,
         };
-        if self.prec.tf32() {
-            use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
-            let (pa, _ga) = a.device_ptr(&self.stream);
-            let (pb, _gb) = b.device_ptr(&self.stream);
-            let (pc, _gc) = c.device_ptr_mut(&self.stream);
-            // SAFETY: operand extents checked above; f32 operands, TF32 tensor-core compute.
-            return unsafe {
-                self.gemm_raw(ta, tb, m, n, k, pa + 4 * a_off as u64, Dt::CUDA_R_32F, lda, pb + 4 * b_off as u64, Dt::CUDA_R_32F, ldb, &beta as *const f32 as *const std::ffi::c_void, pc + 4 * c_off as u64, Dt::CUDA_R_32F, ldc, Ct::CUBLAS_COMPUTE_32F_FAST_TF32)
-            };
-        }
         let (av, bv) = (a.slice(a_off..), b.slice(b_off..));
         let mut cv = c.slice_mut(c_off..);
         // SAFETY: operand extents checked above.
@@ -249,14 +164,15 @@ impl Gpu {
         Ok(())
     }
 
-    /// PHASE 2: raw cublasGemmEx (column-major) on device addresses. Callers guarantee extents,
-    /// types and alignment. alpha is 1 (f32, or i32 for integer compute); beta points to a value of
-    /// the compute type.
+    /// Raw cublasGemmEx (column-major) on device addresses: BF16 operands, f32 compute and output.
+    /// Callers guarantee extents and alignment. alpha is 1; beta points to an f32.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn gemm_raw(&self, ta: bool, tb: bool, m: usize, n: usize, k: usize, a: u64, at: cudarc::cublas::sys::cudaDataType, lda: usize, b: u64, bt: cudarc::cublas::sys::cudaDataType, ldb: usize, beta: *const std::ffi::c_void, c: u64, ct: cudarc::cublas::sys::cudaDataType, ldc: usize, compute: cudarc::cublas::sys::cublasComputeType_t) -> Result<()> {
-        use cudarc::cublas::sys::{cublasComputeType_t as Ct, cublasGemmAlgo_t};
-        let (one_f, one_i) = (1.0f32, 1i32);
-        let alpha = if compute == Ct::CUBLAS_COMPUTE_32I { &one_i as *const i32 as *const std::ffi::c_void } else { &one_f as *const f32 as *const std::ffi::c_void };
+    unsafe fn gemm_bf16(&self, ta: bool, tb: bool, m: usize, n: usize, k: usize, a: u64, lda: usize, b: u64, ldb: usize, beta: &f32, c: u64, ldc: usize) -> Result<()> {
+        use cudarc::cublas::sys::{cublasComputeType_t as Ct, cublasGemmAlgo_t, cudaDataType as Dt};
+        let one = 1.0f32;
+        let alpha = &one as *const f32 as *const std::ffi::c_void;
+        let beta = beta as *const f32 as *const std::ffi::c_void;
+        let (at, bt, ct, compute) = (Dt::CUDA_R_16BF, Dt::CUDA_R_16BF, Dt::CUDA_R_32F, Ct::CUBLAS_COMPUTE_32F);
         cudarc::cublas::result::gemm_ex(
             *self.blas.handle(),
             if ta { Op::CUBLAS_OP_T } else { Op::CUBLAS_OP_N },
@@ -351,90 +267,59 @@ impl Gpu {
 // ------------------------------------------------------------------------------------ layers
 
 pub struct GLinear {
-    w: Buf,
+    /// BF16 weights [dout][din]
+    w: CudaSlice<u16>,
     b: Option<Buf>,
     din: usize,
     dout: usize,
-    /// PHASE 2: half weights, created on first use in the fp16x/bf16x modes
-    w_h: std::sync::OnceLock<CudaSlice<u16>>,
 }
 
 impl GLinear {
     fn new(g: &Gpu, l: &Linear) -> Result<Self> {
-        Ok(Self { w: g.up(&l.w)?, b: l.b.as_ref().map(|b| g.up(b)).transpose()?, din: l.din, dout: l.dout, w_h: std::sync::OnceLock::new() })
+        Ok(Self { w: g.bf16(&g.up(&l.w)?)?, b: l.b.as_ref().map(|b| g.up(b)).transpose()?, din: l.din, dout: l.dout })
     }
 
-    /// x [t, din] -> [t, dout]
+    /// x [t, din] -> [t, dout]: BF16 operands (x converted per call), f32 accumulate and output.
     fn fwd(&self, g: &Gpu, x: &Buf, t: usize) -> Result<Buf> {
         let mut y = g.alloc(t * self.dout)?;
+        if t == 0 {
+            return Ok(y);
+        }
         if let Some(b) = &self.b {
             let (ri, di) = (t as i32, self.dout as i32);
             launch!(g, fill_rows, cfg1(t * self.dout), &mut y, b, &ri, &di)?;
         }
-        let beta = if self.b.is_some() { 1.0 } else { 0.0 };
-        if let Some(dt) = g.prec.half().filter(|_| g.prec.linear_half() && t > 0) {
-            // PHASE 2 (fp16x/bf16x): half operands, f32 accumulate/output
-            use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
-            let f16 = dt == Dt::CUDA_R_16F;
-            let cvt = |src: &Buf| -> Result<CudaSlice<u16>> {
-                // SAFETY: fully written by the conversion kernel.
-                let mut h = unsafe { g.stream.alloc::<u16>(src.len()) }?;
-                let n = src.len() as i64;
-                if f16 {
-                    launch!(g, lp_cvt_f16, cfg1(src.len()), src, &mut h, &n)?;
-                } else {
-                    launch!(g, lp_cvt_bf16, cfg1(src.len()), src, &mut h, &n)?;
-                }
-                Ok(h)
-            };
-            if self.w_h.get().is_none() {
-                let h = cvt(&self.w)?;
-                let _ = self.w_h.set(h);
-            }
-            let wh = self.w_h.get().expect("set above");
-            let xh = cvt(x)?;
-            {
-                let (pw, _gw) = wh.device_ptr(&g.stream);
-                let (px, _gx) = xh.device_ptr(&g.stream);
-                let (py, _gy) = y.device_ptr_mut(&g.stream);
-                // SAFETY: same shapes as the f32 gemm below (A = W [dout][din], B = x [t][din], C = y).
-                unsafe {
-                    g.gemm_raw(true, false, self.dout, t, self.din, pw, dt, self.din, px, dt, self.din, &beta as *const f32 as *const std::ffi::c_void, py, Dt::CUDA_R_32F, self.dout, Ct::CUBLAS_COMPUTE_32F)?;
-                }
-            }
-            return Ok(y);
+        let beta = if self.b.is_some() { 1.0f32 } else { 0.0 };
+        let xh = g.bf16(x)?;
+        {
+            let (pw, _gw) = self.w.device_ptr(&g.stream);
+            let (px, _gx) = xh.device_ptr(&g.stream);
+            let (py, _gy) = y.device_ptr_mut(&g.stream);
+            // SAFETY: A = W [dout][din] (read transposed), B = x [t][din], C = y [t][dout]; extents
+            // din*dout, t*din and t*dout by construction.
+            unsafe { g.gemm_bf16(true, false, self.dout, t, self.din, pw, self.din, px, self.din, &beta, py, self.dout) }?;
         }
-        g.gemm(true, false, self.dout, t, self.din, &self.w, 0, self.din, x, 0, self.din, beta, &mut y, 0, self.dout)?;
         Ok(y)
     }
 }
 
-/// Shape policy: the fused kernel wins where per-tap GEMMs are memory-bound (small Cin); wider
-/// layers stay on cuBLAS (measured, PL-008). KOKORO_CONV_IGEMM_MAX_CIN overrides for A/B.
-static IGEMM_MAX_CIN: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_MAX_CIN").ok().and_then(|v| v.parse().ok()).unwrap_or(128));
-/// Input-channel chunk of conv1d_igemm; MUST equal IG_BK in kernels/kokoro.cu (build.rs passes it).
-const IG_BK: usize = crate::gpu::IG_BK_CU;
-static IGEMM_STRIDED_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM_STRIDED").map(|v| v != "0").unwrap_or(true));
-static SW_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_SW").map(|v| v != "0").unwrap_or(true));
-static WMMA_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA").map(|v| v != "0").unwrap_or(true));
-/// PHASE 2: let the half-precision fused WMMA conv take any Cin / Cout (the kernel zero-pads partial
-/// 16-channel input slices and bounds-checks partial 64-channel output tiles) instead of sending
-/// e.g. the decoder convs (Cin 514 / 1090) to the per-tap fallback. Opt-in KOKORO_LP_WMMA_ANY=1:
-/// measured NEUTRAL (fp16 Alice forward 1.106 -> 1.100 s, 3 interleaved rounds), so off by default.
-static WMMA_ANY: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA_ANY").map(|v| v == "1").unwrap_or(false));
-/// PHASE 2 lever P2-L2: second-generation fused WMMA conv for half types (kill switch KOKORO_LP_WMMA2=0).
-static WMMA2_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA2").map(|v| v != "0").unwrap_or(true));
-/// PHASE 2 (P2-L3 candidate): v2 WMMA conv with 128-co blocks (8 warps) instead of 64-co (4 warps).
-static WMMA2W_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_WMMA2W").map(|v| v != "0").unwrap_or(true));
-/// PHASE 2 (P2-L4 candidate): AdaIN + Snake applied inside the v2 WMMA conv's input staging.
-static WMMA_PRO_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_LP_PROLOGUE").map(|v| v != "0").unwrap_or(true));
-static IGEMM_ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("KOKORO_CONV_IGEMM").map(|v| v != "0").unwrap_or(true));
+/// Input-channel chunk of conv1d_strided; MUST equal IG_BK in kernels/kokoro.cu.
+const IG_BK: usize = 4;
+
+/// Convolution weights by execution route (fixed per layer at load from its shape).
+enum ConvW {
+    /// f32 strided implicit-GEMM conv (conv1d_strided): weights [Cin][K][Cout]
+    Strided(Buf),
+    /// f32 small direct conv, stride 1 (conv_direct_tiled): weights [Cout][Cin][K]
+    Direct(Buf),
+    /// BF16 per-tap tensor-core GEMMs (shapes the fused kernel does not take): weights [K][Cout][Cin]
+    Bf16PerTap(CudaSlice<u16>),
+    /// BF16 fused tensor-core conv (conv1d_wmma_bf16*): weights in its A-fragment layout
+    Bf16Fused(CudaSlice<u16>),
+}
 
 pub struct GConv {
-    wt: Buf, // [K][Cout][Cin] per-tap transposed (stride 1) or original [Cout][Cin][K] (direct)
-    /// [Cin][K][Cout] for the fused implicit-GEMM kernel (stride-1, non-direct convs)
-    w_ig: Option<Buf>,
+    w: ConvW,
     b: Option<Buf>,
     cin: usize,
     cout: usize,
@@ -442,28 +327,26 @@ pub struct GConv {
     stride: usize,
     pad: usize,
     dil: usize,
-    direct: bool,
-    /// PHASE 2: precision tier (0 always f32; 1 decoder/generator; 2 predictor/text encoder)
-    tier: u8,
-    /// PHASE 2: low-precision weights for this conv under the engine's precision (None = f32)
-    lp: Option<LpWeights>,
-    /// PHASE 2 lever P2-L2: half weights in the v2 WMMA A-fragment layout [cot][slice][k][64][16]
-    lp_a: Option<CudaSlice<u16>>,
-}
-
-/// PHASE 2: per-conv low-precision operands, layout [K][Cout][Cin] like `wt`.
-enum LpWeights {
-    /// FP16 or BF16 bit patterns (type = the engine precision's half type)
-    Half(CudaSlice<u16>),
-    /// INT8 values with per-output-channel scale (absmax over (k, ci) / 127)
-    Int8 { q: CudaSlice<i8>, scale: Buf },
 }
 
 impl GConv {
     fn new(g: &Gpu, c: &Conv1d) -> Result<Self> {
-        let direct = c.stride != 1 || c.cin * c.k <= 32;
-        let wt = if direct {
-            c.w.clone()
+        let w = if c.stride > 1 {
+            ensure!(c.dil == 1, "strided conv with dilation {} is not supported", c.dil);
+            let xw = (128 - 1) * c.stride + (c.k - 1) * c.dil + 1;
+            ensure!((IG_BK * xw + IG_BK * c.k * 64) * 4 <= 48 * 1024, "strided conv (stride {}, k {}) exceeds the kernel's shared memory", c.stride, c.k);
+            let mut v = vec![0.0f32; c.w.len()];
+            for co in 0..c.cout {
+                for ci in 0..c.cin {
+                    for kk in 0..c.k {
+                        v[(ci * c.k + kk) * c.cout + co] = c.w[(co * c.cin + ci) * c.k + kk];
+                    }
+                }
+            }
+            ConvW::Strided(g.up(&v)?)
+        } else if c.cin * c.k <= 32 {
+            ensure!(c.dil == 1 && c.cin * (63 + c.k) <= 12288, "small conv (cin {}, k {}, dil {}) does not fit the tiled kernel", c.cin, c.k, c.dil);
+            ConvW::Direct(g.up(&c.w)?)
         } else {
             let mut wt = vec![0.0f32; c.w.len()];
             for co in 0..c.cout {
@@ -473,368 +356,25 @@ impl GConv {
                     }
                 }
             }
-            wt
-        };
-        let w_ig = if (!direct && c.stride == 1) || (c.stride > 1 && c.dil == 1) {
-            let mut v = vec![0.0f32; c.w.len()];
-            for co in 0..c.cout {
-                for ci in 0..c.cin {
-                    for kk in 0..c.k {
-                        v[(ci * c.k + kk) * c.cout + co] = c.w[(co * c.cin + ci) * c.k + kk];
-                    }
-                }
-            }
-            Some(g.up(&v)?)
-        } else {
-            None
-        };
-        Ok(Self { wt: g.up(&wt)?, w_ig, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil, direct, tier: 0, lp: None, lp_a: None })
-    }
-
-    /// Whether the fused implicit-GEMM path applies to a same-length conv over length `t`.
-    /// PHASE 2: create this conv's low-precision operands if its tier is covered by the precision.
-    fn prepare_lowp(&mut self, g: &Gpu, tier: u8) -> Result<()> {
-        self.tier = tier;
-        if tier == 0 || tier > g.prec.conv_tier() || self.direct || self.stride != 1 {
-            return Ok(());
-        }
-        let n = self.wt.len();
-        if let Some(_dt) = g.prec.half() {
-            // SAFETY: fully written by the conversion kernel below.
-            let mut h = unsafe { g.stream.alloc::<u16>(n) }?;
-            let nn = n as i64;
-            if matches!(g.prec, Precision::Fp16 | Precision::Fp16X) {
-                launch!(g, lp_cvt_f16, cfg1(n), &self.wt, &mut h, &nn)?;
-            } else {
-                launch!(g, lp_cvt_bf16, cfg1(n), &self.wt, &mut h, &nn)?;
-            }
-            if *WMMA2_ON {
-                let (ns, ct) = (self.cin.div_ceil(16), self.cout.div_ceil(64));
-                let na = ct * ns * self.k * 1024;
-                // SAFETY: fully written by lp_layout_a (every index < na).
+            let taps = g.bf16(&g.up(&wt)?)?;
+            if c.cout % 64 == 0 && c.cin % 16 == 0 && 2 * c.pad == c.dil * (c.k - 1) {
+                let na = c.cout.div_ceil(64) * c.cin.div_ceil(16) * c.k * 1024;
+                // SAFETY: fully written by bf16_layout_a (every index < na).
                 let mut wa = unsafe { g.stream.alloc::<u16>(na) }?;
-                let (ci, co, kk, nn) = (self.cin as i32, self.cout as i32, self.k as i32, na as i64);
-                launch!(g, lp_layout_a, cfg1(na), &h, &mut wa, &ci, &co, &kk, &nn)?;
-                self.lp_a = Some(wa);
+                let (ci, co, kk, nn) = (c.cin as i32, c.cout as i32, c.k as i32, na as i64);
+                launch!(g, bf16_layout_a, cfg1(na), &taps, &mut wa, &ci, &co, &kk, &nn)?;
+                ConvW::Bf16Fused(wa)
+            } else {
+                ConvW::Bf16PerTap(taps)
             }
-            self.lp = Some(LpWeights::Half(h));
-        } else if g.prec == Precision::Int8 {
-            // INT8 only where the fused tensor-core kernel applies (same-length output, Cout % 64,
-            // Cin % 16); cuBLAS per-tap IMMA is unsupported for these shapes -> such convs stay f32.
-            if self.cout % 64 != 0 || self.cin % 16 != 0 || 2 * self.pad != self.dil * (self.k - 1) {
-                return Ok(());
-            }
-            let w = g.down(&self.wt)?; // [K][Cout][Cin]
-            let (k, co_n, ci_n) = (self.k, self.cout, self.cin);
-            let mut scale = vec![0.0f32; co_n];
-            for kk in 0..k {
-                for co in 0..co_n {
-                    for ci in 0..ci_n {
-                        scale[co] = scale[co].max(w[(kk * co_n + co) * ci_n + ci].abs());
-                    }
-                }
-            }
-            for s in &mut scale {
-                *s = if *s > 0.0 { *s / 127.0 } else { 1.0 };
-            }
-            let q: Vec<i8> = (0..w.len()).map(|i| {
-                let co = (i / ci_n) % co_n;
-                (w[i] / scale[co]).round().clamp(-127.0, 127.0) as i8
-            }).collect();
-            self.lp = Some(LpWeights::Int8 { q: g.stream.clone_htod(&q)?, scale: g.up(&scale)? });
-        }
-        Ok(())
-    }
-
-    /// PHASE 2: low-precision per-tap conv (tensor cores). Activations are converted once per call
-    /// into a transposed [T][Cin] operand, so every tap's A operand starts at a multiple of Cin.
-    fn fwd_lowp(&self, g: &Gpu, x: &Buf, t: usize, tout: usize) -> Result<Buf> {
-        use cudarc::cublas::sys::{cublasComputeType_t as Ct, cudaDataType as Dt};
-        let lp = self.lp.as_ref().expect("lowp weights");
-        let (cin, cout) = (self.cin, self.cout);
-        let mut y = g.alloc(cout * tout)?;
-        let null = 0u64;
-        if self.wmma_ok(t, tout) {
-            self.launch_wmma(g, x, t, &mut y, false)?;
-            return Ok(y);
-        }
-        let tcfg = LaunchConfig { grid_dim: (t.div_ceil(32) as u32, cin.div_ceil(32) as u32, 1), block_dim: (32, 8, 1), shared_mem_bytes: 0 };
-        let (ci, ti) = (cin as i32, t as i32);
-        let taps = |mut f: Box<dyn FnMut(usize, usize, usize, usize) -> Result<()> + '_>| -> Result<()> {
-            for kk in 0..self.k {
-                let shift = (kk * self.dil) as isize - self.pad as isize;
-                let o_lo = if shift >= 0 { 0 } else { (-shift) as usize };
-                let max_in = t as isize - 1 - shift;
-                if max_in < 0 {
-                    continue;
-                }
-                let o_hi = (max_in as usize).min(tout - 1);
-                if o_lo > o_hi {
-                    continue;
-                }
-                f(kk, o_lo, o_hi - o_lo + 1, (o_lo as isize + shift) as usize)?;
-            }
-            Ok(())
         };
-        match lp {
-            LpWeights::Half(wh) => {
-                let dt = g.prec.half().expect("half precision");
-                // SAFETY: fully written by the transpose kernel (all t < T, c < Cin).
-                let mut xt = unsafe { g.stream.alloc::<u16>(t * cin) }?;
-                if dt == Dt::CUDA_R_16F {
-                    launch!(g, lp_transpose_f16, tcfg, x, &mut xt, &ci, &ti)?;
-                } else {
-                    launch!(g, lp_transpose_bf16, tcfg, x, &mut xt, &ci, &ti)?;
-                }
-                let (co, to) = (cout as i32, tout as i32);
-                match &self.b {
-                    Some(b) => launch!(g, fill_channels, cfg1(cout * tout), &mut y, b, &co, &to)?,
-                    None => launch!(g, fill_channels, cfg1(cout * tout), &mut y, &null, &co, &to)?,
-                }
-                let (px, _gx) = xt.device_ptr(&g.stream);
-                let (pw, _gw) = wh.device_ptr(&g.stream);
-                let (py, _gy) = y.device_ptr_mut(&g.stream);
-                let beta = 1.0f32;
-                taps(Box::new(|kk, o_lo, n, a_row| {
-                    // SAFETY: A = xt rows [a_row, a_row+n) x Cin (in bounds: a_row + n <= t);
-                    // B = tap kk weights Cin x Cout; C = y columns [o_lo, o_lo+n) of Cout rows.
-                    unsafe {
-                        g.gemm_raw(true, false, n, cout, cin, px + 2 * (a_row * cin) as u64, dt, cin, pw + 2 * (kk * cout * cin) as u64, dt, cin,
-                            &beta as *const f32 as *const std::ffi::c_void, py + 4 * o_lo as u64, Dt::CUDA_R_32F, tout, Ct::CUBLAS_COMPUTE_32F)
-                    }
-                }))?;
-            }
-            LpWeights::Int8 { q, scale } => {
-                let mut am = g.alloc(1)?;
-                let nx = (cin * t) as i64;
-                let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
-                launch!(g, lp_absmax, one, x, &nx, &mut am)?;
-                // SAFETY: fully written by the quantize-transpose kernel.
-                let mut xq = unsafe { g.stream.alloc::<i8>(t * cin) }?;
-                launch!(g, lp_transpose_q8, tcfg, x, &mut xq, &ci, &ti, &am)?;
-                let ldc = tout.next_multiple_of(4);
-                let mut acc = g.stream.alloc_zeros::<i32>(cout * ldc)?;
-                {
-                    let (px, _gx) = xq.device_ptr(&g.stream);
-                    let (pw, _gw) = q.device_ptr(&g.stream);
-                    let (pc, _gc) = acc.device_ptr_mut(&g.stream);
-                    let beta = 1i32;
-                    taps(Box::new(|kk, o_lo, n, a_row| {
-                        // SAFETY: as for the half path; INT8 operands (offsets are multiples of
-                        // Cin, a multiple of 4), INT32 C with ldc a multiple of 4.
-                        unsafe {
-                            g.gemm_raw(true, false, n, cout, cin, px + (a_row * cin) as u64, Dt::CUDA_R_8I, cin, pw + (kk * cout * cin) as u64, Dt::CUDA_R_8I, cin,
-                                &beta as *const i32 as *const std::ffi::c_void, pc + 4 * o_lo as u64, Dt::CUDA_R_32I, ldc, Ct::CUBLAS_COMPUTE_32I)
-                        }
-                    }))?;
-                }
-                let (ldi, co, to) = (ldc as i32, cout as i32, tout as i32);
-                match &self.b {
-                    Some(b) => launch!(g, lp_dequant, cfg1(cout * tout), &acc, &ldi, scale, &am, b, &mut y, &co, &to)?,
-                    None => launch!(g, lp_dequant, cfg1(cout * tout), &acc, &ldi, scale, &am, &null, &mut y, &co, &to)?,
-                }
-            }
-        }
-        Ok(y)
+        Ok(Self { w, b: c.b.as_ref().map(|b| g.up(b)).transpose()?, cin: c.cin, cout: c.cout, k: c.k, stride: c.stride, pad: c.pad, dil: c.dil })
     }
 
-    /// PHASE 2: the fused tensor-core conv applies (low-precision weights, same-length output;
-    /// Cout % 64 and Cin % 16 unless KOKORO_LP_WMMA_ANY=1 for half types).
-    pub(crate) fn wmma_ok(&self, t: usize, tout: usize) -> bool {
-        let aligned = self.cout % 64 == 0 && self.cin % 16 == 0;
-        let any = *WMMA_ANY && matches!(self.lp, Some(LpWeights::Half(_)));
-        self.lp.is_some() && tout == t && (aligned || any) && *WMMA_ON
-    }
-
-    /// PHASE 2: launch the fused tensor-core conv into `y` (res = accumulate into y).
-    fn launch_wmma(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, res: bool) -> Result<()> {
-        let lp = self.lp.as_ref().expect("lowp weights");
-        let (cin, cout) = (self.cin, self.cout);
-        let null = 0u64;
-        let tn = WMMA_TN_CU;
-        let tw = tn + (self.k - 1) * self.dil;
-        let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-        let grid = (t.div_ceil(tn) as u32, cout.div_ceil(64) as u32, 1);
-        let k = &g.k;
-        match lp {
-            LpWeights::Half(_) if self.lp_a.is_some() => {
-                let wa = self.lp_a.as_ref().expect("checked");
-                let tw2 = 128 + (self.k - 1) * self.dil;
-                let wide = *WMMA2W_ON;
-                let (cw, co_blk) = if wide { (4usize, 128usize) } else { (2, 64) };
-                let smem = (tw2 * 48 * 2).next_multiple_of(128) + 2 * cw * 256 * 4;
-                let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, cout.div_ceil(co_blk) as u32, 1), block_dim: (64 * cw as u32, 1, 1), shared_mem_bytes: smem as u32 };
-                let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
-                let f = match (wide, f16, res) {
-                    (false, true, false) => &k.conv1d_wmma2_f16,
-                    (false, true, true) => &k.conv1d_wmma2_f16_res,
-                    (false, false, false) => &k.conv1d_wmma2_bf16,
-                    (false, false, true) => &k.conv1d_wmma2_bf16_res,
-                    (true, true, false) => &k.conv1d_wmma2w_f16,
-                    (true, true, true) => &k.conv1d_wmma2w_f16_res,
-                    (true, false, false) => &k.conv1d_wmma2w_bf16,
-                    (true, false, true) => &k.conv1d_wmma2w_bf16_res,
-                };
-                let mut lb = g.stream.launch_builder(f);
-                lb.arg(x).arg(wa);
-                match &self.b {
-                    Some(b) => lb.arg(b),
-                    None => lb.arg(&null),
-                };
-                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
-                // SAFETY: matches conv1d_wmma2_{f16,bf16}[_res](x, wa, b|null, y, Cin, T, Cout, K, dil, pad);
-                // wa holds ceil(Cout/64) * ceil(Cin/16) * K * 1024 halves (the kernel's full index range; in
-                // 128-co blocks, warps of a missing upper 64-co tile skip all loads);
-                // x Cin*T, y Cout*T (callers check sizes); smem = window [TW][48] halves + 4 KB epilogue.
-                unsafe { lb.launch(cfg) }.context("conv1d_wmma2")?;
-            }
-            LpWeights::Half(wh) => {
-                let smem = ((tw * 16 + self.k * 64 * 16) * 2).max(64 * tn * 4);
-                let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
-                let f = match (f16, res) {
-                    (true, false) => &k.conv1d_wmma_f16,
-                    (true, true) => &k.conv1d_wmma_f16_res,
-                    (false, false) => &k.conv1d_wmma_bf16,
-                    (false, true) => &k.conv1d_wmma_bf16_res,
-                };
-                let mut lb = g.stream.launch_builder(f);
-                lb.arg(x).arg(wh);
-                match &self.b {
-                    Some(b) => lb.arg(b),
-                    None => lb.arg(&null),
-                };
-                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
-                // SAFETY: matches conv1d_wmma_{f16,bf16}[_res](x, w, b|null, y, Cin, T, Cout, K, dil, pad);
-                // x Cin*T, w K*Cout*Cin, y Cout*T (callers check sizes); smem as computed.
-                unsafe { lb.launch(cfg) }.context("conv1d_wmma")?;
-            }
-            LpWeights::Int8 { q, scale } => {
-                let mut am = g.stream.alloc_zeros::<f32>(1)?;
-                let nx = (cin * t) as i64;
-                let mb = LaunchConfig { grid_dim: (1024, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                launch!(g, lp_absmax_mb, mb, x, &nx, &mut am)?;
-                let smem = (tw * 32 + self.k * 64 * 16).max(64 * tn * 4);
-                let cfg = LaunchConfig { grid_dim: grid, block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                let f = if res { &k.conv1d_wmma_s8_res } else { &k.conv1d_wmma_s8 };
-                let mut lb = g.stream.launch_builder(f);
-                lb.arg(x).arg(q);
-                match &self.b {
-                    Some(b) => lb.arg(b),
-                    None => lb.arg(&null),
-                };
-                lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]).arg(&am).arg(scale);
-                // SAFETY: matches conv1d_wmma_s8[_res](..., absmax, wscale); absmax 1 float, wscale Cout.
-                unsafe { lb.launch(cfg) }.context("conv1d_wmma_s8")?;
-            }
-        }
-        Ok(())
-    }
-
-    /// PHASE 2: res += conv(x) through the fused tensor-core kernel (x already gap-masked).
-    pub(crate) fn fwd_wmma_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
-        ensure!(self.wmma_ok(t, t) && x.len() == self.cin * t && res.len() == self.cout * t, "wmma residual conv not applicable");
-        self.launch_wmma(g, x, t, res, true)
-    }
-
-    /// PHASE 2 (P2-L4): the fused AdaIN+Snake prologue conv applies.
-    pub(crate) fn wmma_pro_ok(&self, t: usize) -> bool {
-        *WMMA_PRO_ON && *WMMA2W_ON && self.lp_a.is_some() && self.wmma_ok(t, t)
-    }
-
-    /// PHASE 2 (P2-L4): y (= or +=) conv(snake(adain(x))) with the AdaIN + Snake applied while
-    /// staging the conv input (exactly adain_apply_seg's arithmetic; gap columns -> 0).
-    /// `x` is the raw AdaIN input [Cin][t]; mean/rstd [B][Cin], gb [B][2 Cin], nw/nb/alpha [Cin].
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn fwd_wmma_pro(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, res: bool, col_item: &CudaSlice<i32>, mean: &Buf, rstd: &Buf, nw: &Buf, nb: &Buf, gb: &Buf, alpha: &Buf) -> Result<()> {
-        ensure!(self.wmma_pro_ok(t) && x.len() == self.cin * t && y.len() == self.cout * t && col_item.len() >= t, "wmma prologue conv not applicable");
-        ensure!(nw.len() == self.cin && nb.len() == self.cin && alpha.len() == self.cin && mean.len() == rstd.len() && gb.len() == 2 * mean.len(), "prologue parameter shapes");
-        let wa = self.lp_a.as_ref().expect("checked");
-        let (cin, cout) = (self.cin, self.cout);
-        let null = 0u64;
-        let tw2 = 128 + (self.k - 1) * self.dil;
-        let smem = (tw2 * 48 * 2).next_multiple_of(128) + 8 * 256 * 4;
-        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, cout.div_ceil(128) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: smem as u32 };
-        let f16 = matches!(g.prec, Precision::Fp16 | Precision::Fp16X);
-        let k = &g.k;
-        let f = match (f16, res) {
-            (true, false) => &k.conv1d_wmma2w_f16_pro,
-            (true, true) => &k.conv1d_wmma2w_f16_pro_res,
-            (false, false) => &k.conv1d_wmma2w_bf16_pro,
-            (false, true) => &k.conv1d_wmma2w_bf16_pro_res,
-        };
-        let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-        let mut lb = g.stream.launch_builder(f);
-        lb.arg(x).arg(wa);
-        match &self.b {
-            Some(b) => lb.arg(b),
-            None => lb.arg(&null),
-        };
-        lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
-        lb.arg(col_item).arg(mean).arg(rstd).arg(nw).arg(nb).arg(gb).arg(alpha);
-        // SAFETY: matches conv1d_wmma2w_{f16,bf16}_pro[_res](x, wa, b|null, y, Cin, T, Cout, K, dil, pad,
-        // col_item, mean, rstd, nw, nb, gb, alpha); sizes checked above (col_item[t] in [-1, B)).
-        unsafe { lb.launch(cfg) }.context("conv1d_wmma2w_pro")?;
-        Ok(())
-    }
-
-    pub(crate) fn igemm_applicable(&self, g: &Gpu) -> bool {
-        self.lp.is_none() && g.prec.f32_fused_ok() && self.w_ig.is_some() && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4 <= 48 * 1024
-    }
-
-    /// LEVER PL-016: the sliding-window kernel instance for (k, dil), if one exists.
-    fn sw_kernel<'a>(&self, g: &'a Gpu, res: bool) -> Option<&'a CudaFunction> {
-        if !*SW_ON {
-            return None;
-        }
-        let k = &g.k;
-        Some(match (res, self.k, self.dil) {
-            (false, 3, 1) => &k.conv1d_sw_k3d1, (false, 3, 3) => &k.conv1d_sw_k3d3, (false, 3, 5) => &k.conv1d_sw_k3d5,
-            (false, 7, 1) => &k.conv1d_sw_k7d1, (false, 7, 3) => &k.conv1d_sw_k7d3, (false, 7, 5) => &k.conv1d_sw_k7d5,
-            (false, 11, 1) => &k.conv1d_sw_k11d1, (false, 11, 3) => &k.conv1d_sw_k11d3, (false, 11, 5) => &k.conv1d_sw_k11d5,
-            (true, 3, 1) => &k.conv1d_sw_res_k3d1, (true, 3, 3) => &k.conv1d_sw_res_k3d3, (true, 3, 5) => &k.conv1d_sw_res_k3d5,
-            (true, 7, 1) => &k.conv1d_sw_res_k7d1, (true, 7, 3) => &k.conv1d_sw_res_k7d3, (true, 7, 5) => &k.conv1d_sw_res_k7d5,
-            (true, 11, 1) => &k.conv1d_sw_res_k11d1, (true, 11, 3) => &k.conv1d_sw_res_k11d3, (true, 11, 5) => &k.conv1d_sw_res_k11d5,
-            _ => return None,
-        })
-    }
-
-    fn launch_sw(&self, g: &Gpu, f: &CudaFunction, x: &Buf, t: usize, y: &mut Buf) -> Result<()> {
-        let w_ig = self.w_ig.as_ref().unwrap();
-        let xw = (128 + (self.k - 1) * self.dil + 3) & !3;
-        let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
-        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-        let a = [self.cin as i32, t as i32, self.cout as i32, self.pad as i32];
-        let null = 0u64;
-        let mut lb = g.stream.launch_builder(f);
-        lb.arg(x).arg(w_ig);
-        match &self.b {
-            Some(b) => lb.arg(b),
-            None => lb.arg(&null),
-        };
-        lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]);
-        // SAFETY: argument list matches conv1d_sw_*: (x, w_ig [Cin][K][Cout], bias|null, y [Cout][T],
-        // Cin, T, Cout, pad); buffers sized cin*t / cout*t (checked by callers); smem as computed.
-        unsafe { lb.launch(cfg) }.context("conv1d_sw")?;
-        Ok(())
-    }
-
-    /// res += conv(x) in place via the fused kernel's residual epilogue (x must already be masked).
-    pub(crate) fn fwd_igemm_res(&self, g: &Gpu, x: &Buf, t: usize, res: &mut Buf) -> Result<()> {
-        ensure!(self.igemm_applicable(g) && self.stride == 1 && x.len() == self.cin * t && res.len() == self.cout * t, "fused conv not applicable");
-        if let Some(f) = self.sw_kernel(g, true) {
-            return self.launch_sw(g, f, x, t, res);
-        }
-        let w_ig = self.w_ig.as_ref().unwrap();
-        let smem = (IG_BK * (128 + (self.k - 1) * self.dil) + IG_BK * self.k * 64) * 4;
-        let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-        let null = 0u64;
-        match &self.b {
-            Some(b) => launch!(g, conv1d_igemm_res, cfg, x, w_ig, b, res, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-            None => launch!(g, conv1d_igemm_res, cfg, x, w_ig, &null, res, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-        }
-        Ok(())
+    /// Whether this layer runs on the fused tensor-core kernel (and so takes the AdaIN + Snake
+    /// prologue in the Snake blocks).
+    pub(crate) fn fused(&self) -> bool {
+        matches!(self.w, ConvW::Bf16Fused(_))
     }
 
     fn fwd(&self, g: &Gpu, x: &Buf, t: usize) -> Result<(Buf, usize)> {
@@ -842,75 +382,58 @@ impl GConv {
         let tout = crate::ops::conv1d_out_len(t, self.k, self.stride, self.pad, self.dil);
         let mut y = g.alloc(self.cout * tout)?;
         let null = 0u64;
-        let win = (64 - 1) * self.stride + self.k;
-        let tiled_ok = self.dil == 1 && self.cin * win <= 12288;
-        if self.stride > 1 && *IGEMM_STRIDED_ON {
-            if let Some(w_ig) = &self.w_ig {
-                // LEVER PL-012 (kill switch KOKORO_CONV_IGEMM_STRIDED=0): strided implicit-GEMM conv
+        match &self.w {
+            ConvW::Strided(w) => {
                 let xw = (128 - 1) * self.stride + (self.k - 1) * self.dil + 1;
                 let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
-                if smem <= 48 * 1024 {
-                    let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32, self.stride as i32, tout as i32];
-                    let cfg = LaunchConfig { grid_dim: (tout.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                    match &self.b {
-                        Some(b) => launch!(g, conv1d_igemm_s, cfg, x, w_ig, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
-                        None => launch!(g, conv1d_igemm_s, cfg, x, w_ig, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
-                    }
-                    return Ok((y, tout));
+                let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32, self.stride as i32, tout as i32];
+                let cfg = LaunchConfig { grid_dim: (tout.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
+                match &self.b {
+                    Some(b) => launch!(g, conv1d_strided, cfg, x, w, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
+                    None => launch!(g, conv1d_strided, cfg, x, w, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7])?,
                 }
             }
-        }
-        if self.direct && tiled_ok && std::env::var("KOKORO_CONV_TILED").map(|v| v != "0").unwrap_or(true) {
-            // LEVER PL-004 (kill switch KOKORO_CONV_TILED=0): same arithmetic order, shared-memory tile
-            let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];
-            let cfg = LaunchConfig {
-                grid_dim: (tout.div_ceil(64) as u32, self.cout.div_ceil(16) as u32, 1),
-                block_dim: (64, 1, 1),
-                shared_mem_bytes: (self.cin * win * 4) as u32,
-            };
-            let null = 0u64;
-            match &self.b {
-                Some(b) => launch!(g, conv_direct_tiled, cfg, x, &self.wt, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
-                None => launch!(g, conv_direct_tiled, cfg, x, &self.wt, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
-            }
-            return Ok((y, tout));
-        }
-        if self.direct {
-            let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];
-            match &self.b {
-                Some(b) => launch!(g, conv_direct, cfg1(self.cout * tout), x, &self.wt, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
-                None => launch!(g, conv_direct, cfg1(self.cout * tout), x, &self.wt, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
-            }
-            return Ok((y, tout));
-        }
-        if self.lp.is_some() {
-            return Ok((self.fwd_lowp(g, x, t, tout)?, tout));
-        }
-        if let Some(w_ig) = &self.w_ig {
-            if tout == t && *IGEMM_ON && self.cin <= *IGEMM_MAX_CIN && g.prec.f32_fused_ok() {
-                if let Some(f) = self.sw_kernel(g, false) {
-                    self.launch_sw(g, f, x, t, &mut y)?;
-                    return Ok((y, tout));
-                }
-                // LEVER PL-008 (kill switch KOKORO_CONV_IGEMM=0): fused implicit-GEMM conv
-                let xw = 128 + (self.k - 1) * self.dil;
-                let smem = (IG_BK * xw + IG_BK * self.k * 64) * 4;
-                if smem <= 48 * 1024 {
-                    let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
-                    let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, self.cout.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: smem as u32 };
-                    match &self.b {
-                        Some(b) => launch!(g, conv1d_igemm, cfg, x, w_ig, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                        None => launch!(g, conv1d_igemm, cfg, x, w_ig, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5])?,
-                    }
-                    return Ok((y, tout));
+            ConvW::Direct(w) => {
+                let win = (64 - 1) * self.stride + self.k;
+                let a = [self.cin as i32, t as i32, self.cout as i32, self.k as i32, self.stride as i32, self.pad as i32, tout as i32];
+                let cfg = LaunchConfig {
+                    grid_dim: (tout.div_ceil(64) as u32, self.cout.div_ceil(16) as u32, 1),
+                    block_dim: (64, 1, 1),
+                    shared_mem_bytes: (self.cin * win * 4) as u32,
+                };
+                match &self.b {
+                    Some(b) => launch!(g, conv_direct_tiled, cfg, x, w, b, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
+                    None => launch!(g, conv_direct_tiled, cfg, x, w, &null, &mut y, &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])?,
                 }
             }
+            ConvW::Bf16Fused(_) => {
+                ensure!(tout == t, "fused conv must preserve length");
+                self.launch_fused(g, x, t, &mut y, None, false)?;
+            }
+            ConvW::Bf16PerTap(wh) => self.fwd_per_tap(g, wh, x, t, tout, &mut y)?,
         }
-        let (ci, ti) = (self.cout as i32, tout as i32);
+        Ok((y, tout))
+    }
+
+    /// BF16 per-tap conv on tensor cores. Activations are converted once per call into a transposed
+    /// [T][Cin] BF16 operand, so every tap's A operand starts at a multiple of Cin; f32 accumulate.
+    fn fwd_per_tap(&self, g: &Gpu, wh: &CudaSlice<u16>, x: &Buf, t: usize, tout: usize, y: &mut Buf) -> Result<()> {
+        let (cin, cout) = (self.cin, self.cout);
+        let null = 0u64;
+        let tcfg = LaunchConfig { grid_dim: (t.div_ceil(32) as u32, cin.div_ceil(32) as u32, 1), block_dim: (32, 8, 1), shared_mem_bytes: 0 };
+        let (ci, ti) = (cin as i32, t as i32);
+        // SAFETY: fully written by the transpose kernel (all t < T, c < Cin).
+        let mut xt = unsafe { g.stream.alloc::<u16>(t * cin) }?;
+        launch!(g, bf16_transpose, tcfg, x, &mut xt, &ci, &ti)?;
+        let (co, to) = (cout as i32, tout as i32);
         match &self.b {
-            Some(b) => launch!(g, fill_channels, cfg1(self.cout * tout), &mut y, b, &ci, &ti)?,
-            None => launch!(g, fill_channels, cfg1(self.cout * tout), &mut y, &null, &ci, &ti)?,
+            Some(b) => launch!(g, fill_channels, cfg1(cout * tout), &mut *y, b, &co, &to)?,
+            None => launch!(g, fill_channels, cfg1(cout * tout), &mut *y, &null, &co, &to)?,
         }
+        let (px, _gx) = xt.device_ptr(&g.stream);
+        let (pw, _gw) = wh.device_ptr(&g.stream);
+        let (py, _gy) = y.device_ptr_mut(&g.stream);
+        let beta = 1.0f32;
         for kk in 0..self.k {
             let shift = (kk * self.dil) as isize - self.pad as isize;
             let o_lo = if shift >= 0 { 0 } else { (-shift) as usize };
@@ -922,13 +445,70 @@ impl GConv {
             if o_lo > o_hi {
                 continue;
             }
-            let n = o_hi - o_lo + 1;
-            let b_off = (o_lo as isize + shift) as usize;
-            // Y^T[o, co] += X^T[o+shift, ci] * Wt_k^T[ci, co]
-            g.gemm(false, false, n, self.cout, self.cin, x, b_off, t, &self.wt, kk * self.cout * self.cin, self.cin, 1.0, &mut y, o_lo, tout)?;
+            let (n, a_row) = (o_hi - o_lo + 1, (o_lo as isize + shift) as usize);
+            // SAFETY: A = xt rows [a_row, a_row+n) x Cin (in bounds: a_row + n <= t);
+            // B = tap kk weights Cin x Cout; C = y columns [o_lo, o_lo+n) of Cout rows.
+            unsafe { g.gemm_bf16(true, false, n, cout, cin, px + 2 * (a_row * cin) as u64, cin, pw + 2 * (kk * cout * cin) as u64, cin, &beta, py + 4 * o_lo as u64, tout) }?;
         }
-        Ok((y, tout))
+        Ok(())
     }
+
+    /// Launch the fused tensor-core conv into `y` (same length `t`). With `pro`, the input is the raw
+    /// AdaIN input and the kernel applies AdaIN + Snake while staging it; `res` accumulates into `y`
+    /// (only with `pro`).
+    fn launch_fused(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, pro: Option<SnakePro>, res: bool) -> Result<()> {
+        let ConvW::Bf16Fused(wa) = &self.w else { bail!("not a fused conv") };
+        let (cin, cout) = (self.cin, self.cout);
+        let null = 0u64;
+        let tw = 128 + (self.k - 1) * self.dil;
+        let smem = (tw * 48 * 2).next_multiple_of(128) + 8 * 256 * 4;
+        let cfg = LaunchConfig { grid_dim: (t.div_ceil(128) as u32, cout.div_ceil(128) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: smem as u32 };
+        let k = &g.k;
+        let f = match (&pro, res) {
+            (None, false) => &k.conv1d_wmma_bf16,
+            (Some(_), false) => &k.conv1d_wmma_bf16_snake,
+            (Some(_), true) => &k.conv1d_wmma_bf16_snake_res,
+            (None, true) => bail!("residual fused conv needs the Snake prologue"),
+        };
+        let a = [cin as i32, t as i32, cout as i32, self.k as i32, self.dil as i32, self.pad as i32];
+        let mut lb = g.stream.launch_builder(f);
+        lb.arg(x).arg(wa);
+        match &self.b {
+            Some(b) => lb.arg(b),
+            None => lb.arg(&null),
+        };
+        lb.arg(y).arg(&a[0]).arg(&a[1]).arg(&a[2]).arg(&a[3]).arg(&a[4]).arg(&a[5]);
+        if let Some(p) = &pro {
+            lb.arg(p.col_item).arg(p.mean).arg(p.rstd).arg(p.nw).arg(p.nb).arg(p.gb).arg(p.alpha);
+        }
+        // SAFETY: matches conv1d_wmma_bf16(x, wa, b|null, y, Cin, T, Cout, K, dil, pad[, col_item, mean,
+        // rstd, nw, nb, gb, alpha]); wa holds ceil(Cout/64) * ceil(Cin/16) * K * 1024 BF16 values (the
+        // kernel's full index range; warps of a missing upper 64-co tile skip all loads); x Cin*T,
+        // y Cout*T (callers check sizes); prologue shapes checked in fwd_snake; smem = window
+        // [TW][48] BF16 + 8 KB epilogue tiles.
+        unsafe { lb.launch(cfg) }.context("conv1d_wmma_bf16")?;
+        Ok(())
+    }
+
+    /// y (= or += with `res`) conv(snake(adain(x))) with the AdaIN + Snake applied while staging
+    /// the conv input (exactly adain_apply_seg's arithmetic; gap columns -> 0). `x` is the raw
+    /// AdaIN input [Cin][t]; mean/rstd [B][Cin], gb [B][2 Cin], nw/nb/alpha [Cin].
+    pub(crate) fn fwd_snake(&self, g: &Gpu, x: &Buf, t: usize, y: &mut Buf, res: bool, p: SnakePro) -> Result<()> {
+        ensure!(self.fused() && x.len() == self.cin * t && y.len() == self.cout * t && p.col_item.len() >= t, "fused Snake conv not applicable");
+        ensure!(p.nw.len() == self.cin && p.nb.len() == self.cin && p.alpha.len() == self.cin && p.mean.len() == p.rstd.len() && p.gb.len() == 2 * p.mean.len(), "prologue parameter shapes");
+        self.launch_fused(g, x, t, y, Some(p), res)
+    }
+}
+
+/// AdaIN + Snake prologue operands of the fused conv.
+pub(crate) struct SnakePro<'a> {
+    pub col_item: &'a CudaSlice<i32>,
+    pub mean: &'a Buf,
+    pub rstd: &'a Buf,
+    pub nw: &'a Buf,
+    pub nb: &'a Buf,
+    pub gb: &'a Buf,
+    pub alpha: &'a Buf,
 }
 
 pub struct GConvT {
@@ -1108,8 +688,8 @@ impl GLstm {
         let _p = crate::prof::scope("gpu/lstm");
         let gf = self.wih[0].fwd(g, x, t)?;
         let gbk = self.wih[1].fwd(g, x, t)?;
-        if std::env::var("KOKORO_LSTM_PERSISTENT").map(|v| v != "0").unwrap_or(true) {
-            // LEVER PL-002 (kill switch KOKORO_LSTM_PERSISTENT=0): whole sequence, one launch.
+        {
+            // whole sequence, one cooperative launch
             let mut hbuf = g.stream.alloc_zeros::<f32>(4 * self.h)?;
             let mut c = g.stream.alloc_zeros::<f32>(2 * self.h)?;
             let mut out = g.alloc(t * 2 * self.h)?;
@@ -1122,24 +702,8 @@ impl GLstm {
             // launch fails loudly otherwise); buffers sized 4H / 2H / T*2H as indexed.
             unsafe { b.launch_cooperative(cfg) }.context("lstm_seq cooperative launch")?;
             g.prof_sync();
-            return Ok(out);
+            Ok(out)
         }
-        let mut ha = g.stream.alloc_zeros::<f32>(2 * self.h)?;
-        let mut hb = g.stream.alloc_zeros::<f32>(2 * self.h)?;
-        let mut c = g.stream.alloc_zeros::<f32>(2 * self.h)?;
-        let mut out = g.alloc(t * 2 * self.h)?;
-        let cfg = LaunchConfig { grid_dim: (self.h as u32, 2, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-        let (ti, hi) = (t as i32, self.h as i32);
-        for step in 0..t {
-            let si = step as i32;
-            if step % 2 == 0 {
-                launch!(g, lstm_step, cfg, &gf, &gbk, &self.whh[0], &self.whh[1], &self.bhh[0], &self.bhh[1], &ha, &mut hb, &mut c, &mut out, &ti, &hi, &si)?;
-            } else {
-                launch!(g, lstm_step, cfg, &gf, &gbk, &self.whh[0], &self.whh[1], &self.bhh[0], &self.bhh[1], &hb, &mut ha, &mut c, &mut out, &ti, &hi, &si)?;
-            }
-        }
-        g.prof_sync();
-        Ok(out)
     }
 }
 
@@ -1284,49 +848,11 @@ impl GpuKokoro {
             conv_post: GConv::new(&g, &gen.conv_post)?,
             gpu: g,
         };
+        for b in s.noise_res.iter().chain(&s.resblocks) {
+            ensure!(b.convs1.iter().chain(&b.convs2).all(|c| c.fused()), "Snake-block convs must run on the fused BF16 kernel");
+        }
         s.gpu.stream.synchronize()?;
-        let mut s = s;
-        s.prepare_lowp()?;
         Ok(s)
-    }
-
-    /// PHASE 2: assign precision tiers and create low-precision conv operands.
-    /// Tier 1 = decoder + generator convs; tier 2 = duration/F0/N predictor + text-encoder convs.
-    fn prepare_lowp(&mut self) -> Result<()> {
-        let Self { gpu, f0, n, f0_proj, n_proj, te_cnn, encode, decode, asr_res, noise_res, resblocks, conv_post, .. } = self;
-        let g = &*gpu;
-        let rb = |b: &mut GResBlk, tier: u8| -> Result<()> {
-            b.conv1.prepare_lowp(g, tier)?;
-            b.conv2.prepare_lowp(g, tier)?;
-            if let Some(c) = b.conv1x1.as_mut() {
-                c.prepare_lowp(g, tier)?;
-            }
-            Ok(())
-        };
-        let sb = |b: &mut GSnakeBlk, tier: u8| -> Result<()> {
-            for c in b.convs1.iter_mut().chain(b.convs2.iter_mut()) {
-                c.prepare_lowp(g, tier)?;
-            }
-            Ok(())
-        };
-        for b in f0.iter_mut().chain(n.iter_mut()) {
-            rb(b, 2)?;
-        }
-        f0_proj.prepare_lowp(g, 2)?;
-        n_proj.prepare_lowp(g, 2)?;
-        for (c, _, _) in te_cnn.iter_mut() {
-            c.prepare_lowp(g, 2)?;
-        }
-        rb(encode, 1)?;
-        for b in decode.iter_mut() {
-            rb(b, 1)?;
-        }
-        asr_res.prepare_lowp(g, 1)?;
-        for b in noise_res.iter_mut().chain(resblocks.iter_mut()) {
-            sb(b, 1)?;
-        }
-        conv_post.prepare_lowp(g, 1)?;
-        Ok(())
     }
 
     fn cat_style(&self, x: &Buf, t: usize, d: usize, s: &Buf) -> Result<Buf> {
@@ -1416,9 +942,8 @@ impl GpuKokoro {
     fn har(&self, f0c: &Buf, len2n: usize, noise: &mut dyn NoiseSource) -> Result<(Buf, usize)> {
         let g = &self.gpu;
         let s_len = len2n * UPSAMPLE_SCALE;
-        let host_noise = std::env::var("KOKORO_GPU_HOST_NOISE").map(|v| v == "1").unwrap_or(false);
         let (ri, nz) = match noise.counter_seed() {
-            Some(seed) if !host_noise => {
+            Some(seed) => {
                 let mut nz = g.alloc(s_len * HARMONICS)?;
                 let n = (s_len * HARMONICS) as i64;
                 launch!(g, gen_noise, cfg1(s_len * HARMONICS / 2 + 1), &seed, &mut nz, &n)?;

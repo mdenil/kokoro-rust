@@ -212,39 +212,6 @@ extern "C" __global__ void expand_cols(const float* x, const int* aln, float* ou
     out[i] = x[(long)c * T + aln[f]];
 }
 
-// One LSTM time step for both directions (grid.x = H units, grid.y = 2 directions, 128 thr).
-// gx: [T, 4H] per direction (x W_ih^T + b_ih); whh [4H, H]; bhh [4H].
-// Gate order i, f, g, o. Mirrors nn::BiLstm::direction: g = gx + (dot + bhh).
-extern "C" __global__ void lstm_step(const float* gx_f, const float* gx_b, const float* whh_f, const float* whh_b,
-                                     const float* bhh_f, const float* bhh_b, const float* h_cur, float* h_nxt,
-                                     float* c_state, float* out, int T, int H, int step) {
-    int j = blockIdx.x, dir = blockIdx.y;
-    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    int t = dir == 0 ? step : T - 1 - step;
-    const float* gx = dir == 0 ? gx_f : gx_b;
-    const float* whh = dir == 0 ? whh_f : whh_b;
-    const float* bhh = dir == 0 ? bhh_f : bhh_b;
-    const float* h = h_cur + dir * H;
-    __shared__ float gates[4];
-    int r = warp * H + j;
-    const float* w = whh + (long)r * H;
-    float acc = 0.0f;
-    for (int k = lane; k < H; k += 32) acc = acc + w[k] * h[k];
-    for (int off = 16; off > 0; off >>= 1) acc = acc + __shfl_down_sync(0xffffffff, acc, off);
-    if (lane == 0) gates[warp] = gx[(long)t * 4 * H + r] + (acc + bhh[r]);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float ig = 1.0f / (1.0f + expf(-gates[0]));
-        float fg = 1.0f / (1.0f + expf(-gates[1]));
-        float gg = tanhf(gates[2]);
-        float og = 1.0f / (1.0f + expf(-gates[3]));
-        float c = fg * c_state[dir * H + j] + ig * gg;
-        c_state[dir * H + j] = c;
-        float hn = og * tanhf(c);
-        h_nxt[dir * H + j] = hn;
-        out[(long)t * 2 * H + dir * H + j] = hn;
-    }
-}
 
 // Nearest x2 along time: y [C, 2T]
 extern "C" __global__ void upsample_nearest2(const float* x, float* y, int C, int T) {
@@ -272,23 +239,6 @@ extern "C" __global__ void dw_convT_k3s2(const float* x, const float* w, const f
     y[idx] = acc;
 }
 
-// Direct Conv1d for small Cin*K (strided convs): y[co, o] = b + sum_{k, ci} w * x.
-// Summation order mirrors ops::conv1d at element level only approximately (GEMM order differs).
-extern "C" __global__ void conv_direct(const float* x, const float* w, const float* b, float* y,
-                                       int Cin, int T, int Cout, int K, int stride, int pad, int Tout) {
-    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (idx >= (long)Cout * Tout) return;
-    int co = (int)(idx / Tout), o = (int)(idx % Tout);
-    float acc = b ? b[co] : 0.0f;
-    for (int k = 0; k < K; k++) {
-        int t = o * stride + k - pad;
-        if (t < 0 || t >= T) continue;
-        float s = 0.0f;
-        for (int ci = 0; ci < Cin; ci++) s = s + w[((long)co * Cin + ci) * K + k] * x[(long)ci * T + t];
-        acc = acc + s;
-    }
-    y[idx] = acc;
-}
 
 // ConvTranspose1d gather from Z [(co*K + k), Tin] (Z = per-tap products from one GEMM):
 // y[co, o] = b[co] + sum_{k asc, (o+pad-k) % s == 0} Z[co*K+k, (o+pad-k)/s]
@@ -521,41 +471,6 @@ extern "C" __global__ void mask_gaps(float* x, const int* col_item, int C, int L
     if (col_item[i % L] < 0) x[i] = 0.0f;
 }
 
-// per (item, channel) mean / rstd over the item's span (f64 accumulation, as chan_stats).
-// grid (C, B), 256 threads. Output [B, C].
-extern "C" __global__ void chan_stats_seg(const float* x, int L, const int* seg_start, const int* seg_len,
-                                          float eps, float* mean_out, float* rstd_out, int C) {
-    __shared__ double sh[256];
-    int c = blockIdx.x, b = blockIdx.y;
-    const float* row = x + (long)c * L + seg_start[b];
-    int T = seg_len[b];
-    double s = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) s += (double)row[t];
-    sh[threadIdx.x] = s;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    float mean = (float)(sh[0] / (double)T);
-    __syncthreads();
-    double v = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double d = (double)(row[t] - mean);
-        v += d * d;
-    }
-    sh[threadIdx.x] = v;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] += sh[threadIdx.x + k];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        float var = (float)(sh[0] / (double)T);
-        mean_out[b * C + c] = mean;
-        rstd_out[b * C + c] = 1.0f / sqrtf(var + eps);
-    }
-}
 
 // AdaIN apply with per-item statistics and per-item gamma/beta (gb [B, 2C]); gap columns -> 0.
 extern "C" __global__ void adain_apply_seg(const float* x, float* y, const int* col_item, const float* mean,
@@ -796,27 +711,19 @@ extern "C" __global__ void conv_direct_tiled(const float* x, const float* w, con
     for (int c = 0; c < ncout; c++) y[(long)(co0 + c) * Tout + o] = acc[c];
 }
 
-// ---- LEVER PL-008: fused implicit-GEMM dilated conv1d (stride 1), all taps accumulated in
-// registers (output written once). Y[co,t] = b[co] + sum_k sum_ci W[ci][k][co] * X[ci, t + k*dil - pad]
-// (zero outside [0,T)). f32 throughout; summation order differs from the per-tap GEMM path
-// (approximately lossless, not bitwise). Tile: 64 out-channels x 128 time steps, 128 threads, each
-// 8 channels x 8 time steps (time interleaved by 16 -> conflict-free smem reads, coalesced stores).
+// ---- Strided f32 conv1d (the generator's noise convs, stride 6, and the F0/N downsampling conv,
+// stride 2): implicit GEMM, all taps accumulated in registers (output written once).
+// Y[co,o] = b[co] + sum_k sum_ci W[ci][k][co] * X[ci, o*stride + k*dil - pad] (zero outside [0,T)).
+// Tile: 64 out-channels x 128 outputs, 128 threads, each 8 channels x 8 outputs (interleaved by 16).
 #define IG_BM 64
 #define IG_BN 128
-#ifndef IG_BK
 #define IG_BK 4
-#endif
-// STRIDED: input length T, output length Tout, output o reads x[o*stride + k*dil - pad]
-// (non-strided instantiations compile to exactly the previous code: stride 1, Tout == T).
-template <bool RES, bool STRIDED>
-__device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, const float* __restrict__ w,
-                                                  const float* __restrict__ b, float* __restrict__ y,
-                                                  int Cin, int T, int Cout, int K, int dil, int pad,
-                                                  int stride_, int Tout_) {
+extern "C" __global__ void __launch_bounds__(128) conv1d_strided(const float* __restrict__ x, const float* __restrict__ w,
+                                                                 const float* __restrict__ b, float* __restrict__ y,
+                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                 int stride, int Tout) {
     extern __shared__ float smem[];
-    const int stride = STRIDED ? stride_ : 1;
-    const int Tout = STRIDED ? Tout_ : T;
-    const int xw = STRIDED ? (IG_BN - 1) * stride + (K - 1) * dil + 1 : IG_BN + (K - 1) * dil;
+    const int xw = (IG_BN - 1) * stride + (K - 1) * dil + 1;
     float* xs = smem;                   // [IG_BK][xw]
     float* ws = smem + IG_BK * xw;      // [IG_BK][K][IG_BM]
     const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
@@ -853,7 +760,7 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
 #pragma unroll
                 for (int i = 0; i < 8; i++)
 #pragma unroll
-                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], bv[j], acc[i][j]);  // explicit FMA, like the cuBLAS path it replaces
+                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], bv[j], acc[i][j]);  // explicit FMA
             }
         }
     }
@@ -868,168 +775,19 @@ __device__ __forceinline__ void conv1d_igemm_body(const float* __restrict__ x, c
             if (t < Tout) {
                 long o = (long)co * Tout + t;
                 float v = acc[i][j] + bias;
-                if (RES) y[o] = y[o] + v;  // residual in place: same order as add_inplace(res, conv)
-                else y[o] = v;
+                y[o] = v;
             }
         }
     }
 }
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm(const float* __restrict__ x, const float* __restrict__ w,
-                                                               const float* __restrict__ b, float* __restrict__ y,
-                                                               int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<false, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
-}
-// LEVER PL-012: strided variant (e.g. the generator's noise conv, stride 6).
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_s(const float* __restrict__ x, const float* __restrict__ w,
-                                                                 const float* __restrict__ b, float* __restrict__ y,
-                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                 int stride, int Tout) {
-    conv1d_igemm_body<false, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, stride, Tout);
-}
-// LEVER PL-009: residual epilogue variant (y += conv), same order as add_inplace(res, conv).
-extern "C" __global__ void __launch_bounds__(128) conv1d_igemm_res(const float* __restrict__ x, const float* __restrict__ w,
-                                                                   const float* __restrict__ b, float* __restrict__ y,
-                                                                   int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_igemm_body<true, false>(x, w, b, y, Cin, T, Cout, K, dil, pad, 1, T);
-}
 
-// LEVER PL-014 candidate: single-pass per-item channel statistics (sum and sum of squares in
-// double, one read of the segment instead of two). Approximately lossless: the variance is
-// E[x^2] - mean^2 in double instead of the mean of squared float deviations from the float mean.
-extern "C" __global__ void chan_stats_seg1(const float* x, int L, const int* seg_start, const int* seg_len,
-                                           float eps, float* mean_out, float* rstd_out, int C) {
-    __shared__ double sh[256];
-    __shared__ double sq[256];
-    int c = blockIdx.x, b = blockIdx.y;
-    const float* row = x + (long)c * L + seg_start[b];
-    int T = seg_len[b];
-    double s = 0.0, s2 = 0.0;
-    for (int t = threadIdx.x; t < T; t += blockDim.x) {
-        double v = (double)row[t];
-        s += v;
-        s2 += v * v;
-    }
-    sh[threadIdx.x] = s;
-    sq[threadIdx.x] = s2;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) {
-            sh[threadIdx.x] += sh[threadIdx.x + k];
-            sq[threadIdx.x] += sq[threadIdx.x + k];
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        double m = sh[0] / (double)T;
-        double var = sq[0] / (double)T - m * m;
-        if (var < 0.0) var = 0.0;
-        mean_out[b * C + c] = (float)m;
-        rstd_out[b * C + c] = 1.0f / sqrtf((float)var + eps);
-    }
-}
-
-// ---- LEVER PL-016 candidate: sliding-window fused conv, templated on (K, DIL) for the generator's
-// Snake-block convs. Thread = 8 out-channels x 8 CONTIGUOUS time steps; per input channel the thread
-// loads its window x[8tx .. 8tx + 8 + (K-1)DIL) once into registers and reuses it for all K taps.
-// Accumulation order per output is unchanged (input-channel-major, tap-minor) -> bitwise identical
-// to conv1d_igemm. smem row stride padded to a multiple of 4 floats.
-template <int K, int DIL, bool RES>
-__device__ __forceinline__ void conv1d_sw_body(const float* __restrict__ x, const float* __restrict__ w,
-                                               const float* __restrict__ b, float* __restrict__ y,
-                                               int Cin, int T, int Cout, int pad) {
-    constexpr int SPAN = 8 + (K - 1) * DIL;
-    constexpr int XW = ((IG_BN + (K - 1) * DIL) + 3) & ~3;
-    extern __shared__ float smem[];
-    float* xs = smem;                  // [IG_BK][XW]
-    float* ws = smem + IG_BK * XW;     // [IG_BK][K][IG_BM]
-    const int t0 = blockIdx.x * IG_BN, co0 = blockIdx.y * IG_BM;
-    const int tx = threadIdx.x & 15, ty = threadIdx.x >> 4;
-    float acc[8][8];
-#pragma unroll
-    for (int i = 0; i < 8; i++)
-#pragma unroll
-        for (int j = 0; j < 8; j++) acc[i][j] = 0.0f;
-    for (int c0 = 0; c0 < Cin; c0 += IG_BK) {
-        __syncthreads();
-        for (int i = threadIdx.x; i < IG_BK * XW; i += 128) {
-            int c = i / XW, j = i - c * XW;
-            int ci = c0 + c, t = t0 - pad + j;
-            xs[i] = (ci < Cin && t >= 0 && t < T && j < IG_BN + (K - 1) * DIL) ? x[(long)ci * T + t] : 0.0f;
-        }
-        for (int i = threadIdx.x; i < IG_BK * K * IG_BM; i += 128) {
-            int co = i & (IG_BM - 1), ck = i >> 6;
-            int k = ck % K, c = ck / K;
-            int ci = c0 + c;
-            ws[i] = (ci < Cin && co0 + co < Cout) ? w[((long)ci * K + k) * Cout + co0 + co] : 0.0f;
-        }
-        __syncthreads();
-#pragma unroll 1
-        for (int c = 0; c < IG_BK; c++) {
-            float win[SPAN];
-            const float* xp = xs + c * XW + 8 * tx;
-#pragma unroll
-            for (int j = 0; j < SPAN; j++) win[j] = xp[j];
-#pragma unroll
-            for (int k = 0; k < K; k++) {
-                const float* wp = ws + (c * K + k) * IG_BM + ty * 8;
-                float a[8];
-#pragma unroll
-                for (int i = 0; i < 8; i++) a[i] = wp[i];
-#pragma unroll
-                for (int i = 0; i < 8; i++)
-#pragma unroll
-                    for (int j = 0; j < 8; j++) acc[i][j] = __fmaf_rn(a[i], win[k * DIL + j], acc[i][j]);
-            }
-        }
-    }
-#pragma unroll
-    for (int i = 0; i < 8; i++) {
-        int co = co0 + ty * 8 + i;
-        if (co >= Cout) continue;
-        float bias = b ? b[co] : 0.0f;
-#pragma unroll
-        for (int j = 0; j < 8; j++) {
-            int t = t0 + 8 * tx + j;
-            if (t < T) {
-                long o = (long)co * T + t;
-                float v = acc[i][j] + bias;
-                if (RES) y[o] = y[o] + v;
-                else y[o] = v;
-            }
-        }
-    }
-}
-#define SW_KERNEL(K, D)                                                                                        \
-    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_k##K##d##D(const float* __restrict__ x,     \
-        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
-        int Cout, int pad) { conv1d_sw_body<K, D, false>(x, w, b, y, Cin, T, Cout, pad); }                  \
-    extern "C" __global__ void __launch_bounds__(128) conv1d_sw_res_k##K##d##D(const float* __restrict__ x, \
-        const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int Cin, int T,    \
-        int Cout, int pad) { conv1d_sw_body<K, D, true>(x, w, b, y, Cin, T, Cout, pad); }
-SW_KERNEL(3, 1) SW_KERNEL(3, 3) SW_KERNEL(3, 5)
-SW_KERNEL(7, 1) SW_KERNEL(7, 3) SW_KERNEL(7, 5)
-SW_KERNEL(11, 1) SW_KERNEL(11, 3) SW_KERNEL(11, 5)
-
-// ======================= PHASE 2 (experiment/reduced-precision branch) =======================
-// Reduced-precision helpers. f32 [C][T] activations -> transposed low-precision [T][C] operands
-// (per-tap GEMM offsets then become multiples of C: aligned TN tensor-core GEMMs).
-#include <cuda_fp16.h>
+// ======================= BF16 tensor-core convolution (the accepted BF16x path) =======================
+// BF16 operands, f32 accumulation and output. f32 [C][T] activations are converted with
+// round-to-nearest-even (__float2bfloat16_rn).
 #include <cuda_bf16.h>
-extern "C" __global__ void lp_transpose_f16(const float* __restrict__ x, __half* __restrict__ y, int C, int T) {
-    __shared__ float tile[32][33];
-    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
-    for (int k = 0; k < 32; k += 8) {
-        int cc = c + k;
-        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
-    }
-    __syncthreads();
-    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
-    for (int k = 0; k < 32; k += 8) {
-        int t3 = tt + k;
-        if (t3 < T && c2 < C) y[(long)t3 * C + c2] = __float2half_rn(tile[threadIdx.x][threadIdx.y + k]);
-    }
-}
-extern "C" __global__ void lp_transpose_bf16(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, int C, int T) {
+#include <mma.h>
+// f32 [C][T] -> transposed BF16 [T][C] (per-tap GEMM offsets become multiples of C).
+extern "C" __global__ void bf16_transpose(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, int C, int T) {
     __shared__ float tile[32][33];
     int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
     for (int k = 0; k < 32; k += 8) {
@@ -1043,202 +801,15 @@ extern "C" __global__ void lp_transpose_bf16(const float* __restrict__ x, __nv_b
         if (t3 < T && c2 < C) y[(long)t3 * C + c2] = __float2bfloat16_rn(tile[threadIdx.x][threadIdx.y + k]);
     }
 }
-// Plain element-wise conversions (weights at load; row-major operands for linear layers).
-extern "C" __global__ void lp_cvt_f16(const float* __restrict__ x, __half* __restrict__ y, long n) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i < n) y[i] = __float2half_rn(x[i]);
-}
-extern "C" __global__ void lp_cvt_bf16(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, long n) {
+// Element-wise f32 -> BF16 (weights at load; row-major operands of the linear layers).
+extern "C" __global__ void bf16_convert(const float* __restrict__ x, __nv_bfloat16* __restrict__ y, long n) {
     long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
     if (i < n) y[i] = __float2bfloat16_rn(x[i]);
 }
-// |x| max over n elements into *out (one block per call; grid-stride; deterministic: fixed order
-// per thread + fixed tree).
-extern "C" __global__ void lp_absmax(const float* __restrict__ x, long n, float* __restrict__ out) {
-    __shared__ float sh[1024];
-    float m = 0.0f;
-    for (long i = threadIdx.x; i < n; i += blockDim.x) m = fmaxf(m, fabsf(x[i]));
-    sh[threadIdx.x] = m;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] = fmaxf(sh[threadIdx.x], sh[threadIdx.x + k]);
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) out[0] = sh[0];
-}
-// INT8 symmetric quantization with a device-resident per-tensor scale s = absmax/127 (s>0),
-// transposing [C][T] f32 -> [T][C] int8; values rounded to nearest, clamped to [-127, 127].
-extern "C" __global__ void lp_transpose_q8(const float* __restrict__ x, signed char* __restrict__ y, int C, int T,
-                                           const float* __restrict__ absmax) {
-    __shared__ float tile[32][33];
-    float am = absmax[0];
-    float inv = am > 0.0f ? 127.0f / am : 0.0f;
-    int t = blockIdx.x * 32 + threadIdx.x, c = blockIdx.y * 32 + threadIdx.y;
-    for (int k = 0; k < 32; k += 8) {
-        int cc = c + k;
-        tile[threadIdx.y + k][threadIdx.x] = (cc < C && t < T) ? x[(long)cc * T + t] : 0.0f;
-    }
-    __syncthreads();
-    int tt = blockIdx.x * 32 + threadIdx.y, c2 = blockIdx.y * 32 + threadIdx.x;
-    for (int k = 0; k < 32; k += 8) {
-        int t3 = tt + k;
-        if (t3 < T && c2 < C) {
-            float q = rintf(tile[threadIdx.x][threadIdx.y + k] * inv);
-            q = fminf(fmaxf(q, -127.0f), 127.0f);
-            y[(long)t3 * C + c2] = (signed char)q;
-        }
-    }
-}
-// y[co][t] = bias[co] + acc[co][t] * (absmax/127) * wscale[co]   (acc int32, row stride ldc)
-extern "C" __global__ void lp_dequant(const int* __restrict__ acc, int ldc, const float* __restrict__ wscale,
-                                      const float* __restrict__ absmax, const float* __restrict__ b,
-                                      float* __restrict__ y, int Cout, int T) {
-    long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (i >= (long)Cout * T) return;
-    int co = (int)(i / T), t = (int)(i - (long)co * T);
-    float sx = absmax[0] / 127.0f;
-    float v = (float)acc[(long)co * ldc + t] * (sx * wscale[co]);
-    y[i] = (b ? b[co] : 0.0f) + v;
-}
-
-// ---- PHASE 2: fused tensor-core (WMMA) conv1d, stride 1, any K / dil. Tile 64 out-ch x 64 time,
-// 4 warps (warp w: out-ch rows [16w, 16w+16), 4 accumulator fragments over time).
-// Input f32 [Cin][T] is converted on the fly into a TRANSPOSED smem window [TW][XLD] (time rows,
-// input-channel columns) so each tap's B operand is a row offset (32-byte aligned for any k*dil).
-// Weights: low-precision [K][Cout][Cin] staged per 16-channel chunk as [K][64][16].
-// HT = __half | __nv_bfloat16 (f32 accumulate) | signed char (int32 accumulate, dynamic per-tensor
-// activation scale *absmax/127, per-out-channel weight scale wscale[co]).
-#include <mma.h>
-template <typename HT> struct WmmaAcc { typedef float T; };
-template <> struct WmmaAcc<signed char> { typedef int T; };
-template <typename HT> __device__ __forceinline__ HT to_lp(float v, float inv);
-template <> __device__ __forceinline__ __half to_lp<__half>(float v, float) { return __float2half_rn(v); }
-template <> __device__ __forceinline__ __nv_bfloat16 to_lp<__nv_bfloat16>(float v, float) { return __float2bfloat16_rn(v); }
-template <> __device__ __forceinline__ signed char to_lp<signed char>(float v, float inv) {
-    float q = rintf(v * inv);
-    q = fminf(fmaxf(q, -127.0f), 127.0f);
-    return (signed char)q;
-}
-#ifndef WMMA_TN
-#define WMMA_TN 64
-#endif
-template <typename HT, bool RES = false>
-__device__ __forceinline__ void conv1d_wmma_body(const float* __restrict__ x, const HT* __restrict__ w,
-                                                 const float* __restrict__ b, float* __restrict__ y,
-                                                 int Cin, int T, int Cout, int K, int dil, int pad,
-                                                 const float* __restrict__ absmax, const float* __restrict__ wscale) {
-    using namespace nvcuda;
-    typedef typename WmmaAcc<HT>::T AT;
-    constexpr int XLD = sizeof(HT) == 1 ? 32 : 16;  // smem row stride (elements): 32-byte rows
-    extern __shared__ __align__(128) unsigned char smem_raw[];
-    constexpr int TN = WMMA_TN, NF = TN / 16;
-    const int TW = TN + (K - 1) * dil;
-    HT* xs = (HT*)smem_raw;                    // [TW][XLD]
-    HT* ws = xs + TW * XLD;                    // [K][64][16]
-    const int t0 = blockIdx.x * TN, co0 = blockIdx.y * 64, warp = threadIdx.x >> 5;
-    float inv = 0.0f;
-    if (absmax) {
-        float am = absmax[0];
-        inv = am > 0.0f ? 127.0f / am : 0.0f;
-    }
-    wmma::fragment<wmma::accumulator, 16, 16, 16, AT> acc[NF];
-#pragma unroll
-    for (int f = 0; f < NF; f++) wmma::fill_fragment(acc[f], (AT)0);
-    for (int c0 = 0; c0 < Cin; c0 += 16) {
-        __syncthreads();
-        for (int i = threadIdx.x; i < 16 * TW; i += 128) {
-            int ci = i / TW, tt = i - ci * TW;
-            int t = t0 - pad + tt;
-            float v = (c0 + ci < Cin && t >= 0 && t < T) ? x[(long)(c0 + ci) * T + t] : 0.0f;
-            xs[tt * XLD + ci] = to_lp<HT>(v, inv);
-        }
-        for (int i = threadIdx.x; i < K * 64 * 16; i += 128) {
-            int ci = i & 15, co = (i >> 4) & 63, k = i >> 10;
-            ws[i] = (co0 + co < Cout && c0 + ci < Cin) ? w[((long)k * Cout + co0 + co) * Cin + c0 + ci] : (HT)0;
-        }
-        __syncthreads();
-        for (int k = 0; k < K; k++) {
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, HT, wmma::row_major> a;
-            wmma::load_matrix_sync(a, ws + (k * 64 + warp * 16) * 16, 16);
-#pragma unroll
-            for (int f = 0; f < NF; f++) {
-                wmma::fragment<wmma::matrix_b, 16, 16, 16, HT, wmma::col_major> bf;
-                wmma::load_matrix_sync(bf, xs + (f * 16 + k * dil) * XLD, XLD);
-                wmma::mma_sync(acc[f], a, bf, acc[f]);
-            }
-        }
-    }
-    __syncthreads();
-    AT* cs = (AT*)smem_raw;  // [64][TN] staging (reuses the operand smem)
-#pragma unroll
-    for (int f = 0; f < NF; f++) wmma::store_matrix_sync(cs + (warp * 16) * TN + f * 16, acc[f], TN, wmma::mem_row_major);
-    __syncthreads();
-    float sx = absmax ? absmax[0] / 127.0f : 1.0f;
-    for (int i = threadIdx.x; i < 64 * TN; i += 128) {
-        int co = co0 + i / TN, t = t0 + i % TN;
-        if (co < Cout && t < T) {
-            float v = sizeof(HT) == 1 ? (float)cs[i] * (sx * wscale[co]) : (float)cs[i];
-            long o = (long)co * T + t;
-            float r = (b ? b[co] : 0.0f) + v;
-            if (RES) y[o] = y[o] + r;  // residual in place (y already holds the residual branch input)
-            else y[o] = r;
-        }
-    }
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_f16(const float* x, const __half* w, const float* b, float* y,
-                                                                  int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma_body<__half>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_bf16(const float* x, const __nv_bfloat16* w, const float* b, float* y,
-                                                                   int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma_body<__nv_bfloat16>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_s8(const float* x, const signed char* w, const float* b, float* y,
-                                                                 int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                 const float* absmax, const float* wscale) {
-    conv1d_wmma_body<signed char>(x, w, b, y, Cin, T, Cout, K, dil, pad, absmax, wscale);
-}
-// Multi-block |x| max (out must be zeroed first): block maxima combined with atomicMax on the float
-// bit pattern (monotone for non-negative floats) -> deterministic result.
-extern "C" __global__ void lp_absmax_mb(const float* __restrict__ x, long n, float* __restrict__ out) {
-    __shared__ float sh[256];
-    float m = 0.0f;
-    for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < n; i += (long)gridDim.x * blockDim.x) m = fmaxf(m, fabsf(x[i]));
-    sh[threadIdx.x] = m;
-    __syncthreads();
-    for (int k = blockDim.x / 2; k > 0; k >>= 1) {
-        if (threadIdx.x < k) sh[threadIdx.x] = fmaxf(sh[threadIdx.x], sh[threadIdx.x + k]);
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) atomicMax((int*)out, __float_as_int(sh[0]));
-}
-
-// PHASE 2: residual-epilogue variants (y += conv), used by the Snake blocks (mask not needed: the
-// AdaIN output already has zero gaps).
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_f16_res(const float* x, const __half* w, const float* b, float* y,
-                                                                      int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma_body<__half, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_bf16_res(const float* x, const __nv_bfloat16* w, const float* b, float* y,
-                                                                       int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma_body<__nv_bfloat16, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, nullptr, nullptr);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma_s8_res(const float* x, const signed char* w, const float* b, float* y,
-                                                                     int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                     const float* absmax, const float* wscale) {
-    conv1d_wmma_body<signed char, true>(x, w, b, y, Cin, T, Cout, K, dil, pad, absmax, wscale);
-}
-
-// PHASE 2 lever P2-L2: second-generation fused tensor-core conv (half types only).
-// - A (weights) fragments are loaded straight from a pre-laid-out global buffer
-//   wa[cot][slice][k][64][16] (zero-padded partial tiles), so weights are never staged in smem.
-// - The input window is staged 32 channels (2 slices) per __syncthreads pair.
-// - 4 warps as 2 (co) x 2 (t): each warp computes 32 co x 64 t (2 x 4 fragments), so per tap it
-//   loads 2 A + 4 B fragments for 8 MMAs (v1: 1 + 8 for 8).
-// - Epilogue through a per-warp 16x16 float tile (4 KB total instead of v1's 32 KB block staging).
-// f32 accumulate, same operand rounding as v1; accumulation order differs.
-extern "C" __global__ void lp_layout_a(const unsigned short* __restrict__ w, unsigned short* __restrict__ wa,
-                                       int Cin, int Cout, int K, long n) {
+// BF16 weights [K][Cout][Cin] -> the fused kernel's A-fragment layout wa[cot][slice][k][64][16]
+// (64-channel output tiles, 16-channel input slices; zero-padded partial tiles).
+extern "C" __global__ void bf16_layout_a(const unsigned short* __restrict__ w, unsigned short* __restrict__ wa,
+                                         int Cin, int Cout, int K, long n) {
     const int ns = (Cin + 15) / 16;
     for (long i = blockIdx.x * (long)blockDim.x + threadIdx.x; i < n; i += (long)gridDim.x * blockDim.x) {
         int col = i & 15, row = (i >> 4) & 63;
@@ -1251,29 +822,36 @@ extern "C" __global__ void lp_layout_a(const unsigned short* __restrict__ w, uns
         wa[i] = (co < Cout && ci < Cin) ? w[((long)k * Cout + co) * Cin + ci] : (unsigned short)0;
     }
 }
-// CW = warps along co (2: block = 64 co x 128 t, 128 threads; 4: block = 128 co x 128 t, 256 threads)
-// Optional prologue (P2-L4, `pro` non-null): the input is the RAW AdaIN input; staging applies AdaIN
-// + Snake with exactly adain_apply_seg's float expression (act 2), gaps (col_item < 0) -> 0.
+// Fused tensor-core conv1d, stride 1, same-length output, any K / dil (Cout % 64 == 0, Cin % 16 == 0).
+// - Block = 128 output channels x 128 time steps, 8 warps as 4 (co) x 2 (t); each warp computes
+//   32 co x 64 t (2 x 4 accumulator fragments).
+// - A (weight) fragments load straight from the pre-laid-out global buffer wa.
+// - The input window [TW][XLD] is staged 32 channels (2 slices) per __syncthreads pair, converted
+//   to BF16 and transposed (time rows, channel columns; each tap's B operand is a row offset).
+// - Epilogue through a per-warp 16x16 f32 tile.
+// - Optional AdaIN + Snake prologue (`pro` non-null): the input is the RAW AdaIN input and staging
+//   applies exactly adain_apply_seg's float expression (Snake activation); gap columns
+//   (col_item < 0) -> 0.
 struct AdainPro {
     const int* col_item;
     const float *mean, *rstd, *nw, *nb, *gb, *alpha;
 };
-template <typename HT, bool RES, int CW>
-__device__ __forceinline__ void conv1d_wmma2_body(const float* __restrict__ x, const HT* __restrict__ wa,
-                                                  const float* __restrict__ b, float* __restrict__ y,
-                                                  int Cin, int T, int Cout, int K, int dil, int pad,
-                                                  const AdainPro* pro = nullptr) {
+template <bool RES>
+__device__ __forceinline__ void conv1d_wmma_bf16_body(const float* __restrict__ x, const __nv_bfloat16* __restrict__ wa,
+                                                      const float* __restrict__ b, float* __restrict__ y,
+                                                      int Cin, int T, int Cout, int K, int dil, int pad,
+                                                      const AdainPro* pro = nullptr) {
     using namespace nvcuda;
     constexpr int TN = 128, XLD = 48;  // XLD * 2 bytes = 96: every row start stays 32-byte aligned
     extern __shared__ __align__(128) unsigned char smem_raw[];
     const int TW = TN + (K - 1) * dil;
-    HT* xs = (HT*)smem_raw;  // [TW][XLD], channels 0..31 of the current stage
-    float* stg = (float*)(smem_raw + (((size_t)TW * XLD * sizeof(HT) + 127) / 128) * 128);  // [2*CW warps][256]
-    constexpr int NT = 64 * CW;  // threads
+    __nv_bfloat16* xs = (__nv_bfloat16*)smem_raw;  // [TW][XLD], channels 0..31 of the current stage
+    float* stg = (float*)(smem_raw + (((size_t)TW * XLD * sizeof(__nv_bfloat16) + 127) / 128) * 128);  // [8 warps][256]
+    constexpr int NT = 256;  // threads
     const int t0 = blockIdx.x * TN, warp = threadIdx.x >> 5;
-    const int cot = blockIdx.y * (CW / 2) + ((warp >> 1) >> 1), co0 = cot * 64;  // this warp's 64-co tile
+    const int cot = blockIdx.y * 2 + ((warp >> 1) >> 1), co0 = cot * 64;  // this warp's 64-co tile
     const int lane = threadIdx.x & 31, wm = (warp >> 1) & 1, wn = warp & 1;
-    const bool live = co0 < Cout;  // CW = 4: the upper tile may not exist
+    const bool live = co0 < Cout;  // the upper 64-co tile may not exist
     const int ns = (Cin + 15) / 16;
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
 #pragma unroll
@@ -1300,19 +878,19 @@ __device__ __forceinline__ void conv1d_wmma2_body(const float* __restrict__ x, c
                     v = v + inv * (sn * sn);
                 }
             }
-            xs[tt * XLD + ci] = to_lp<HT>(v, 0.0f);
+            xs[tt * XLD + ci] = __float2bfloat16_rn(v);
         }
         __syncthreads();
         const int nj = live ? min(2, ns - s0) : 0;
         for (int j = 0; j < nj; j++) {
-            const HT* wbase = wa + ((long)(cot * ns + s0 + j) * K) * 1024 + (wm * 32) * 16;
+            const __nv_bfloat16* wbase = wa + ((long)(cot * ns + s0 + j) * K) * 1024 + (wm * 32) * 16;
             for (int k = 0; k < K; k++) {
-                wmma::fragment<wmma::matrix_a, 16, 16, 16, HT, wmma::row_major> a0, a1;
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a0, a1;
                 wmma::load_matrix_sync(a0, wbase + k * 1024, 16);
                 wmma::load_matrix_sync(a1, wbase + k * 1024 + 256, 16);
 #pragma unroll
                 for (int n = 0; n < 4; n++) {
-                    wmma::fragment<wmma::matrix_b, 16, 16, 16, HT, wmma::col_major> bf;
+                    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
                     wmma::load_matrix_sync(bf, xs + (wn * 64 + n * 16 + k * dil) * XLD + j * 16, XLD);
                     wmma::mma_sync(acc[0][n], a0, bf, acc[0][n]);
                     wmma::mma_sync(acc[1][n], a1, bf, acc[1][n]);
@@ -1340,73 +918,31 @@ __device__ __forceinline__ void conv1d_wmma2_body(const float* __restrict__ x, c
             __syncwarp();
         }
 }
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_f16(const float* x, const __half* wa, const float* b, float* y,
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__half, false, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
+    conv1d_wmma_bf16_body<false>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
 }
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16(const float* x, const __half* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__half, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_f16_res(const float* x, const __half* wa, const float* b, float* y,
-                                                                       int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__half, true, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_res(const float* x, const __half* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__half, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__nv_bfloat16, false, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__nv_bfloat16, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(128) conv1d_wmma2_bf16_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                        int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__nv_bfloat16, true, 2>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad) {
-    conv1d_wmma2_body<__nv_bfloat16, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_pro(const float* x, const __half* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                    const int* col_item, const float* mean, const float* rstd,
-                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16_snake(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                         int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                         const int* col_item, const float* mean, const float* rstd,
+                                                                         const float* nw, const float* nb, const float* gb, const float* alpha) {
     AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
-    conv1d_wmma2_body<__half, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+    conv1d_wmma_bf16_body<false>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
 }
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_f16_pro_res(const float* x, const __half* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                    const int* col_item, const float* mean, const float* rstd,
-                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
+// residual variant: y += conv(...), in the order add_inplace(y, conv) would use
+extern "C" __global__ void __launch_bounds__(256) conv1d_wmma_bf16_snake_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
+                                                                             int Cin, int T, int Cout, int K, int dil, int pad,
+                                                                             const int* col_item, const float* mean, const float* rstd,
+                                                                             const float* nw, const float* nb, const float* gb, const float* alpha) {
     AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
-    conv1d_wmma2_body<__half, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_pro(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                    const int* col_item, const float* mean, const float* rstd,
-                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
-    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
-    conv1d_wmma2_body<__nv_bfloat16, false, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
-}
-extern "C" __global__ void __launch_bounds__(256) conv1d_wmma2w_bf16_pro_res(const float* x, const __nv_bfloat16* wa, const float* b, float* y,
-                                                                    int Cin, int T, int Cout, int K, int dil, int pad,
-                                                                    const int* col_item, const float* mean, const float* rstd,
-                                                                    const float* nw, const float* nb, const float* gb, const float* alpha) {
-    AdainPro p{col_item, mean, rstd, nw, nb, gb, alpha};
-    conv1d_wmma2_body<__nv_bfloat16, true, 4>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
+    conv1d_wmma_bf16_body<true>(x, wa, b, y, Cin, T, Cout, K, dil, pad, &p);
 }
 
-// PHASE 2 lever P2-L5 (non-f32 levels only): chan_stats_seg1 is FP64-throughput-bound on GeForce
-// (1/64 rate). Per-thread partials are accumulated in float over values shifted by the segment's first
-// element (limits cancellation in E[x^2] - m^2), then combined across threads in double.
-// Approximately lossless (different rounding), not bitwise identical to chan_stats_seg1.
-extern "C" __global__ void chan_stats_seg1f(const float* x, int L, const int* seg_start, const int* seg_len,
-                                            float eps, float* mean_out, float* rstd_out, int C) {
+// Per-item channel statistics over segments (AdaIN): per-thread partial sums accumulated in float
+// over values shifted by the segment's first element (limits cancellation in E[x^2] - m^2), combined
+// across threads in double. One block per (channel, item).
+extern "C" __global__ void chan_stats_seg(const float* x, int L, const int* seg_start, const int* seg_len,
+                                          float eps, float* mean_out, float* rstd_out, int C) {
     __shared__ double sh[256];
     __shared__ double sq[256];
     int c = blockIdx.x, b = blockIdx.y;
