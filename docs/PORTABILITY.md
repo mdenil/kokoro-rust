@@ -6,8 +6,8 @@
 | OS / CPU | Linux x86_64 (Ubuntu) | other platforms unverified |
 | GPU | NVIDIA RTX 4090, compute capability 8.9 | the kernels are PTX for compute_89. Older devices are refused at startup; newer ones may JIT the PTX but are **unverified**, and a warning is printed |
 | CUDA | toolkit 12.9 (nvcc at build, cuBLAS at run time), driver 580 | |
-| Numerics | the accepted BF16x configuration only (strict `-fmad=false`) | fixed; not configurable |
-| Language | American English (misaki 0.9.4 + spaCy en_core_web_sm 3.8.0 + espeak-ng 1.52.0 fallback) | |
+| Numerics | the BF16x configuration only, kernels with FMA contraction (`-fmad=true`) | fixed; not configurable |
+| Language | American English (misaki 0.9.4 + spaCy en_core_web_sm 3.8.0 + system eSpeak NG fallback) | tested with eSpeak NG 1.51 (Ubuntu 24.04 package) and 1.52.0; other versions ≥ 1.49 load, and may pronounce fallback words differently |
 
 Nothing here extends that scope; untested GPUs, drivers and platforms remain unverified.
 
@@ -22,7 +22,7 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
   4. `nvcc` on `PATH`;
   5. `/usr/local/cuda/bin/nvcc` (the toolkit's default prefix).
   A missing nvcc is a build error that says so. The compile flags are fixed
-  (`-arch=compute_89 -fmad=false -O3`).
+  (`-arch=compute_89 -fmad=true -O3`).
 - Local, untracked build settings (for example `jobs`) may go in `.cargo/config.toml`, which is
   gitignored. Public commands never depend on it.
 
@@ -30,15 +30,20 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
 | setting | option | environment | default |
 |---|---|---|---|
 | model snapshot (config.json, kokoro-v1_0.pth, voices/) | `--model-dir` | `KOKORO_MODEL_DIR` | none (required) |
-| frontend data (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/, espeak-ng-1.52.0/) | `--frontend-dir` | `KOKORO_FRONTEND_DIR` | none (required for text input) |
-| libespeak-ng 1.52.0 | `--espeak-lib` | | `<frontend-dir>/espeak-ng-1.52.0/libespeak-ng.so.1.52.0` |
+| frontend data (misaki-0.9.4/, spacy-en_core_web_sm-3.8.0/) | `--frontend-dir` | `KOKORO_FRONTEND_DIR` | none (required for text input) |
+| eSpeak NG library (required for text input) | `--espeak-lib` | `KOKORO_ESPEAK_LIB` | the system `libespeak-ng.so.1`, found by the dynamic loader (Debian/Ubuntu: `sudo apt install libespeak-ng1`) |
+| eSpeak NG data (directory containing `espeak-ng-data/`) | `--espeak-data` | `KOKORO_ESPEAK_DATA` | the library's own data location (the library also honours `ESPEAK_DATA_PATH`) |
 | GPU | `--cuda-device N` (index among visible devices) | `CUDA_VISIBLE_DEVICES` (driver) | device 0 of the visible set |
 | ffmpeg (only with `--encode`) | | `PATH` | |
 
-- Missing or incomplete model/frontend directories, an unavailable or unsupported GPU, and missing
-  input files fail with exit 2 and a message that names the option to fix.
+- Missing or incomplete model/frontend directories, a missing or unusable eSpeak NG (library, API
+  or data), an unavailable or unsupported GPU, and missing input files fail with exit 2 and a
+  message that names the option to fix.
+- The eSpeak NG version and the sha256 of the library file and of the en-us data it loaded are
+  part of the frontend identity: switching to another installation re-synthesizes instead of
+  reusing outputs. They are also recorded in `<stem>.manifest.json` (`espeak`).
 - Relative paths resolve against the working directory.
-- The binary reads no other environment variables, except two:
+- Apart from the variables in the table, the binary reads no environment variables, except two:
   - `KOKORO_PRECISION`, only to refuse values other than `bf16x`;
   - the test fault hook `KOKORO_BATCH_NEGCTL_NOMASK`.
 - No Python and no network at run time.
@@ -50,13 +55,14 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
 | `KOKORO_MODEL_DIR`, `KOKORO_FRONTEND_DIR` | optional overrides of the data-root defaults |
 | `CUDA_VISIBLE_DEVICES` | passed through unchanged to the binary under test; never forced |
 | `KOKORO_BIN` | optional binary under test (default: this crate's) |
-| `KOKORO_ESPEAK_NEGCTL_LIB` | optional non-pinned libespeak-ng for the refusal control (default: found in the standard system library dirs) |
+| `KOKORO_ESPEAK_REFERENCE_DIR` | the eSpeak NG 1.52.0 copy the Python reference ships (library + `espeak-ng-data/`), used by the tests that compare with the reference fixtures (default `<frontend dir>/espeak-ng-1.52.0`, staged by `scripts/stage_espeak.sh` from the reference environment) |
 
 - Scratch output goes to cargo's per-project `CARGO_TARGET_TMPDIR` (inside `target/`).
 - Host tools the tests need:
   - `strace` on PATH (execve audit);
   - `ffmpeg` on PATH (`--encode` test);
-  - a non-1.52 libespeak-ng (refusal negative control).
+  - the system eSpeak NG (`tests/frontend_system_espeak.rs`), plus the reference 1.52.0 copy above
+    for the reference comparisons.
   Each of these fails with an actionable message when absent.
 - A data root can be an "isolated view" of symlinks to the pinned asset directories, as used for the
   check below.

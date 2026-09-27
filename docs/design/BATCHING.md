@@ -6,8 +6,12 @@ Goal: many chunks per forward on the RTX 4090 without changing per-item semantic
   counts.
 - In the current BF16x product the predictor runs in BF16, so batch shape can change predicted
   durations on some lines.
-- Per-item outputs for fixed inputs and batching options are pinned byte for byte by
-  tests/bf16x_golden.rs instead.
+- For fixed inputs and batching options, outputs are reproducible byte for byte across runs
+  (tests/bf16x_regression.rs), as long as every batch fits in GPU memory.
+- When a batch runs out of GPU memory it is split in half, down to single items (a message is
+  printed to stderr). Because batch shape affects the BF16 predictor, a split can change the
+  audio and durations of the affected lines. Other GPU work competing for memory can therefore
+  make otherwise identical runs differ.
 
 ## Ragged layout with zero gaps (no padding-to-max)
 Items are concatenated along time with zero gaps. Two layouts:

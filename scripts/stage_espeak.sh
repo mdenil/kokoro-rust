@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Stage the pinned espeak-ng 1.52.0 shared library + data that the production reference uses
-# (bundled by espeakng_loader 0.2.4 in the pinned reference venv) under the data root, with a
-# sha256 manifest. The native frontend loads it at RUNTIME (dlopen) as an explicit external
-# dependency; espeak-ng is GPL-3.0-or-later and is NOT built into or shipped with this repo.
+# Developer/test only: copy the eSpeak NG 1.52.0 library + data that the Python reference uses
+# (bundled by espeakng_loader 0.2.4 in the reference venv) under the data root, with a sha256
+# manifest. The tests that compare with the reference fixtures load this copy explicitly
+# (tests/support/paths.rs); the product itself uses the system eSpeak NG. eSpeak NG is
+# GPL-3.0-or-later and is NOT built into or shipped with this repo.
 # usage: scripts/stage_espeak.sh [source espeakng_loader dir]
 set -euo pipefail
 source "$(dirname "$0")/env.sh"

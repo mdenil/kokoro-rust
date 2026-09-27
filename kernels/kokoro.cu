@@ -1,6 +1,7 @@
-// Kokoro-82M CUDA kernels (f32). Compiled with -fmad=false so elementwise arithmetic rounds
-// like the CPU path in src/ops.rs, src/nn.rs and src/vocoder.rs; explicit fmaf() appears only
-// where the CPU path itself uses mul_add (torch interpolation semantics).
+// Kokoro-82M CUDA kernels (f32 arithmetic unless stated; BF16 tensor-core convolutions at the end).
+// Compiled with -fmad=true: the compiler may contract a*b+c into a fused multiply-add (no other
+// fast-math options). Explicit fmaf()/__fmaf_rn() mark places where a fused multiply-add is part of
+// the reference semantics (torch interpolation) or of the kernel design.
 // Matrix products are done by cuBLAS in src/gpu.rs, not here.
 
 #include <cooperative_groups.h>

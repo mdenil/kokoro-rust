@@ -2,8 +2,8 @@
 //! strip -> split r'\n+' -> per segment misaki G2P (preprocess link features, spaCy tokenizer +
 //! tagger, feature alignment, fold_left, lexicon / number / espeak fallback) -> en_tokenize chunks.
 
-use super::espeak::Espeak;
-use super::g2p::{en_tokenize, g2p_tokens, Fallback};
+use super::espeak::{Espeak, EspeakSource};
+use super::g2p::{en_tokenize, g2p_tokens_unresolved, Fallback};
 use super::lexicon::Lexicon;
 use super::pystr;
 use super::spacy_tag::Tagger;
@@ -15,30 +15,23 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Where the frontend's external language data lives (all pinned, hashed into `ident`).
+/// Where the frontend's language data lives (hashed into `ident`); eSpeak NG is the system install
+/// unless overridden.
 #[derive(Clone, Debug)]
 pub struct FrontendPaths {
     /// misaki 0.9.4 lexicon JSONs (us_gold.json, us_silver.json, ...)
     pub lexicon_dir: PathBuf,
     /// exported en_core_web_sm 3.8.0 tokenizer/tagger data
     pub spacy_dir: PathBuf,
-    /// libespeak-ng 1.52.0 shared library
-    pub espeak_lib: PathBuf,
-    /// directory containing espeak-ng-data/
-    pub espeak_data: PathBuf,
+    /// eSpeak NG library and data (default: the system installation)
+    pub espeak: EspeakSource,
 }
 
 impl FrontendPaths {
-    /// Standard layout under one frontend data directory.
+    /// Standard layout under one frontend data directory, with the system eSpeak NG.
     pub fn under(frontend_dir: &Path) -> Self {
         let f = frontend_dir;
-        let es = f.join("espeak-ng-1.52.0");
-        Self {
-            lexicon_dir: f.join("misaki-0.9.4"),
-            spacy_dir: f.join("spacy-en_core_web_sm-3.8.0"),
-            espeak_lib: es.join("libespeak-ng.so.1.52.0"),
-            espeak_data: es,
-        }
+        Self { lexicon_dir: f.join("misaki-0.9.4"), spacy_dir: f.join("spacy-en_core_web_sm-3.8.0"), espeak: EspeakSource::default() }
     }
 }
 
@@ -189,12 +182,11 @@ impl EnglishFrontend {
         let lex = Lexicon::load(&p.lexicon_dir, false).context("misaki lexicon")?;
         let tok = Tokenizer::load(&p.spacy_dir).context("spaCy tokenizer data")?;
         let tagger = Tagger::load(&p.spacy_dir).context("spaCy tagger data")?;
-        let espeak = Espeak::get(&p.espeak_lib, &p.espeak_data).context("espeak-ng fallback")?;
+        let espeak = Espeak::get(&p.espeak).context("eSpeak NG (required for text input)")?;
         let mut h = Sha256::new();
         for (dir, files) in [
             (&p.lexicon_dir, &["us_gold.json", "us_silver.json"][..]),
             (&p.spacy_dir, &["tokenizer.json", "lookups.json", "base_norms.json", "symbols.json", "model_structure.json", "tagger_weights.safetensors"][..]),
-            (&p.espeak_data, &["MANIFEST.sha256"][..]),
         ] {
             for f in files {
                 let bytes = std::fs::read(dir.join(f)).with_context(|| format!("hashing {}", dir.join(f).display()))?;
@@ -204,14 +196,19 @@ impl EnglishFrontend {
         }
         let data_hash: String = h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect();
         let ident = format!(
-            "native misaki-0.9.4 en-us G2P (KPipeline lang a) + spaCy en_core_web_sm-3.8.0 tokenizer/tagger + espeak-ng {} fallback [data {data_hash}]",
-            espeak.version
+            "native misaki-0.9.4 en-us G2P (KPipeline lang a) + spaCy en_core_web_sm-3.8.0 tokenizer/tagger [data {data_hash}] + {} fallback",
+            espeak.describe()
         );
         Ok(Self { lex, tok, tagger, espeak, ident })
     }
 
     pub fn ident(&self) -> &str {
         &self.ident
+    }
+
+    /// The loaded eSpeak NG backend (version, library and data actually selected).
+    pub fn espeak(&self) -> &Espeak {
+        self.espeak
     }
 
     /// misaki G2P.__call__(text) -> (phonemes, tokens).
@@ -247,7 +244,12 @@ impl EnglishFrontend {
             }
         }
         let fb: &dyn Fallback = self.espeak;
-        g2p_tokens(&self.lex, mts, Some(fb), "")
+        let (ps, toks, missing) = g2p_tokens_unresolved(&self.lex, mts, Some(fb), "")?;
+        if !missing.is_empty() {
+            let list: Vec<String> = missing.iter().map(|w| format!("{w:?}")).collect();
+            bail!("unresolved word(s) {}: no pronunciation from the lexicon or eSpeak NG {} (the line is not synthesized rather than dropping words)", list.join(", "), self.espeak.version);
+        }
+        Ok((ps, toks))
     }
 
     /// KPipeline.__call__ text path for one input line: every non-empty (graphemes, phonemes) chunk,
