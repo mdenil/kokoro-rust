@@ -2,7 +2,30 @@
 
 Owner authority: #23 (HERMES_BRIEF.md) + HERMES_PRECISION_EXPLORATION_BRIEF.md.
 
-**Status of every non-f32 level: EXPERIMENTAL and UNREVIEWED.** Only Misha can accept audio quality.
+## OWNER DECISION (2026-09-27): BF16X SELECTED, presented quality ACCEPTED; INT8 REJECTED
+- **bf16x SELECTED; its presented quality ACCEPTED** (owner #25, Misha, 1553678159168151575): "Okay
+  BF16x confirmed. These are all indistinguishable to me."
+  - Basis: G1-G4 ladder listening plus focused B1-B5 comparisons against production Python.
+  - B1-B5 cases, public130: lines 52/af_heart, 1/af_heart, 11/am_adam (top 3 vs_reference spectral
+    scores over 266 cases); 42/am_adam and 64/af_heart (worst equal-total-duration per voice).
+  - Material: raw, unnormalized paired WAVs from the exact final binary phase2-9b39d48 (sha256
+    6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea, tree 9b39d48), hash/seal
+    verified.
+  - Per-case WAV hashes and metrics: `$KOKORO_DATA/evidence/listening/phase2-owner-decision/OWNER_DECISION.json`.
+  - bf16x's spectral distances to the Python reference on those five cases are 6.2–15.5 dB. They are
+    large mainly because of duration changes, which misalign the comparison. They stay recorded as
+    diagnostics; the difference is accepted and NOT to be re-escalated.
+- **INT8 REJECTED** (owner #24, 1553673730025197655): hiss/degradation in G3/G4.
+- PL-014 phase-1 pairs (G5/G6): no audible differences reported.
+- **Other levels** (tf32, tf32all, fp16, bf16, fp16x): heard in the ladder listening, not selected. No
+  acceptance is recorded for them.
+- **Unchanged:**
+  - The f32 baseline and all numerical diagnostics in this report are preserved.
+  - Nothing is merged, deployed or made default.
+  - Adopting bf16x beyond this branch is a further owner decision.
+
+**Status history:** until the decision above, every non-f32 level was EXPERIMENTAL and UNREVIEWED
+(the text below dates from then).
 - This branch is not merged and does not change any default on `main`.
 - The f32 control runs the phase-1 final code path (main 3dc5a35; byte comparisons of the branch f32
   output are limited to those stated below). Its preserved binaries are

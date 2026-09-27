@@ -275,3 +275,22 @@ Load the named skill. Inspect available toolchains/storage and public reference.
      memory, drift) plus a RAW listening pack (public passages, both voices, f32 control + Python
      reference, worst cases + held-out) with a manifest. No acceptance claims from metrics, no fake
      low-bit speed claims, private chapter never published.
+24. OWNER LISTENING — INT8 REJECTED (Misha, 1553673730025197655): after the phase-2 ladder listening
+   (G3/G4), INT8 is explicitly REJECTED for hiss/degradation. The G5/G6 PL-014 before/after pairs
+   (s03_moon/am_adam, s06_long/af_heart): no audible differences reported.
+25. OWNER FINAL LISTENING DECISION — BF16X SELECTED AND ACCEPTED (Misha, 1553678159168151575):
+   "Okay BF16x confirmed. These are all indistinguishable to me."
+   - BF16x is SELECTED and its presented quality ACCEPTED (not merely a leading/unreviewed candidate).
+   - Basis: G1-G4 ladder listening, then focused B1-B5 comparisons against production Python on
+     public130: lines 52/af_heart, 1/af_heart, 11/am_adam (top 3 vs_reference spectral scores over
+     266 cases); 42/am_adam and 64/af_heart (worst equal-total-duration per voice).
+   - Exact final binary sha256 6fde9d88990a8dc518ec1f366fb17db0869f7e7df5fc1fdea973ea0a371612ea,
+     tree 9b39d48 ($KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a).
+   - The owner verified the original raw paired WAVs (no normalization or other transformation) by
+     hash and seal.
+   - Provenance: $KOKORO_DATA/evidence/listening/phase2-owner-decision/OWNER_DECISION.json (per-case
+     WAV hashes).
+   - Preserve the f32 baseline and all numerical diagnostics. Do not re-escalate the accepted bf16x
+     differences.
+   - This records the decision only: NOT a new optimization campaign, public release, deployment or
+     automatic merge. Source and corpus protections unchanged.

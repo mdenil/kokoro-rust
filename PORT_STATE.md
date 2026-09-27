@@ -1,25 +1,30 @@
 # PORT_STATE — kokoro-rust   (read this first on any resume; then re-verify pins)
 
-## CURRENT PRIORITY (owner #21-#23, 2026-09-26): SPEED — PHASE 1 (approximately lossless, main) then PHASE 2 (lossy, separate branch)
-- Step 1 DONE: whole-system baseline (tree 6e306b7). Chapter Python / Rust: cold 2.74×, warm 2.63×.
-- Step 2 IN PROGRESS (phase 1, approximately lossless):
-  - levers PL-006..PL-015 kept; NE-004..NE-008 rejected or neutral (docs/PERF_LEDGER.md,
-    docs/NEGATIVE_EVIDENCE.md);
-  - checkpoint 1 (tree 69dcf43): chapter cold 6.90×, warm 6.64×; Alice 6.99× / 4.92×
-    (docs/PERFORMANCE_REPORT.md).
-- Step 2: perf ritual on the measured bottleneck (one lever at a time, regression + negative controls,
-  A/B, keep/revert). Continue across ALL meaningful bottlenecks until severely diminishing returns
-  (owner #22 stopping criterion); then report the best config, gains vs incumbent, tried/rejected
-  levers and residual opportunities. Never disturb other users' jobs; record contention.
-- Accepted and not to be reopened: batching (PL-003) and FMA (PL-005) audio variation (#14), DISC-003,
-  RB-1 bounds, and the strict baseline as the authoritative regression reference. NEW degradation
-  must be escalated.
-- PHASE 2 (owner #23, HERMES_PRECISION_EXPLORATION_BRIEF.md): LOSSY reduced-precision/quantization
-  ladder. It starts ONLY after phase 1 reaches the #22 stopping point, on a separate branch from a
-  verified phase-1 checkpoint (with a preserved baseline binary). Candidates are UNREVIEWED; there
-  are no per-candidate listening holds; functional checks still fail hard. Deliverables: the matrix
-  and a raw listening pack.
-- libespeak-ng 1.52 accepted (#19); ffmpeg approved (#18). The private corpus stays under /data only.
+## CURRENT STATE (owner #25, 2026-09-27): PHASE 2 DECIDED — BF16X SELECTED, presented quality ACCEPTED
+- Branch experiment/reduced-precision. Selected configuration: `--precision bf16x`
+  (KOKORO_PRECISION=bf16x) with kernel levers P2-L2..L5 at their defaults. Final binary
+  $KOKORO_DATA/bin/phase2-9b39d48-6fde9d88990a (sha256 6fde9d88…12ea), tree 9b39d48.
+- Owner #25 (1553678159168151575): BF16x SELECTED and its presented quality ACCEPTED.
+  - Basis: G1-G4 ladder listening plus B1-B5 focused comparisons vs production Python, on
+    hash-verified raw WAVs.
+  - Provenance: $KOKORO_DATA/evidence/listening/phase2-owner-decision/OWNER_DECISION.json.
+  - Accepted differences are not to be re-escalated.
+- Owner #24 (1553673730025197655): INT8 REJECTED (hiss/degradation). PL-014 pairs: no audible
+  difference.
+- Other levels (tf32, tf32all, fp16, bf16, fp16x): heard in ladder listening, not selected. No
+  acceptance is recorded for them.
+- bf16x measured (final matrix, private chapter; all arms cv ≤ 5%):
+  - warm 4.15 s = 1.80× vs the Rust f32 control (7.45 s) and 13.08× vs production Python (54.31 s);
+  - cold 5.81 s = 1.50× vs f32 (8.69 s) and 11.82× vs Python (68.71 s).
+  - Alice warm 0.97 s (1.74× vs f32; its Python ratio is provisional).
+- bf16x diagnostics (accepted; not to be re-escalated): public130 median spectral distance from f32
+  2.05 / 2.28 dB (af_heart / am_adam); durations change on 45 / 41 of 130 lines.
+- NOT done and NOT requested: merge into main, default change, deployment, release. main stays f32
+  (the phase-1 engine frozen at 3dc5a35, plus docs), and the f32 baseline binaries are preserved.
+- Full phase-2 report: docs/PHASE2_PRECISION.md. Phase-1 speed history: main
+  docs/PERFORMANCE_REPORT.md.
+- Standing: batching/FMA variation accepted (#14); private corpus stays under /data only;
+  libespeak-ng 1.52 (#19) and ffmpeg (#18) approved.
 
 ## Single-binary milestone closeout (2026-09-26; HISTORICAL — superseded by the owner's speed authorization #21)
 - Execution logs: /data/mdenil/code/kokoro-rust/evidence/integrated-runs/20260926/ (README + SHA256SUMS).
