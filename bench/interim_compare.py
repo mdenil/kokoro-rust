@@ -7,7 +7,7 @@ summarized away. Run under scripts/env.sh with CUDA_VISIBLE_DEVICES=0.
 Scopes:
   core   warm pure inference over the frozen 69 production phoneme chunks (full warmup pass, then
          3 timed in-process passes, CUDA-synchronized): ref-prod (cuDNN TF32 on = production),
-         ref-f32 (TF32 off, matched precision, NOT production), rust (native CUDA, full f32).
+         ref-f32 (TF32 off, matched precision, NOT production), rust (native CUDA, BF16x).
   cold   fresh process text -> WAV over the 65 corpus lines: ref (import+load+KPipeline+soundfile),
          rust-text (CLI + DEV-ONLY Python misaki bridge), rust-phon (CLI, native, 69 phoneme lines).
   bridge Python frontend bridge alone (startup + G2P of the 65 lines).
@@ -117,7 +117,7 @@ def main():
         engines = {
             "core/ref-prod": lambda k, v=voice: [PY, str(HERE / "bench_reference.py"), "--device", "cuda", "--threads", "8", "--reps", "3", "--scopes", "inference", "--chunks", str(CHUNKS), "--voice", v, "--out", str(out / f"core-ref-prod-{v}-r{k}")],
             "core/ref-f32": lambda k, v=voice: [PY, str(HERE / "bench_reference.py"), "--device", "cuda", "--threads", "8", "--reps", "3", "--scopes", "inference", "--chunks", str(CHUNKS), "--voice", v, "--no-tf32", "--out", str(out / f"core-ref-f32-{v}-r{k}")],
-            "core/rust": lambda k, v=voice: [str(RUST), "bench", "--device", "cuda", "--threads", "8", "--model-dir", str(SNAP), "--chunks", str(CHUNKS), "--voice", v, "--reps", "3", "--out", str(out / f"core-rust-{v}-r{k}.json")],
+            "core/rust": lambda k, v=voice: [str(RUST), "bench", "--model-dir", str(SNAP), "--chunks", str(CHUNKS), "--voice", v, "--reps", "3", "--out", str(out / f"core-rust-{v}-r{k}.json")],
         }
         names = list(engines)
         for k in range(reps):

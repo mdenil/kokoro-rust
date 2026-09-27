@@ -2,8 +2,9 @@
 
 Engines:
   py      ORIGINAL production Python as used (bench/system_reference.py; unchanged KPipeline per line)
-  rust    current native binary, default build (strict), default synth settings (batched)
-  rustfma current native binary, FMA build (owner-accepted #14), default synth settings
+  rust     the native binary under test (target/release/kokoro or $KOKORO_BIN_RUST), default settings
+  accepted the immutable owner-accepted BF16x artifact (owner #25; $KOKORO_BIN_ACCEPTED), run exactly
+           as accepted (KOKORO_PRECISION=bf16x, default settings): the pre/post reference
 Phases (separate, never mixed):
   cold    fresh process per replicate: startup + load + one pass; replicates interleaved across engines
   warm    one resident process per replicate: load, 1 untimed warm-up pass, P timed passes
@@ -30,7 +31,7 @@ DATA = pathlib.Path(os.environ.get("KOKORO_DATA", "/data/mdenil/code/kokoro-rust
 PY = os.environ.get("KOKORO_PY", str(DATA / "reference/venv-prod/bin/python"))
 SNAP = DATA / "hf/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987"
 BINS = {"rust": pathlib.Path(os.environ.get("KOKORO_BIN_RUST", ROOT / "target/release/kokoro")),
-        "rustfma": pathlib.Path(os.environ.get("KOKORO_BIN_RUSTFMA", ROOT / "target/release/kokoro-fma"))}
+        "accepted": pathlib.Path(os.environ.get("KOKORO_BIN_ACCEPTED", DATA / "bin/phase2-9b39d48-6fde9d88990a"))}
 
 
 def sha256_file(p):
@@ -135,7 +136,7 @@ def main():
     ap.add_argument("--cold-reps", type=int, default=3)
     ap.add_argument("--warm-reps", type=int, default=2)
     ap.add_argument("--warm-passes", type=int, default=3)
-    ap.add_argument("--engines", default="py,rust,rustfma")
+    ap.add_argument("--engines", default="py,rust")
     ap.add_argument("--phases", default="cold,warm,attr")
     args = ap.parse_args()
     out = pathlib.Path(args.out)
@@ -150,7 +151,7 @@ def main():
     dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"], capture_output=True, text=True).stdout.strip()
     ident = {"git": git, "git_dirty_tracked": dirty.splitlines(), "corpus": str(corpus), "corpus_sha256": sha256_file(corpus),
              "corpus_lines": corpus.read_text(encoding="utf-8").count("\n"), "voice": args.voice,
-             "binaries": {k: {"path": str(v), "sha256": sha256_file(v)} for k, v in BINS.items() if k in {e.split(":")[0] for e in engines}},
+             "binaries": {k: {"path": str(v), "sha256": sha256_file(v)} for k, v in BINS.items() if k in engines},
              "python": PY, "reference_script_sha256": sha256_file(HERE / "system_reference.py"),
              "args": vars(args), "started": time.strftime("%Y-%m-%d %H:%M:%S"), "host": os.uname().nodename,
              "nproc": os.cpu_count(), "host_start": host_state()}
@@ -158,21 +159,20 @@ def main():
 
     def env(engine=""):
         e = dict(os.environ)
-        # PHASE 2: "rust:<precision>" = the rust binary with KOKORO_PRECISION=<precision>
-        if ":" in engine:
-            e["KOKORO_PRECISION"] = engine.split(":", 1)[1]
+        # the accepted artifact selects its (accepted) numerical mode by environment
+        if engine == "accepted":
+            e["KOKORO_PRECISION"] = "bf16x"
         else:
             e.pop("KOKORO_PRECISION", None)
         e["CUDA_VISIBLE_DEVICES"] = "0"
         e["KOKORO_FRONTEND_DIR"] = str(DATA / "frontend")
-        e.pop("KOKORO_PROFILE", None)
         return e
 
     def cmd(engine, name, o, passes, attribute=False):
         if engine == "py":
             c = [PY, str(HERE / "system_reference.py"), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice, "--passes", str(passes)]
             return c + (["--attribute"] if attribute else [])
-        c = [str(BINS[engine.split(":")[0]]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
+        c = [str(BINS[engine]), "synth", "--model-dir", str(SNAP), "--input", str(corpus), "--out-dir", str(o), "--voice", args.voice,
              "--timeline", str(logs / f"{name}.timeline.json")]
         return c + (["--bench-passes", str(passes)] if passes else [])
 
