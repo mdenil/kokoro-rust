@@ -5,15 +5,11 @@ Native Rust + CUDA speech synthesis for [hexgrad/Kokoro-82M](https://huggingface
 text frontend (misaki 0.9.4 G2P, spaCy tokenizer/tagger and the espeak-ng fallback) is native;
 there is no Python at runtime.
 
-The model runs in the **BF16x** mixed-precision configuration, selected after a listening review
-(docs/HISTORY.md):
+The model runs in one mixed-precision configuration (BF16x):
 - BF16 tensor-core operands with f32 accumulation for the convolutions and linear layers;
 - f32 for LSTM recurrences, attention products, normalization and the source/STFT/iSTFT stages;
 - CUDA kernels compiled with FMA contraction (`-fmad=true`).
 This is the only numerical mode.
-
-Status: not released or published. No project license has been decided yet: the `license` field in
-Cargo.toml predates that decision.
 
 ## Requirements
 Tested scope: Linux x86_64, RTX 4090 (compute capability 8.9), CUDA 12.9, American English. Other
@@ -66,20 +62,7 @@ Other options, all operational (they do not change the numerical mode):
 `kokoro bench --model-dir <snapshot> --chunks <phonemes.jsonl>` times pure inference.
 
 ## Tests
-```
-KOKORO_DATA=/path/to/data cargo test --release -- --test-threads=2
-KOKORO_DATA=/path/to/data cargo test --release --test strict_reference_diff -- --ignored --nocapture   # diagnostic
-```
-- `tests/bf16x_regression.rs`: run-to-run reproducibility and negative controls.
-- `tests/strict_reference_diff.rs` (diagnostic): per-line differences from the earlier
-  strict-rounding (`-fmad=false`) build.
-- `tests/bf16x_reference.rs` pins the model inputs against the Python reference fixtures.
-- The frontend and CLI suites cover pronunciation fidelity, line mapping, resume, failure handling
-  and the Python-free process audit.
-Tests read their data root from `KOKORO_DATA` (required; outside Git). The GPU is the caller's
-`CUDA_VISIBLE_DEVICES` selection. They also need `strace` and `ffmpeg` on PATH, the system eSpeak
-NG, and, for the comparisons with the reference fixtures, the reference's eSpeak NG 1.52.0 copy
-(`KOKORO_ESPEAK_REFERENCE_DIR`). Details and optional overrides: docs/PORTABILITY.md.
+Running the test suite needs a separate test data directory; see docs/PORTABILITY.md.
 
 ## Documentation
 - docs/PORTABILITY.md: configuration, tested scope and test prerequisites.
@@ -87,5 +70,5 @@ NG, and, for the comparisons with the reference fixtures, the reference's eSpeak
 - docs/design/BATCHING.md: the batched inference layout.
 - docs/frontend/: the text frontend specification and coverage.
 - docs/truth-pack/: pinned upstream sources and hashes.
-- docs/HISTORY.md: how the product was reached (conformance, speed work, precision study).
+- docs/HISTORY.md: conformance checks against the reference, speed work and precision study.
 - bench/CORPUS.md: public benchmark and test corpora.
