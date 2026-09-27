@@ -5,7 +5,7 @@
 //!   otherwise) and every linear layer.
 //! - f32: the small/strided convolutions, LSTM recurrences, attention products, normalization and
 //!   statistics, source/STFT/iSTFT.
-//! Kernels: kernels/kokoro.cu, built with -fmad=false. The only `unsafe` in this module: kernel
+//! Kernels: kernels/kokoro.cu, built with -fmad=true (FMA contraction). The only `unsafe` in this module: kernel
 //! launches, uninitialized device allocations that are fully overwritten, and cuBLAS calls whose
 //! operand extents are bounds-checked first.
 
@@ -24,8 +24,9 @@ type Buf = CudaSlice<f32>;
 /// The embedded PTX (exposed for load-time probes).
 pub const PTX_SRC: &str = PTX;
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kokoro.ptx"));
-/// Kernel rounding mode of the accepted build (build.rs compiles with -fmad=false).
-pub const KERNEL_ROUNDING: &str = "strict(-fmad=false)";
+/// Kernel rounding mode of the build (build.rs compiles with -fmad=true: the compiler may contract
+/// multiply-adds into FMAs). Part of the engine identity and therefore of every resume key.
+pub const KERNEL_ROUNDING: &str = "fma(-fmad=true)";
 
 macro_rules! kernels {
     ($($name:ident),* $(,)?) => {

@@ -295,7 +295,7 @@ fn native_text_file_to_wavs_both_voices_python_free() {
 /// line is synthesized, mapped and pronounced exactly as with default batching. Waveforms and
 /// durations are NOT compared across batch compositions: in the accepted BF16x path the predictor
 /// runs in BF16 and its results depend on the batch shape (measured on the edge-case corpus: 11 of
-/// 65 lines change duration). tests/bf16x_golden.rs pins both compositions byte for byte.
+/// 65 lines change duration). tests/bf16x_regression.rs checks run-to-run reproducibility.
 #[test]
 fn one_item_per_batch_is_complete_and_mapped() {
     let corpus = corpus();

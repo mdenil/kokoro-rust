@@ -9,7 +9,7 @@ The model runs in the **BF16x** mixed-precision configuration, selected after a 
 (docs/HISTORY.md):
 - BF16 tensor-core operands with f32 accumulation for the convolutions and linear layers;
 - f32 for LSTM recurrences, attention products, normalization and the source/STFT/iSTFT stages;
-- kernels built with strict rounding (`-fmad=false`).
+- CUDA kernels compiled with FMA contraction (`-fmad=true`).
 This is the only numerical mode.
 
 Status: not released or published. No project license has been decided yet: the `license` field in
@@ -48,7 +48,9 @@ kokoro synth --model-dir <snapshot> --frontend-dir <frontend-data> \
 Other options, all operational (they do not change the numerical mode):
 - `--cuda-device`;
 - batching budget: `--batch-phonemes`, `--batch-items`, `--batch-window`, `--batch-first-window`.
-  A batch that fails (for example out of memory) is split down to single items automatically;
+  A batch that fails (for example out of memory) is split down to single items automatically.
+  Because batch shape affects the BF16 predictor, such a split can change the audio of those
+  lines, so outputs are byte-reproducible only when no split occurs (see docs/design/BATCHING.md);
 - `--input-format phonemes`;
 - `--seed`;
 - `--blank-lines`;
@@ -62,10 +64,11 @@ Other options, all operational (they do not change the numerical mode):
 ## Tests
 ```
 KOKORO_DATA=/path/to/data cargo test --release -- --test-threads=2
-KOKORO_DATA=/path/to/data cargo test --release --test bf16x_golden -- --include-ignored   # + optional private case (local data)
+KOKORO_DATA=/path/to/data cargo test --release --test strict_reference_diff -- --ignored --nocapture   # diagnostic
 ```
-- `tests/bf16x_golden.rs` checks, byte for byte, that the build reproduces the accepted BF16x
-  reference artifact on pinned public cases.
+- `tests/bf16x_regression.rs`: run-to-run reproducibility and negative controls.
+- `tests/strict_reference_diff.rs` (diagnostic): per-line differences from the earlier
+  strict-rounding (`-fmad=false`) build.
 - `tests/bf16x_reference.rs` pins the model inputs against the Python reference fixtures.
 - The frontend and CLI suites cover pronunciation fidelity, line mapping, resume, failure handling
   and the Python-free process audit.

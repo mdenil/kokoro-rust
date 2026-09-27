@@ -18,7 +18,7 @@ from explicit paths at runtime.
 | item | detail |
 |---|---|
 | `target/release/kokoro` | Rust, built `cargo build --release` (CUDA is always required; there is no CPU build). `ldd` shows only libc, libm and libgcc_s. The CUDA kernels are compiled to PTX at build time (nvcc 12.9, compute_89) and embedded in the binary (`include_str!`). They are JIT-loaded by the driver. |
-| build configuration | One configuration: the accepted BF16x build, kernels compiled with strict rounding (`-fmad=false`). Recorded in every sidecar as `cuda bf16x kernels=strict(-fmad=false)`. (Earlier f32/FMA and experimental precision builds were removed; see docs/HISTORY.md.) |
+| build configuration | One configuration: the BF16x build, kernels compiled with FMA contraction (`-fmad=true`). Recorded in every sidecar as `cuda bf16x kernels=fma(-fmad=true)`. (Earlier f32/FMA and experimental precision builds were removed; see docs/HISTORY.md.) |
 
 ## Native libraries loaded at runtime
 | library | how | version on this host | license / note |

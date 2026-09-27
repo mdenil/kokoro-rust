@@ -6,7 +6,7 @@
 | OS / CPU | Linux x86_64 (Ubuntu) | other platforms unverified |
 | GPU | NVIDIA RTX 4090, compute capability 8.9 | the kernels are PTX for compute_89. Older devices are refused at startup; newer ones may JIT the PTX but are **unverified**, and a warning is printed |
 | CUDA | toolkit 12.9 (nvcc at build, cuBLAS at run time), driver 580 | |
-| Numerics | the accepted BF16x configuration only (strict `-fmad=false`) | fixed; not configurable |
+| Numerics | the BF16x configuration only, kernels with FMA contraction (`-fmad=true`) | fixed; not configurable |
 | Language | American English (misaki 0.9.4 + spaCy en_core_web_sm 3.8.0 + espeak-ng 1.52.0 fallback) | |
 
 Nothing here extends that scope; untested GPUs, drivers and platforms remain unverified.
@@ -22,7 +22,7 @@ Nothing here extends that scope; untested GPUs, drivers and platforms remain unv
   4. `nvcc` on `PATH`;
   5. `/usr/local/cuda/bin/nvcc` (the toolkit's default prefix).
   A missing nvcc is a build error that says so. The compile flags are fixed
-  (`-arch=compute_89 -fmad=false -O3`).
+  (`-arch=compute_89 -fmad=true -O3`).
 - Local, untracked build settings (for example `jobs`) may go in `.cargo/config.toml`, which is
   gitignored. Public commands never depend on it.
 
