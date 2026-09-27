@@ -9,7 +9,7 @@
     (69.48 → 8.79 s), warm 7.13× (52.28 → 7.33 s).
   - Alice warm 4.76× is provisional (Python cv 10.1%).
   - Phase-1 binaries preserved: $KOKORO_DATA/bin/phase1-final-{strict,fma}-3dc5a35.
-- PHASE 2 DELIVERED (awaiting owner listening) on branch experiment/reduced-precision, head 537bcc4
+- PHASE 2 DELIVERED (awaiting owner listening) on branch experiment/reduced-precision, head 2f93a2c
   (worktree target/worktrees/phase2, from 3dc5a35). NOT merged; main code and defaults unchanged.
   Every non-f32 level is UNREVIEWED.
   - Ladder: f32 | tf32 | tf32all | fp16 | bf16 | fp16x | bf16x | int8. Full results, levers and

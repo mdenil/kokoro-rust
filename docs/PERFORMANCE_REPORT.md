@@ -111,7 +111,7 @@ Evidence that returns are severely diminishing (not an assumed roofline, not one
   experiment/reduced-precision.
 
 ## PHASE 2 (lossy, branch experiment/reduced-precision) — pointer only; nothing on main changes
-- Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS"; head 537bcc4). Receipts:
+- Results live on the branch in docs/PHASE2_PRECISION.md ("FINAL RESULTS"; head 2f93a2c). Receipts:
   `$KOKORO_DATA/evidence/phase2/RECEIPTS.json`.
 - Status: every non-f32 level is EXPERIMENTAL and UNREVIEWED. Adoption, merge or any default change
   is solely the owner's decision. The numbers below do not change the phase-1 headline above.
